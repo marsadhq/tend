@@ -1,0 +1,60 @@
+# Launch-day release pipeline for tend.
+#
+# This workflow is SEPARATE from ci.yml and DORMANT until a version tag is
+# pushed: ci.yml runs on every push/PR (gofmt/vet/build/test matrix), whereas
+# this workflow runs ONLY on `vX.Y.Z` tags and drives GoReleaser to build the
+# linux/amd64 + linux/arm64 binaries, publish the GitHub Release with archives
+# and checksums, and push multi-arch images to ghcr.io/marsadhq/tend.
+#
+# Trigger a release by pushing a tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Write release assets to the GitHub Release and push images to GHCR.
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Full history so GoReleaser's git-based changelog can see all commits.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      # QEMU provides the arm64 emulation buildx needs to assemble the arm64
+      # image manifest on an amd64 runner.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

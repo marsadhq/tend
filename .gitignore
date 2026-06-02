@@ -1,0 +1,7 @@
+.worktrees/
+
+# Build artifacts
+/bin/
+/dist/
+/tend
+

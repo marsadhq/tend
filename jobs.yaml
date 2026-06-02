@@ -1,0 +1,20 @@
+# A minimal tend config to get started. Apply it with:
+#
+#   tend sync jobs.yaml
+#
+# Then run `tend serve` and watch these tick over in the dashboard. For http
+# jobs, the other schedule types (cron, run_at), secrets, notification channels,
+# and heartbeats, see the fully commented jobs.example.yaml.
+
+jobs:
+  # Prints a line every minute: the quickest way to see runs show up.
+  - name: hello
+    type: shell
+    command: "echo Hello from tend"
+    interval_seconds: 60
+
+  # A simple HTTP check every couple of minutes (a non-2xx response fails it).
+  - name: example-ping
+    type: http
+    http_url: "https://example.com"
+    interval_seconds: 120

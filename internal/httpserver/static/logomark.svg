@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="tend logomark"><defs><filter id="g_3ddc84" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
+    <feGaussianBlur in="SourceAlpha" stdDeviation="2.2" result="b1"></feGaussianBlur>
+    <feFlood flood-color="#3ddc84" flood-opacity="0.85"></feFlood>
+    <feComposite in2="b1" operator="in" result="g1"></feComposite>
+    <feGaussianBlur in="SourceAlpha" stdDeviation="5.5" result="b2"></feGaussianBlur>
+    <feFlood flood-color="#3ddc84" flood-opacity="0.5"></feFlood>
+    <feComposite in2="b2" operator="in" result="g2"></feComposite>
+    <feMerge><feMergeNode in="g2"></feMergeNode><feMergeNode in="g1"></feMergeNode><feMergeNode in="SourceGraphic"></feMergeNode></feMerge>
+  </filter></defs><circle cx="50" cy="50" r="38" stroke="#8b97a4" stroke-width="3.72" fill="none" opacity="0.5"></circle><circle cx="50" cy="50" r="24" stroke="#8b97a4" stroke-width="1.56" fill="none" opacity="0.55"></circle><g filter="url(#g_3ddc84)"><path d="M32.16 16.45 A38 38 0 0 1 79.11 25.57" stroke="#3ddc84" stroke-width="6" fill="none" stroke-linecap="round"></path></g><g filter="url(#g_3ddc84)"><circle cx="50" cy="50" r="8.5" fill="#3ddc84"></circle></g></svg>

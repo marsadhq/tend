@@ -1,0 +1,13 @@
+# This directory exists so the GoReleaser release image can COPY an empty,
+# nonroot-owned /data into the distroless runtime (see Dockerfile.goreleaser):
+#   COPY --chown=nonroot:nonroot dockerassets/data /data
+#
+# distroless/static has no shell or adduser, so there is no `RUN mkdir`/`chown`
+# path available in a COPY-only image. Shipping this checked-in directory and
+# COPYing it with --chown=nonroot:nonroot gives uid 65532 ownership of /data,
+# so a volume mounted there is writable and the SQLite driver can create
+# /data/tend.db without privilege escalation.
+#
+# This mirrors the root Dockerfile's build-stage `mkdir -p /data` +
+# `COPY --chown=nonroot:nonroot /data /data` trick, adapted for the
+# COPY-prebuilt release image.

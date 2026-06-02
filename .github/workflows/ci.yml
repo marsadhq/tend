@@ -1,0 +1,82 @@
+# CI workflow for tend
+# Runs: gofmt check, go vet, go build, and the full test matrix (SQLite + Postgres) under -race.
+#
+# Note on CGO and -race:
+#   The Go race detector links the C race runtime and therefore requires CGO_ENABLED=1.
+#   On GitHub's ubuntu-latest runner, gcc is present and CGO_ENABLED defaults to 1, so
+#   'go test -race' works without any override. Do NOT set CGO_ENABLED=0 for the test
+#   steps; it would silently disable the race detector. A plain 'go build' step can use
+#   CGO_ENABLED=0 to produce a fully static binary, but here we leave the default to keep
+#   the build consistent with the test environment.
+#
+# Future: golangci-lint could be added as a non-blocking or separate job once a
+#   .golangci.yml config is established. It is intentionally omitted here to keep
+#   the required-green set to gofmt/vet/build/test only.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tend
+          POSTGRES_PASSWORD: tend
+          POSTGRES_DB: tend
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tend"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # Reads the Go version from go.mod so the workflow tracks the module's version
+          go-version-file: go.mod
+
+      # gofmt: fail if any file in cmd/ or internal/ is not gofmt-formatted.
+      # 'gofmt -l' prints unformatted files; we tee to stderr so the output is visible
+      # in the log, then the subshell exits 1 if anything was printed (! read succeeds
+      # when there is at least one line to read, i.e. something is unformatted).
+      - name: Check formatting (gofmt)
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # SQLite test run: TEND_TEST_PG is intentionally absent so store tests use SQLite.
+      - name: Test (SQLite, -race)
+        run: go test ./... -race -count=1
+
+      # Postgres test run: TEND_TEST_PG is set; store tests will connect to the service
+      # container above. The DSN creds (user/pass/db) must match the service env above.
+      - name: Test (Postgres, -race)
+        env:
+          TEND_TEST_PG: postgres://tend:tend@localhost:5432/tend?sslmode=disable
+        run: go test ./... -race -count=1

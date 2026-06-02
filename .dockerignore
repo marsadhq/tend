@@ -1,0 +1,22 @@
+# Version control
+.git
+
+# Build outputs (not needed in the build context)
+bin/
+dist/
+
+# SQLite databases and WAL files
+*.db
+*.db-shm
+*.db-wal
+
+# Local configuration / secrets: never bake into an image
+env.fish
+jobs.yaml
+*.yaml
+
+# Planning notes
+.planning/
+
+# Go test / build caches
+testdata/

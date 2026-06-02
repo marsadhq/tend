@@ -1,0 +1,72 @@
+{{define "content"}}
+<nav class="crumbs"><a href="/">Jobs</a> <span>/</span> <span>{{.Job.Name}}</span></nav>
+
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Job · {{.Job.Type}}</p>
+    <h1 class="page-title">{{.Job.Name}}</h1>
+  </div>
+  <div class="state-block">
+    {{if .Job.Enabled}}<span class="tag tag-on">enabled</span>
+    {{else}}<span class="tag tag-off">paused</span>{{end}}
+  </div>
+</section>
+
+<dl class="meta-grid">
+  <div class="meta-item">
+    <dt>Type</dt>
+    <dd class="cell-mono">{{.Job.Type}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Schedule</dt>
+    <dd class="cell-mono">{{.Job.Schedule}}</dd>
+  </div>
+  {{if .Job.Target}}
+  <div class="meta-item meta-wide">
+    <dt>Target</dt>
+    <dd class="cell-mono cell-clip">{{.Job.Target}}</dd>
+  </div>
+  {{end}}
+  <div class="meta-item">
+    <dt>Timeout</dt>
+    <dd class="cell-mono">{{.Job.Timeout}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Retries</dt>
+    <dd class="cell-mono">{{.Job.MaxRetries}}</dd>
+  </div>
+</dl>
+
+<section class="section">
+  <h2 class="section-title">Recent runs</h2>
+  {{if .Runs}}
+  <table class="grid-table">
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Status</th>
+        <th>Attempt</th>
+        <th>Exit</th>
+        <th class="col-status">Started</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Runs}}
+      <tr class="row-link" onclick="location.href='/runs/{{.ID}}'">
+        <td class="cell-name"><a href="/runs/{{.ID}}">#{{.ID}}</a></td>
+        <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
+        <td class="cell-mono">{{.Attempt}}</td>
+        <td class="cell-mono">{{.ExitCode}}</td>
+        <td class="col-status cell-mono cell-muted">{{.Started}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">
+    <p class="empty-title">No runs recorded</p>
+    <p class="empty-sub">This job has not executed yet.</p>
+  </div>
+  {{end}}
+</section>
+{{end}}

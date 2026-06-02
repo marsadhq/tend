@@ -1,0 +1,12 @@
+# Disable blank issues so reporters pick a template (and so security reports
+# are routed to the private advisory path below, not opened as public issues).
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/marsadhq/tend/security/advisories/new
+    about: >-
+      Do NOT open a public issue for security vulnerabilities. Use GitHub's
+      private vulnerability reporting (or the contact in SECURITY.md).
+  - name: Questions & discussion
+    url: https://github.com/marsadhq/tend/discussions
+    about: Ask questions or discuss usage, configuration, and ideas.

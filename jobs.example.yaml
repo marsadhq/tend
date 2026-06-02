@@ -1,0 +1,127 @@
+# tend example configuration.
+#
+# Copy this file, edit it for your environment, then apply it:
+#
+#   cp jobs.example.yaml jobs.yaml
+#   tend sync jobs.yaml
+#
+# `tend sync` is declarative and idempotent: this file is the source of truth,
+# so re-running it converges the store to match. By default any job in the
+# store but absent from the file is DISABLED (its run history is kept); pass
+# `tend sync -prune=false jobs.yaml` to leave absent jobs untouched instead.
+#
+# A few rules to keep in mind:
+#   * Each job sets at most one schedule: `cron`, `interval_seconds`, or a
+#     one-off `run_at`. Omit all three for a manual job you trigger yourself
+#     with `tend run <name>` (or POST /api/jobs/{id}/run).
+#   * Secrets are referenced as {{ secret.NAME }} and never written in plaintext
+#     here. Create them first:  printf 'value' | tend secret set NAME
+#     Channel-config secrets resolve at sync time; job `env` secrets at run time.
+#   * Notification channels require TEND_MASTER_KEY to be set (it encrypts the
+#     stored channel config). Delete any channels, rules, or jobs you do not use.
+
+jobs:
+  # Shell job on a cron schedule, with a timeout, retries, and a secret in env.
+  - name: nightly-db-backup
+    type: shell
+    command: "pg_dump -Fc mydb | restic backup --stdin --stdin-filename db.dump"
+    cron: "0 3 * * *"             # 03:00 every day (server time zone)
+    timeout_seconds: 1800         # kill the run if it exceeds 30 minutes
+    max_retries: 2                # retry up to twice on failure
+    env:                          # env is applied to shell jobs only
+      RESTIC_REPOSITORY: "s3:s3.amazonaws.com/my-bucket/tend"
+      RESTIC_PASSWORD: "{{ secret.restic_password }}"
+
+  # Shell job on a fixed interval.
+  - name: prune-old-logs
+    type: shell
+    command: "find /var/log/myapp -name '*.log' -mtime +14 -delete"
+    interval_seconds: 86400       # once every 24 hours
+
+  # HTTP health check. Any non-2xx response (or a timeout) marks the run failed,
+  # which can drive a run.failed alert via the rules below.
+  - name: api-health
+    type: http
+    http_url: "https://api.example.com/healthz"
+    http_method: GET              # default is GET
+    interval_seconds: 300         # every 5 minutes
+    timeout_seconds: 10
+
+  # HTTP POST with a body, with no schedule: trigger it on demand with
+  #   tend run deploy-hook
+  - name: deploy-hook
+    type: http
+    http_url: "https://ci.example.com/hooks/deploy"
+    http_method: POST
+    http_body: '{"service":"web","ref":"main"}'
+
+  # One-off job: runs once at the given RFC3339 time, then never again.
+  # Use a future timestamp (UTC "Z" or an explicit offset).
+  - name: scheduled-migration
+    type: shell
+    command: "/opt/myapp/bin/migrate --apply"
+    run_at: "2030-01-01T02:00:00Z"
+
+  # Defined but turned off. Flip `enabled` (or run `tend job enable weekly-report`)
+  # and re-sync to activate it.
+  - name: weekly-report
+    type: shell
+    command: "/opt/myapp/bin/email-weekly-report"
+    cron: "0 8 * * 1"             # Mondays at 08:00
+    enabled: false
+
+# Notification channels and the rules that route events to them. Channels need
+# TEND_MASTER_KEY set. Rules fire on the alertable events only: run.failed,
+# heartbeat.missed, and heartbeat.recovered. Set `job:` to scope a rule to a
+# single job; omit it to match all jobs. Keep only the channels you actually use.
+notifications:
+  channels:
+    - name: ops-slack
+      type: slack
+      config:
+        webhook_url: "{{ secret.slack_webhook_url }}"
+
+    - name: ops-discord
+      type: discord
+      config:
+        webhook_url: "{{ secret.discord_webhook_url }}"
+
+    - name: raw-webhook
+      type: webhook
+      config:
+        url: "{{ secret.ops_webhook_url }}"
+
+    - name: oncall-email
+      type: smtp
+      config:
+        host: "smtp.example.com"
+        port: 587
+        username: "alerts@example.com"
+        password: "{{ secret.smtp_password }}"
+        from: "tend <alerts@example.com>"
+        to:
+          - "oncall@example.com"
+          - "ops@example.com"
+
+  rules:
+    # Send every failure and heartbeat transition to Slack.
+    - channel: ops-slack
+      events: [run.failed, heartbeat.missed, heartbeat.recovered]
+
+    # Escalate failures of the critical backup job to email as well.
+    - channel: oncall-email
+      events: [run.failed]
+      job: nightly-db-backup
+
+# Dead-man's-switch heartbeats for work tend does NOT run itself (an external
+# cron, a backup on another host, etc.). Tend emits heartbeat.missed if no ping
+# arrives within period + grace. `tend heartbeat add` prints the ping URL
+# (<TEND_BASE_URL>/ping/<token>); have the external job GET or POST it on success.
+heartbeats:
+  - name: offsite-backup
+    period_seconds: 86400         # expect a ping every 24 hours
+    grace_seconds: 3600           # alert if none arrives within 24h + 1h
+
+  - name: external-cron
+    period_seconds: 3600          # hourly
+    grace_seconds: 300            # 5 minutes of slack before alerting

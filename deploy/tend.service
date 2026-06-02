@@ -1,0 +1,102 @@
+# tend.service: systemd unit for the tend job-runner
+#
+# INSTALL
+# -------
+# 1. Copy the binary:
+#      install -m 755 tend /usr/local/bin/tend
+#
+# 2. Create the environment file with the master key (and optionally other
+#    env vars).  The file must be readable only by root or the tend user:
+#      install -d -m 750 /etc/tend
+#      echo "TEND_MASTER_KEY=$(head -c 32 /dev/urandom | base64)" \
+#           > /etc/tend/tend.env
+#      chmod 640 /etc/tend/tend.env
+#
+# 3. Install + start the unit:
+#      install -m 644 tend.service /etc/systemd/system/tend.service
+#      systemctl daemon-reload
+#      systemctl enable --now tend
+#
+# ENV VARS (tend.env)
+# -------------------
+# TEND_MASTER_KEY=<base64 32 bytes>   # required for dashboard + secrets
+# TEND_ADDR=:8080                     # optional; default :8080
+# TEND_BASE_URL=https://tend.example.com  # optional
+#
+# DATA
+# ----
+# With DynamicUser=yes + StateDirectory=tend, systemd creates and persists
+# /var/lib/tend across restarts, owned by the ephemeral dynamic user.
+# TEND_DB points there so the SQLite database survives service restarts
+# even though the user ID may differ between runs.
+
+[Unit]
+Description=tend, cron-style job runner with dashboard
+Documentation=https://github.com/marsadhq/tend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tend serve
+
+# Environment file: the leading "-" makes it optional so that
+# `systemd-analyze verify` (and service start) do not fail if the file
+# has not been created yet.  TEND_MASTER_KEY and other tunables live here.
+EnvironmentFile=-/etc/tend/tend.env
+
+# Point TEND_DB at the StateDirectory so it persists across restarts.
+# StateDirectory (below) tells systemd to create+own /var/lib/tend.
+Environment=TEND_DB=/var/lib/tend/tend.db
+
+Restart=always
+RestartSec=5s
+
+# ---------------------------------------------------------------------------
+# Data persistence
+# ---------------------------------------------------------------------------
+# DynamicUser allocates an ephemeral UID per invocation but systemd ties the
+# StateDirectory to that service across restarts, so /var/lib/tend is stable.
+DynamicUser=yes
+StateDirectory=tend
+
+# ---------------------------------------------------------------------------
+# Hardening
+# ---------------------------------------------------------------------------
+NoNewPrivileges=true
+
+# ProtectSystem=strict makes the whole filesystem read-only except for
+# explicitly allowed paths.  The StateDirectory (/var/lib/tend) remains
+# writable because systemd bind-mounts it over the protected tree.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# Allow only IPv4, IPv6, and Unix-domain sockets (needed for SQLite locking
+# and the HTTP listener).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+RestrictNamespaces=true
+LockPersonality=true
+
+# MemoryDenyWriteExecute: Go's runtime uses mmap(PROT_WRITE|PROT_EXEC) for
+# the stack-growth signal trampoline on some architectures, which would be
+# blocked by this directive.  However, static Go binaries compiled with
+# CGO_ENABLED=0 (as in the tend Dockerfile/Makefile) do NOT use the JIT
+# path and are generally compatible with MDWE=true.  Keeping it enabled;
+# if a future go version or CGO build breaks, disable it here.
+MemoryDenyWriteExecute=true
+
+# Allow only syscalls in the @system-service set (a broad but safe set that
+# covers the go runtime, net/http, SQLite file I/O, etc.).
+SystemCallFilter=@system-service
+
+# tend binds to port 8080 (> 1023), so no capabilities are needed.
+# An empty CapabilityBoundingSet drops all capabilities from the bounding set.
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

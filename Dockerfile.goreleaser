@@ -1,0 +1,13 @@
+# Release image assembled by GoReleaser from the prebuilt static binary.
+# Mirrors the runtime contract of the root Dockerfile (which builds from source
+# for `docker build`); here GoReleaser supplies ./tend in the build context.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY tend /tend
+# /data must be writable by uid 65532 (nonroot) so a mounted volume is writable;
+# COPY an empty dir with nonroot ownership (no RUN, which keeps cross-arch builds emulation-free).
+COPY --chown=nonroot:nonroot dockerassets/data /data
+ENV TEND_DB=/data/tend.db
+VOLUME /data
+EXPOSE 8080
+ENTRYPOINT ["/tend"]
+CMD ["serve"]

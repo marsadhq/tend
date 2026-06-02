@@ -1,0 +1,34 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  <title>{{.Title}} · tend</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <div class="grid-bg" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/">
+      <img class="brand-mark" src="/static/logomark.svg" width="22" height="22" alt="">
+      <span class="brand-name">tend</span>
+      <span class="brand-tag">job runner</span>
+    </a>
+    <nav class="nav">
+      <a class="nav-link{{if eq .Active "jobs"}} is-active{{end}}" href="/">Jobs</a>
+      <a class="nav-link{{if eq .Active "heartbeats"}} is-active{{end}}" href="/heartbeats">Heartbeats</a>
+      <a class="nav-link{{if eq .Active "events"}} is-active{{end}}" href="/events">Events</a>
+    </nav>
+    <form class="logout" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit" class="btn-ghost">Sign out</button>
+    </form>
+  </header>
+  <main class="shell">
+    {{template "content" .}}
+  </main>
+</body>
+</html>{{end}}

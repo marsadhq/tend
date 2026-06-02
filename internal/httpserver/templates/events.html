@@ -1,0 +1,42 @@
+{{define "content"}}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Activity feed</p>
+    <h1 class="page-title">Events</h1>
+  </div>
+  <p class="count-chip">{{len .Events}} recent</p>
+</section>
+
+{{/* Events are newest-first. run.failed and heartbeat.* rows are flagged as
+     alerts (IsAlert) and get a left accent. The Payload is attacker-influenced
+     text (e.g. a heartbeat name) and is rendered through html/template
+     auto-escaping - never wrapped in template.HTML - so it can never become live
+     markup. */}}
+{{if .Events}}
+<table class="grid-table event-table">
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Source</th>
+      <th>Detail</th>
+      <th class="col-status">When</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Events}}
+    <tr class="{{if .IsAlert}}is-alert{{end}}">
+      <td><span class="pill {{.Class}}">{{.Type}}</span></td>
+      <td class="cell-mono cell-muted">{{.Source}}</td>
+      <td class="cell-mono cell-payload">{{.Payload}}</td>
+      <td class="col-status cell-mono cell-muted">{{.Created}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<div class="empty">
+  <p class="empty-title">No events yet</p>
+  <p class="empty-sub">Run failures and heartbeat alerts will surface here as they happen.</p>
+</div>
+{{end}}
+{{end}}

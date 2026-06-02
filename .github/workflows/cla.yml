@@ -1,0 +1,65 @@
+# CLA-assistant workflow for tend
+#
+# Requires contributors to sign CLA.md before their pull requests can be merged.
+# Signatures are stored in signatures/cla.json on the default branch.
+#
+# Setup note (one-time, before this workflow can run in production / M5):
+#   1. Create a Personal Access Token (PAT) with 'repo' scope for the repo owner account.
+#   2. Add it as a repository secret named PERSONAL_ACCESS_TOKEN.
+#      (GITHUB_TOKEN alone cannot push the signatures file back to the repo; the PAT is
+#       required for the write-back step.)
+#   3. The GITHUB_TOKEN secret is automatically provided by GitHub Actions and needs no
+#      setup.
+#
+# Security note:
+#   No untrusted input (PR title, body, comment body, etc.) is interpolated into shell
+#   run: commands. The contributor-assistant action handles the comment-body parsing
+#   internally; we pass only static strings and repository-managed secrets here.
+
+name: CLA Assistant
+
+on:
+  # Run when a PR is opened/reopened/synchronized, and when a comment is posted
+  # (allows re-checking after a contributor posts the sign-off comment).
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  # Read PR contents and write status checks / comments.
+  contents: write      # needed to push signatures/cla.json
+  pull-requests: write # needed to post the sign-off comment on PRs
+  statuses: write      # needed to set the CLA status check
+
+jobs:
+  cla-check:
+    name: CLA Check
+    # Only run for PR comments (issue_comment) if the comment contains the sign-off phrase,
+    # or always run for pull_request_target events.
+    if: |
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, 'recheck'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          # PAT is required so the action can push the signatures file back to the repo.
+          # See setup note above.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          # Path to the CLA document contributors are signing.
+          path-to-document: "https://github.com/marsadhq/tend/blob/master/CLA.md"
+
+          # Where to store signatures (committed to the repo on the default branch).
+          path-to-signatures: "signatures/cla.json"
+          branch: "master"
+
+          # The maintainer and common automation accounts are pre-allowed and do not
+          # need to sign the CLA themselves.
+          allowlist: "dquomsieh,dependabot[bot],github-actions[bot]"

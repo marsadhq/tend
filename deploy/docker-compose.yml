@@ -1,0 +1,98 @@
+# tend: docker-compose deployment
+#
+# Quick start (SQLite, dashboard enabled):
+#
+#   # Generate a master key once and store it:
+#   echo "TEND_MASTER_KEY=$(head -c 32 /dev/urandom | base64)" > .env
+#
+#   docker compose up -d
+#
+# The dashboard becomes available at http://localhost:8080/login
+# TEND_MASTER_KEY is REQUIRED for the dashboard + secrets subsystem.
+# Without it, serve starts in public-only mode ("dashboard off (no master key)").
+#
+# To change the host port, set TEND_PORT in your .env (or shell) before `up`:
+#   TEND_PORT=9090 docker compose up -d
+
+name: tend
+
+services:
+  tend:
+    # Build from the repo's own Dockerfile (compose file lives in deploy/,
+    # so the build context is the parent directory).
+    build:
+      context: ..
+      dockerfile: Dockerfile
+
+    # Restart policy: keeps the container up across host reboots and
+    # transient failures.  Remove or change to "no" for ephemeral/CI use.
+    restart: unless-stopped
+
+    ports:
+      # Host port 8080 → container port 8080.
+      # Override with: TEND_PORT=9090 docker compose up -d
+      - "${TEND_PORT:-8080}:8080"
+
+    environment:
+      # REQUIRED for the dashboard and secrets subsystem.
+      # Supply via a .env file in this directory:
+      #   TEND_MASTER_KEY=$(head -c 32 /dev/urandom | base64)
+      # If unset, tend runs in public-only mode (no dashboard, no /login).
+      TEND_MASTER_KEY: "${TEND_MASTER_KEY:-}"
+
+      # SQLite database path inside the container.
+      # Matches the image default; listed here for clarity.
+      # Switch to Postgres by uncommenting the postgres service below and
+      # changing this to the postgres:// DSN (see the commented block).
+      TEND_DB: "${TEND_DB:-/data/tend.db}"
+
+      # Listen address inside the container.  :8080 is the default.
+      # TEND_ADDR: "${TEND_ADDR:-:8080}"
+
+    volumes:
+      # Named volume for SQLite database persistence.
+      # The /data directory in the image is owned by uid 65532 (nonroot),
+      # so Docker inherits that ownership on first volume attachment,
+      # no chown step needed.
+      - tend_data:/data
+
+    # When using the Postgres scale-up path (see the commented block below),
+    # uncomment these two lines so tend starts after Postgres is up.
+    # Removing the leading "# " from each line yields valid YAML at this indent.
+    # depends_on:
+    #   - postgres
+
+    # Healthcheck: distroless/static ships no curl, wget, or shell, so a
+    # standard HTTP healthcheck cannot use those tools.  The tend binary itself
+    # does not expose a built-in healthcheck sub-command, so we skip this
+    # directive rather than add a footgun.  Use an external probe (e.g.
+    # Traefik's healthcheck, an uptime-kuma monitor, or docker inspect) if
+    # you need container-level health signalling.
+
+  # ---------------------------------------------------------------------------
+  # SCALE-UP PATH: Postgres backend
+  #
+  # Uncomment the block below to add a Postgres container, then:
+  #   1. Uncomment the `depends_on` stanza inside the `tend` service above.
+  #   2. Uncomment `tend_pg:` in the top-level `volumes:` block at the bottom.
+  #   3. Change TEND_DB above (or in .env) to the Postgres DSN:
+  #        TEND_DB=postgres://tend:tendpass@postgres:5432/tend?sslmode=disable
+  #   4. `docker compose up -d`
+  #
+  # postgres:
+  #   image: postgres:16
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: tend
+  #     POSTGRES_PASSWORD: tendpass
+  #     POSTGRES_DB: tend
+  #   volumes:
+  #     - tend_pg:/var/lib/postgresql/data
+  #   ports:
+  #     # Expose only to localhost; remove this entry in production.
+  #     - "127.0.0.1:5433:5432"
+  # ---------------------------------------------------------------------------
+
+volumes:
+  tend_data:
+  # tend_pg:   # uncomment when using the Postgres service above

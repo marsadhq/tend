@@ -1,0 +1,34 @@
+jobs:
+  - name: nightly-backup
+    type: shell
+    command: "restic backup /data"
+    cron: "0 3 * * *"
+    timeout_seconds: 1800
+    max_retries: 2
+    env:
+      RESTIC_REPOSITORY: "{{ secret.restic_repo }}"   # resolved from the secret store at run time
+  - name: health-poll
+    type: http
+    http_url: "https://example.com/health"
+    http_method: GET
+    interval_seconds: 300
+
+notifications:
+  channels:
+    - name: ops-slack
+      type: slack
+      config: { webhook_url: "{{ secret.slack_webhook }}" }
+    - name: db-oncall
+      type: webhook
+      config: { url: "{{ secret.pager_webhook }}" }
+  rules:
+    - channel: ops-slack
+      events: [run.failed, heartbeat.missed]   # all jobs (job_id 0, the default)
+    - channel: db-oncall
+      events: [run.failed]
+      job: nightly-backup                      # job-scoped: only this job's failures
+
+heartbeats:
+  - name: external-backup
+    period_seconds: 86400
+    grace_seconds: 3600

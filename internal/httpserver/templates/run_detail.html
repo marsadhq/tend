@@ -1,0 +1,41 @@
+{{define "content"}}
+<nav class="crumbs">
+  <a href="/">Jobs</a> <span>/</span>
+  <a href="/jobs/{{.Run.JobID}}">job #{{.Run.JobID}}</a> <span>/</span>
+  <span>run #{{.Run.ID}}</span>
+</nav>
+
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Run #{{.Run.ID}}</p>
+    <h1 class="page-title">Execution detail</h1>
+  </div>
+  <span class="pill pill-lg {{.Run.StatusClass}}">{{.Run.Status}}</span>
+</section>
+
+<dl class="meta-grid">
+  <div class="meta-item">
+    <dt>Attempt</dt>
+    <dd class="cell-mono">{{.Run.Attempt}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Exit code</dt>
+    <dd class="cell-mono">{{.Run.ExitCode}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Started</dt>
+    <dd class="cell-mono cell-muted">{{.Run.Started}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Ended</dt>
+    <dd class="cell-mono cell-muted">{{.Run.Ended}}</dd>
+  </div>
+</dl>
+
+<section class="section">
+  <h2 class="section-title">Output</h2>
+  {{/* {{.Run.Output}} is auto-escaped by html/template, so any markup in the
+       captured output is rendered inert text, never live HTML. */}}
+  <pre class="output">{{.Run.Output}}</pre>
+</section>
+{{end}}

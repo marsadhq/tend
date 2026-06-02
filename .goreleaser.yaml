@@ -1,0 +1,142 @@
+# GoReleaser configuration for tend (M5.1 launch-prep release pipeline).
+#
+# This is the launch-day release pipeline. It is DORMANT in normal development:
+# nothing here runs on push/PR. It is exercised only when a `vX.Y.Z` tag is
+# pushed (see .github/workflows/release.yml), or locally via
+# `goreleaser release --snapshot --clean` for a dry run.
+#
+# Reconciliation with merged M4:
+#   * Build flags mirror the Makefile `release` target exactly:
+#       CGO_ENABLED=0, -trimpath, -s -w, and the load-bearing ldflag
+#       -X github.com/marsadhq/tend/internal/cli.Version=<version>
+#     (M4 B1 removed the main.go const that shadowed this var, so the ldflag
+#      now actually injects into internal/cli.Version, which defaults to "dev").
+#   * The container image reuses the runtime contract of the root Dockerfile,
+#     but via a COPY-only Dockerfile.goreleaser (GoReleaser builds the binary
+#     itself, so the docker step COPYs the prebuilt binary instead of building
+#     from source; the root Dockerfile remains the `docker build` path).
+#
+# Schema: GoReleaser v2.
+version: 2
+
+project_name: tend
+
+builds:
+  - id: tend
+    main: ./cmd/tend
+    binary: tend
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - "-s -w -X github.com/marsadhq/tend/internal/cli.Version={{ .Version }}"
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: stamp object files with the commit time rather than
+    # the (non-deterministic) build time.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: tend
+    # v2 uses `formats:` (a list); the v1 scalar `format:` is deprecated.
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  # v2 renamed the snapshot `name_template` key to `version_template`.
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  # `git` works offline and in snapshot mode (no GitHub token required);
+  # `github` would need network + a token and is unsuitable for the dry-run.
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+  filters:
+    # Keep the changelog signal-only: drop docs/test/chore/ci/build/style/refactor noise.
+    exclude:
+      - '^docs:'
+      - '^docs\('
+      - '^test:'
+      - '^test\('
+      - '^chore:'
+      - '^chore\('
+      - '^ci:'
+      - '^ci\('
+      - '^build:'
+      - '^build\('
+      - '^style:'
+      - '^refactor:'
+      - '^Merge '
+
+dockers:
+  # One entry per architecture. Each uses the COPY-only Dockerfile.goreleaser
+  # (no RUN), so cross-arch buildx builds need no QEMU emulation at build time.
+  - id: tend-amd64
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    image_templates:
+      - "ghcr.io/marsadhq/tend:{{ .Version }}-amd64"
+      - "ghcr.io/marsadhq/tend:latest-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.source=https://github.com/marsadhq/tend"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+    # The /data asset dir (nonroot-owned empty dir) must be present in the
+    # docker build context for `COPY --chown=nonroot:nonroot dockerassets/data /data`.
+    extra_files:
+      - dockerassets
+
+  - id: tend-arm64
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile.goreleaser
+    use: buildx
+    image_templates:
+      - "ghcr.io/marsadhq/tend:{{ .Version }}-arm64"
+      - "ghcr.io/marsadhq/tend:latest-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.source=https://github.com/marsadhq/tend"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=AGPL-3.0"
+    extra_files:
+      - dockerassets
+
+docker_manifests:
+  # Multi-arch manifest lists combining the two per-arch images above.
+  - name_template: "ghcr.io/marsadhq/tend:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/marsadhq/tend:{{ .Version }}-amd64"
+      - "ghcr.io/marsadhq/tend:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/marsadhq/tend:latest"
+    image_templates:
+      - "ghcr.io/marsadhq/tend:latest-amd64"
+      - "ghcr.io/marsadhq/tend:latest-arm64"
+
+release:
+  # Real tag-triggered releases publish to this repo; `--snapshot` ignores it.
+  github:
+    owner: marsadhq
+    name: tend

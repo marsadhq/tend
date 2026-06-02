@@ -1,0 +1,89 @@
+{{define "content"}}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Workloads</p>
+    <h1 class="page-title">Jobs</h1>
+  </div>
+  <p class="count-chip">{{len .Jobs}} defined</p>
+</section>
+
+{{template "jobsTable" .}}
+{{end}}
+
+{{/* jobsTable is rendered both inside the full page and standalone by the
+     /partials/jobs polling endpoint, so htmx can swap it on a 5s cadence. */}}
+{{define "jobsTable"}}
+<div id="jobs-table"
+     hx-get="/partials/jobs"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML">
+  {{if .Jobs}}
+  <table class="grid-table">
+    <thead>
+      <tr>
+        <th>Job</th>
+        <th>Type</th>
+        <th>Schedule</th>
+        <th>State</th>
+        <th class="col-status">Last run</th>
+        <th class="col-actions">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Jobs}}{{template "jobRow" .}}{{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">
+    <p class="empty-title">No jobs yet</p>
+    <p class="empty-sub">Define jobs as config-as-code and they will appear here.</p>
+  </div>
+  {{end}}
+</div>
+{{end}}
+
+{{/* jobRow is the SINGLE source of truth for one <tr>. It is ranged over inside
+     jobsTable AND returned standalone by the htmx action endpoints
+     (/jobs/{id}/run|enable|disable) so the swapped row always matches the table.
+     The row id lets each button target its own row with hx-swap="outerHTML".
+     The action buttons carry the CSRF token via hx-headers (the exact header
+     validCSRF reads, X-CSRF-Token); the token is rendered into the page meta tag
+     by the base layout. The actions cell stops click propagation so pressing a
+     button does not also trigger the row's navigate-on-click. */}}
+{{define "jobRow"}}
+<tr id="job-row-{{.ID}}" class="row-link" onclick="location.href='/jobs/{{.ID}}'">
+  <td class="cell-name"><a href="/jobs/{{.ID}}">{{.Name}}</a></td>
+  <td class="cell-mono">{{.Type}}</td>
+  <td class="cell-mono cell-muted">{{.Schedule}}</td>
+  <td>
+    {{if .Enabled}}<span class="tag tag-on">enabled</span>
+    {{else}}<span class="tag tag-off">paused</span>{{end}}
+  </td>
+  <td class="col-status">
+    {{if .LastStatus}}<span class="pill {{.StatusClass}}">{{.LastStatus}}</span>
+    {{else}}<span class="pill pill-none">no runs</span>{{end}}
+  </td>
+  <td class="col-actions" onclick="event.stopPropagation()">
+    <div class="row-actions">
+      <button type="button" class="btn-action btn-run"
+              hx-post="/jobs/{{.ID}}/run"
+              hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+              hx-target="#job-row-{{.ID}}"
+              hx-swap="outerHTML">run now</button>
+      {{if .Enabled}}
+      <button type="button" class="btn-action"
+              hx-post="/jobs/{{.ID}}/disable"
+              hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+              hx-target="#job-row-{{.ID}}"
+              hx-swap="outerHTML">pause</button>
+      {{else}}
+      <button type="button" class="btn-action btn-enable"
+              hx-post="/jobs/{{.ID}}/enable"
+              hx-headers='{"X-CSRF-Token":"{{.CSRFToken}}"}'
+              hx-target="#job-row-{{.ID}}"
+              hx-swap="outerHTML">enable</button>
+      {{end}}
+    </div>
+  </td>
+</tr>
+{{end}}

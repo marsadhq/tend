@@ -1,0 +1,42 @@
+{{define "content"}}
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Dead-man's switches</p>
+    <h1 class="page-title">Heartbeats</h1>
+  </div>
+  <p class="count-chip">{{len .Heartbeats}} monitored</p>
+</section>
+
+{{/* SECURITY: the heartbeat ping Token is never present in the heartbeatRow view
+     struct, so it cannot be rendered here - only name/status/period/grace/last
+     seen reach the page. */}}
+{{if .Heartbeats}}
+<table class="grid-table">
+  <thead>
+    <tr>
+      <th>Monitor</th>
+      <th>Status</th>
+      <th>Period</th>
+      <th>Grace</th>
+      <th class="col-status">Last ping</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Heartbeats}}
+    <tr>
+      <td class="cell-name">{{.Name}}</td>
+      <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
+      <td class="cell-mono cell-muted">{{.Period}}</td>
+      <td class="cell-mono cell-muted">{{.Grace}}</td>
+      <td class="col-status cell-mono cell-muted">{{.LastSeen}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<div class="empty">
+  <p class="empty-title">No heartbeats yet</p>
+  <p class="empty-sub">Define heartbeats as config-as-code; once a monitor pings, it appears here.</p>
+</div>
+{{end}}
+{{end}}
