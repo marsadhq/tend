@@ -3,7 +3,7 @@ module github.com/marsadhq/tend
 go 1.25.0
 
 require (
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/crypto v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
