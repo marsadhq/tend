@@ -1042,16 +1042,63 @@ func baseURL() string {
 
 func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list> [flags])")
+		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url> [flags])")
 	}
 	switch args[0] {
 	case "add":
 		return cmdHeartbeatAdd(ctx, st, orgID, args[1:], stdout, stderr)
 	case "list":
 		return cmdHeartbeatList(ctx, st, orgID, args[1:], stdout, stderr)
+	case "show":
+		return cmdHeartbeatShow(ctx, st, orgID, args[1:], stdout, stderr)
+	case "ping-url":
+		return cmdHeartbeatPingURL(ctx, st, orgID, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("heartbeat: unknown subcommand %q", args[0])
 	}
+}
+
+// cmdHeartbeatPingURL prints the recoverable ping URL for a heartbeat by name.
+// The token is a credential, but the CLI is the trusted local surface (the same
+// operator can already read the DB), so surfacing it here is by design.
+func cmdHeartbeatPingURL(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("heartbeat ping-url: usage: tend heartbeat ping-url <name>")
+	}
+	hb, err := st.GetHeartbeatByName(ctx, orgID, args[0])
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("heartbeat ping-url: no heartbeat named %q", args[0])
+		}
+		return fmt.Errorf("heartbeat ping-url: %w", err)
+	}
+	fmt.Fprintf(stdout, "%s/ping/%s\n", baseURL(), hb.Token)
+	return nil
+}
+
+// cmdHeartbeatShow prints a heartbeat's details, including the recoverable ping URL.
+func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("heartbeat show: usage: tend heartbeat show <name>")
+	}
+	hb, err := st.GetHeartbeatByName(ctx, orgID, args[0])
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("heartbeat show: no heartbeat named %q", args[0])
+		}
+		return fmt.Errorf("heartbeat show: %w", err)
+	}
+	lastSeen := "never"
+	if !hb.LastSeenAt.IsZero() {
+		lastSeen = hb.LastSeenAt.UTC().Format(time.RFC3339)
+	}
+	fmt.Fprintf(stdout, "name:      %s\n", hb.Name)
+	fmt.Fprintf(stdout, "status:    %s\n", hb.Status)
+	fmt.Fprintf(stdout, "period:    %ds\n", hb.PeriodSeconds)
+	fmt.Fprintf(stdout, "grace:     %ds\n", hb.GraceSeconds)
+	fmt.Fprintf(stdout, "last seen: %s\n", lastSeen)
+	fmt.Fprintf(stdout, "ping url:  %s/ping/%s\n", baseURL(), hb.Token)
+	return nil
 }
 
 func cmdHeartbeatAdd(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {

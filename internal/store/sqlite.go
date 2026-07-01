@@ -996,6 +996,21 @@ func (s *SQLiteStore) ListHeartbeats(ctx context.Context, orgID int64) ([]heartb
 	return out, nil
 }
 
+// GetHeartbeatByName returns the heartbeat named name for orgID (token
+// included), or ErrNotFound when absent.
+func (s *SQLiteStore) GetHeartbeatByName(ctx context.Context, orgID int64, name string) (heartbeat.Heartbeat, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+heartbeatColumns+` FROM heartbeats WHERE org_id = ? AND name = ?`, orgID, name)
+	hb, err := scanHeartbeat(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return heartbeat.Heartbeat{}, ErrNotFound
+	}
+	if err != nil {
+		return heartbeat.Heartbeat{}, fmt.Errorf("get heartbeat by name: %w", err)
+	}
+	return hb, nil
+}
+
 // RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
 // identified by token, returning whether this was a down->up recovery along with
 // the heartbeat's org and name. It runs in a transaction so the status read and

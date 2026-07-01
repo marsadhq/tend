@@ -237,6 +237,61 @@ func TestSecretSetAndRun(t *testing.T) {
 
 // TestJobAddAcceptsNoSchedule asserts that `job add -name manual -command 'echo hi'`
 // with NO -cron or -interval succeeds and creates a manual/on-demand job.
+// TestHeartbeatShowAndPingURL verifies the ping-URL recovery commands:
+// `heartbeat ping-url <name>` prints exactly <TEND_BASE_URL>/ping/<token>, and
+// `heartbeat show <name>` prints name, status, period, grace, and the ping URL.
+// This makes a config-as-code heartbeat's token recoverable without the DB.
+func TestHeartbeatShowAndPingURL(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+	t.Setenv("TEND_BASE_URL", "https://tend.example.com")
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "offsite-backup", "-period", "3600", "-grace", "300"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+	addOut := stdout.String()
+	const marker = "ping URL: "
+	i := strings.Index(addOut, marker)
+	if i < 0 {
+		t.Fatalf("heartbeat add did not print a ping URL: %q", addOut)
+	}
+	wantURL := strings.TrimSpace(addOut[i+len(marker):])
+	if !strings.HasPrefix(wantURL, "https://tend.example.com/ping/") {
+		t.Fatalf("ping URL = %q, want https://tend.example.com/ping/<token>", wantURL)
+	}
+
+	// ping-url prints EXACTLY that URL (recoverable after the fact).
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "ping-url", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat ping-url: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != wantURL {
+		t.Errorf("ping-url = %q, want %q", got, wantURL)
+	}
+
+	// show prints name, status, period, grace, and the ping URL.
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "show", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat show: %v\nstderr: %s", err, stderr.String())
+	}
+	showOut := stdout.String()
+	for _, want := range []string{"offsite-backup", "new", "3600", "300", wantURL} {
+		if !strings.Contains(showOut, want) {
+			t.Errorf("heartbeat show output missing %q; got:\n%s", want, showOut)
+		}
+	}
+
+	// Unknown name errors clearly rather than printing an empty/garbage URL.
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "ping-url", "nope"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("heartbeat ping-url on unknown name: expected error, got nil (out=%q)", stdout.String())
+	}
+}
+
 func TestJobAddAcceptsNoSchedule(t *testing.T) {
 	cfg := tempConfig(t)
 	ctx := context.Background()

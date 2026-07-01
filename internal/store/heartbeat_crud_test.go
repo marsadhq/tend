@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/marsadhq/tend/internal/heartbeat"
@@ -165,6 +166,52 @@ func TestListHeartbeats(t *testing.T) {
 		}
 		if hbs[0].Name != "hb-1" || hbs[1].Name != "hb-2" {
 			t.Errorf("order = [%q, %q], want [hb-1, hb-2]", hbs[0].Name, hbs[1].Name)
+		}
+	})
+}
+
+// TestGetHeartbeatByName verifies name lookup returns the heartbeat (with its
+// ping token) for the owning org, ErrNotFound for an unknown name, and
+// ErrNotFound across orgs. This is the store seam that lets the CLI recover a
+// config-as-code heartbeat's ping URL.
+func TestGetHeartbeatByName(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		if _, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "offsite-backup", Token: "tok-offsite",
+			PeriodSeconds: 86400, GraceSeconds: 3600,
+		}); err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+
+		// Found: returns the heartbeat WITH its token.
+		got, err := s.GetHeartbeatByName(ctx, org.ID, "offsite-backup")
+		if err != nil {
+			t.Fatalf("GetHeartbeatByName: %v", err)
+		}
+		if got.Name != "offsite-backup" {
+			t.Errorf("Name = %q, want offsite-backup", got.Name)
+		}
+		if got.Token != "tok-offsite" {
+			t.Errorf("Token = %q, want tok-offsite", got.Token)
+		}
+		if got.PeriodSeconds != 86400 || got.GraceSeconds != 3600 {
+			t.Errorf("period/grace = %d/%d, want 86400/3600", got.PeriodSeconds, got.GraceSeconds)
+		}
+
+		// Unknown name -> ErrNotFound.
+		if _, err := s.GetHeartbeatByName(ctx, org.ID, "nope"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("unknown name: err = %v, want ErrNotFound", err)
+		}
+
+		// Another org cannot see it -> ErrNotFound (org-scoped).
+		if _, err := s.GetHeartbeatByName(ctx, org.ID+999, "offsite-backup"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org: err = %v, want ErrNotFound", err)
 		}
 	})
 }

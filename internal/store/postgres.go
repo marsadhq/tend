@@ -708,6 +708,21 @@ func (s *PostgresStore) CreateHeartbeat(ctx context.Context, hb heartbeat.Heartb
 	return id, token, nil
 }
 
+// GetHeartbeatByName mirrors the SQLite backend (shared heartbeatColumns/
+// scanHeartbeat). Returns ErrNotFound when absent.
+func (s *PostgresStore) GetHeartbeatByName(ctx context.Context, orgID int64, name string) (heartbeat.Heartbeat, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+heartbeatColumns+` FROM heartbeats WHERE org_id = $1 AND name = $2`, orgID, name)
+	hb, err := scanHeartbeat(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return heartbeat.Heartbeat{}, ErrNotFound
+	}
+	if err != nil {
+		return heartbeat.Heartbeat{}, fmt.Errorf("get heartbeat by name: %w", err)
+	}
+	return hb, nil
+}
+
 // ListHeartbeats returns all heartbeats for an org ordered by ID. Mirrors the
 // SQLite backend (heartbeatColumns/scanHeartbeat are shared, defined in sqlite.go).
 func (s *PostgresStore) ListHeartbeats(ctx context.Context, orgID int64) ([]heartbeat.Heartbeat, error) {
