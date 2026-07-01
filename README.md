@@ -153,6 +153,8 @@ TEND_DB=postgres://tend:secret@localhost:5432/tend?sslmode=disable tend serve
 
 When `TEND_DB` is unset it defaults to `tend.db` in the current directory. SQLite is appropriate for single-host deployments. Use Postgres when you want a managed/external database, `pg_dump` backups, or to run the database on a separate host from tend. (The job runner is single-instance; run one `tend serve` against a given database.) Tend runs migrations on every startup; for Postgres the database must already exist and the user must have DDL rights. Both backends have [identical behavior](docs/ARCHITECTURE.md#3-the-store-interface-and-sqlitepostgres-parity).
 
+**Troubleshooting: the CLI shows nothing but the dashboard shows your jobs (or vice versa).** The CLI and the running server each resolve `TEND_DB` independently, so they must point at the *same* database. Since the default is a *relative* `tend.db`, running a CLI command from a different directory (or against a container whose server uses `/data/tend.db`) reads a different, often empty, database. Run `tend doctor` to print the resolved driver, database path, org, base URL, and resource counts; the `tend serve` banner prints the same `db …(driver) org …`. For a containerized server, run CLI commands inside it, e.g. `docker exec <container> /tend doctor` or `docker exec <container> /tend heartbeat list`.
+
 ## Config-as-code (YAML)
 
 Job definitions, notification channels, rules, and heartbeats can be managed declaratively. The repo ships a minimal [`jobs.yaml`](jobs.yaml) you can apply right away to see tend working:

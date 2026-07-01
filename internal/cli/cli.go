@@ -14,7 +14,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +83,7 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 
 	switch cmd {
 	case "serve":
-		return cmdServe(ctx, st, box, cfg.MasterKey, stdout)
+		return cmdServe(ctx, st, box, cfg, org, stdout)
 
 	case "sync":
 		return cmdSync(ctx, st, box, org.ID, args[1:], stdout, stderr)
@@ -106,6 +108,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 
 	case "heartbeat":
 		return cmdHeartbeat(ctx, st, org.ID, args[1:], stdout, stderr)
+
+	case "doctor":
+		return cmdDoctor(ctx, st, cfg, org, args[1:], stdout, stderr)
 
 	case "user":
 		return cmdUser(ctx, st, org.ID, args[1:], stdin, stdout, stderr)
@@ -221,14 +226,14 @@ func buildServeHandler(masterKeyB64 string) (http.Handler, error) {
 // a child context (serveCtx / cancelAll), so the process exits promptly rather
 // than hanging until a SIGINT arrives. A clean parent-ctx cancel (SIGINT/SIGTERM)
 // propagates identically; serveErr stays nil in that case.
-func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, masterKeyB64 string, stdout io.Writer) error {
+func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.Config, org core.Org, stdout io.Writer) error {
 	clk := clock.RealClock{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// authCfg mounts the authenticated dashboard/API surface when a master key is
 	// present; nil leaves the server public-only (M2 behavior). The derived
 	// session key is never logged.
-	authCfg, err := buildAuthConfig(masterKeyB64)
+	authCfg, err := buildAuthConfig(cfg.MasterKey)
 	if err != nil {
 		return fmt.Errorf("serve: build auth config: %w", err)
 	}
@@ -257,7 +262,8 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, masterKeyB6
 	if authCfg != nil {
 		dashboardOn = "on"
 	}
-	fmt.Fprintf(stdout, "tend serve: runner + http(%s) + heartbeat watcher running; alerts %s; dashboard %s (Ctrl-C to stop)\n", addr, alertsOn, dashboardOn)
+	fmt.Fprintf(stdout, "tend serve: runner + http(%s) + heartbeat watcher running; alerts %s; dashboard %s; db %s(%s) org %q (Ctrl-C to stop)\n",
+		addr, alertsOn, dashboardOn, redactDSN(cfg.Driver, cfg.DSN), cfg.Driver, org.Name)
 
 	// serveCtx is cancelled either by the parent (SIGINT/SIGTERM) or by the HTTP
 	// goroutine on a fatal bind/listen error so that all components tear down
@@ -1038,6 +1044,58 @@ func baseURL() string {
 		return strings.TrimRight(b, "/")
 	}
 	return "http://localhost:8080"
+}
+
+// redactDSN produces a safe-to-print DSN for diagnostics: the absolute file path
+// for SQLite (so the exact database file is unambiguous) and a userinfo-stripped
+// URL for Postgres (so credentials never reach stdout or logs).
+func redactDSN(driver, dsn string) string {
+	if driver == "postgres" {
+		if u, err := url.Parse(dsn); err == nil && u.Host != "" {
+			u.User = nil
+			return u.String()
+		}
+		return "postgres://<unparseable>"
+	}
+	if abs, err := filepath.Abs(dsn); err == nil {
+		return abs
+	}
+	return dsn
+}
+
+// cmdDoctor prints the resolved configuration and resource counts. It is the
+// diagnostic for the most common operational confusion: the CLI and the running
+// server reading different databases (TEND_DB defaults to a RELATIVE tend.db,
+// while the Docker image runs with /data/tend.db). It reuses the store + org the
+// caller already resolved via the standard config.Load + store.Open path.
+func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.Org, args []string, stdout, stderr io.Writer) error {
+	jl, err := st.ListJobs(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("doctor: list jobs: %w", err)
+	}
+	cl, err := st.ListChannels(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("doctor: list channels: %w", err)
+	}
+	rl, err := st.ListRules(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("doctor: list rules: %w", err)
+	}
+	hl, err := st.ListHeartbeats(ctx, org.ID)
+	if err != nil {
+		return fmt.Errorf("doctor: list heartbeats: %w", err)
+	}
+	masterKey := "unset (public-only mode: dashboard/secrets disabled)"
+	if cfg.MasterKey != "" {
+		masterKey = "set"
+	}
+	fmt.Fprintf(stdout, "driver:     %s\n", cfg.Driver)
+	fmt.Fprintf(stdout, "db:         %s\n", redactDSN(cfg.Driver, cfg.DSN))
+	fmt.Fprintf(stdout, "org:        %d %q\n", org.ID, org.Name)
+	fmt.Fprintf(stdout, "base url:   %s\n", baseURL())
+	fmt.Fprintf(stdout, "master key: %s\n", masterKey)
+	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
+	return nil
 }
 
 func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {

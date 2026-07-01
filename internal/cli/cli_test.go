@@ -292,6 +292,32 @@ func TestHeartbeatShowAndPingURL(t *testing.T) {
 	}
 }
 
+// TestDoctorReportsResolvedDBAndCounts verifies `tend doctor` surfaces the
+// resolved driver + DB path, the org, the base URL, and resource counts, which
+// is the fix for the silent CLI-vs-server DB mismatch (different TEND_DB).
+func TestDoctorReportsResolvedDBAndCounts(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+	t.Setenv("TEND_BASE_URL", "https://tend.example.com")
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "hb1", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("doctor: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"sqlite", cfg.DSN, "https://tend.example.com", "jobs=0", "heartbeats=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
 func TestJobAddAcceptsNoSchedule(t *testing.T) {
 	cfg := tempConfig(t)
 	ctx := context.Background()
