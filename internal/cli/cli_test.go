@@ -366,6 +366,36 @@ func TestHeartbeatHistory(t *testing.T) {
 	}
 }
 
+// TestHeartbeatRm verifies `tend heartbeat rm <name>` deletes the heartbeat and
+// errors on an unknown name.
+func TestHeartbeatRm(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "temp-hb", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "rm", "temp-hb"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat rm: %v\nstderr: %s", err, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "list"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat list: %v", err)
+	}
+	if strings.Contains(stdout.String(), "temp-hb") {
+		t.Errorf("heartbeat still listed after rm:\n%s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "rm", "temp-hb"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("rm on unknown name: expected error, got nil")
+	}
+}
+
 func TestJobAddAcceptsNoSchedule(t *testing.T) {
 	cfg := tempConfig(t)
 	ctx := context.Background()

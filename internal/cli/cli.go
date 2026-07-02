@@ -1100,7 +1100,7 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 
 func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url|history> [flags])")
+		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url|history|rm> [flags])")
 	}
 	switch args[0] {
 	case "add":
@@ -1113,6 +1113,8 @@ func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []strin
 		return cmdHeartbeatPingURL(ctx, st, orgID, args[1:], stdout, stderr)
 	case "history":
 		return cmdHeartbeatHistory(ctx, st, orgID, args[1:], stdout, stderr)
+	case "rm":
+		return cmdHeartbeatRemove(ctx, st, orgID, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("heartbeat: unknown subcommand %q", args[0])
 	}
@@ -1192,6 +1194,26 @@ func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args 
 	for _, e := range evs {
 		fmt.Fprintf(stdout, "%s  %s\n", e.CreatedAt.UTC().Format(time.RFC3339), e.Type)
 	}
+	return nil
+}
+
+// cmdHeartbeatRemove hard-deletes a heartbeat by name. Its past transition
+// events are preserved as an audit trail.
+func cmdHeartbeatRemove(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
+	if len(args) != 1 {
+		return fmt.Errorf("heartbeat rm: usage: tend heartbeat rm <name>")
+	}
+	hb, err := st.GetHeartbeatByName(ctx, orgID, args[0])
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("heartbeat rm: no heartbeat named %q", args[0])
+		}
+		return fmt.Errorf("heartbeat rm: %w", err)
+	}
+	if err := st.DeleteHeartbeat(ctx, orgID, hb.ID); err != nil {
+		return fmt.Errorf("heartbeat rm: %w", err)
+	}
+	fmt.Fprintf(stdout, "heartbeat %q removed (past events are kept)\n", args[0])
 	return nil
 }
 

@@ -285,3 +285,55 @@ func TestGetHeartbeatAndHistory(t *testing.T) {
 		}
 	})
 }
+
+// TestDeleteHeartbeat verifies delete by id (org-scoped), ErrNotFound on
+// unknown/cross-org, and that a heartbeat's past transition events survive the
+// delete (they are the audit trail).
+func TestDeleteHeartbeat(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		id, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "gone", Token: "t", PeriodSeconds: 60, GraceSeconds: 10,
+		})
+		if err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+		if _, err := s.EmitEvent(ctx, core.Event{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "gone"}); err != nil {
+			t.Fatalf("EmitEvent: %v", err)
+		}
+
+		// Cross-org delete is a no-op -> ErrNotFound, and the row survives.
+		if err := s.DeleteHeartbeat(ctx, org.ID+999, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org delete: %v, want ErrNotFound", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id); err != nil {
+			t.Errorf("row should survive a cross-org delete: %v", err)
+		}
+
+		// Delete for real.
+		if err := s.DeleteHeartbeat(ctx, org.ID, id); err != nil {
+			t.Fatalf("DeleteHeartbeat: %v", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("after delete: %v, want ErrNotFound", err)
+		}
+		// Deleting again -> ErrNotFound.
+		if err := s.DeleteHeartbeat(ctx, org.ID, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("delete again: %v, want ErrNotFound", err)
+		}
+
+		// Past transition events remain (audit trail).
+		evs, err := s.ListHeartbeatEvents(ctx, org.ID, "gone", 10)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents: %v", err)
+		}
+		if len(evs) != 1 {
+			t.Errorf("events after delete = %d, want 1 (audit trail preserved)", len(evs))
+		}
+	})
+}

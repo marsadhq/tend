@@ -136,6 +136,9 @@ type Store interface {
 	// / heartbeat.recovered, keyed by name in the events table), newest first,
 	// bounded by limit.
 	ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error)
+	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound. Its
+	// past events (the audit trail) are intentionally left in place.
+	DeleteHeartbeat(ctx context.Context, orgID, id int64) error
 	// RecordPing records a dead-man's-switch ping for the heartbeat identified by
 	// the globally-unique token: it stamps last_seen_at and sets status to 'up'.
 	// It returns ErrNotFound if no heartbeat owns the token. recovered is true iff

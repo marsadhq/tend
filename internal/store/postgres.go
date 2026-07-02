@@ -697,6 +697,23 @@ func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, na
 // insert; on conflict the existing token is preserved (absent from the SET list)
 // and RETURNING token yields whichever token applies. period/grace are refreshed
 // to the config values; status starts 'new' on insert, preserved on conflict.
+// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound.
+// Mirrors the SQLite backend; past events are left as an audit trail.
+func (s *PostgresStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM heartbeats WHERE org_id = $1 AND id = $2`, orgID, id)
+	if err != nil {
+		return fmt.Errorf("delete heartbeat: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete heartbeat rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) CreateHeartbeat(ctx context.Context, hb heartbeat.Heartbeat) (int64, string, error) {
 	var (
 		id    int64
