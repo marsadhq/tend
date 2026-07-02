@@ -501,6 +501,15 @@ func (s *Server) handleHeartbeatHistory(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, out)
 }
 
+// handleHeartbeatsNotCreatable answers POST /api/heartbeats with an explicit 405
+// and a JSON hint. Heartbeats are config-as-code (CLI or YAML sync), so there is
+// no create API; without this handler the mux returns a bodyless 405 that reads
+// like a wrong URL.
+func (s *Server) handleHeartbeatsNotCreatable(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Allow", "GET")
+	s.apiError(w, http.StatusMethodNotAllowed, "heartbeats are managed via the CLI or YAML sync (tend heartbeat add / tend sync); the API is read-only")
+}
+
 // handleListEvents serves GET /api/events (payload embedded as raw JSON).
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	p, ok := PrincipalFrom(r.Context())
@@ -683,6 +692,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/heartbeats", s.handleListHeartbeats)
 	mux.HandleFunc("GET /api/heartbeats/{id}", s.handleGetHeartbeat)
 	mux.HandleFunc("GET /api/heartbeats/{id}/history", s.handleHeartbeatHistory)
+	mux.HandleFunc("POST /api/heartbeats", s.handleHeartbeatsNotCreatable)
 	mux.HandleFunc("GET /api/events", s.handleListEvents)
 	mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 

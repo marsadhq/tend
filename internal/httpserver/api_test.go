@@ -519,6 +519,24 @@ func TestAPIHeartbeatHistory(t *testing.T) {
 	}
 }
 
+func TestAPIHeartbeatsPostReturns405Hint(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	h := newAuthServer(t, ts.store, authConfig(false)).Handler()
+
+	rec := apiPost(t, h, as, "/api/heartbeats")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status: got %d want 405; body=%q", rec.Code, rec.Body.String())
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "cli") && !strings.Contains(body, "sync") {
+		t.Errorf("405 body should hint the CLI/sync path; got %q", rec.Body.String())
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("Allow header = %q, want GET", allow)
+	}
+}
+
 // --- /api/events (payload as json.RawMessage; valid JSON for any payload) -----
 
 func TestAPIListEventsValidJSONPayloads(t *testing.T) {

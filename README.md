@@ -223,6 +223,46 @@ printf 'the-secret-value' | tend secret set my_api_key
 
 `TEND_MASTER_KEY` must be set when storing secrets. Reference them in job `env` and channel `config` as `{{ secret.NAME }}`. List stored secret names (never values) via `GET /api/secrets`.
 
+## Alerting
+
+Tend emits events (`run.failed`, `heartbeat.missed`, `heartbeat.recovered`, and others). A **channel** is a delivery destination; a **rule** routes matching event types to a channel. Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
+
+### Alert on a missed heartbeat
+
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. Route both to a channel with a rule:
+
+```yaml
+notifications:
+  channels:
+    - name: ops-slack
+      type: slack
+      config:
+        webhook_url: "{{ secret.slack_webhook }}"
+  rules:
+    - channel: ops-slack
+      events: [heartbeat.missed, heartbeat.recovered]
+```
+
+Recover a synced heartbeat's ping URL any time with `tend heartbeat ping-url <name>` (or `tend heartbeat show <name>`), and inspect its transition history with `tend heartbeat history <name>`.
+
+### Send Tend events to Ward (or any sink)
+
+To forward events to an external incident sink (a webhook receiver, an aggregator, or [Ward](https://github.com/marsadhq)), point a webhook channel at it and route the event types you care about:
+
+```yaml
+notifications:
+  channels:
+    - name: ward
+      type: webhook
+      config:
+        url: "https://ward.example/ingest/tend"
+  rules:
+    - channel: ward
+      events: [run.failed, heartbeat.missed, heartbeat.recovered]
+```
+
+The webhook payload is JSON with `subject`, `body`, and the full originating `event` (type, source, and payload). Rules are org-wide; per-heartbeat routing is not yet supported.
+
 ## CLI reference
 
 All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands). The entrypoint is `tend`; in Docker it is `/tend`.
