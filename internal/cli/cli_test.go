@@ -15,6 +15,7 @@ import (
 	"github.com/marsadhq/tend/internal/cli"
 	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/config"
+	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -315,6 +316,53 @@ func TestDoctorReportsResolvedDBAndCounts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("doctor output missing %q; got:\n%s", want, out)
 		}
+	}
+}
+
+// TestHeartbeatHistory verifies `tend heartbeat history <name>` prints the
+// missed/recovered transitions (newest first) with timestamps, and errors on an
+// unknown name.
+func TestHeartbeatHistory(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "offsite-backup", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+
+	// Emit transition events into the same database.
+	st := openTestStore(t, cfg.DSN)
+	org, err := st.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	for _, ev := range []core.Event{
+		{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "offsite-backup"},
+		{OrgID: org.ID, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "offsite-backup"},
+	} {
+		if _, err := st.EmitEvent(ctx, ev); err != nil {
+			t.Fatalf("EmitEvent: %v", err)
+		}
+	}
+	_ = st.Close()
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "history", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat history: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"heartbeat.missed", "heartbeat.recovered"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("history output missing %q; got:\n%s", want, out)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "history", "nope"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("history on unknown name: expected error, got nil (out=%q)", stdout.String())
 	}
 }
 

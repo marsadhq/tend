@@ -1100,7 +1100,7 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 
 func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url> [flags])")
+		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url|history> [flags])")
 	}
 	switch args[0] {
 	case "add":
@@ -1111,6 +1111,8 @@ func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []strin
 		return cmdHeartbeatShow(ctx, st, orgID, args[1:], stdout, stderr)
 	case "ping-url":
 		return cmdHeartbeatPingURL(ctx, st, orgID, args[1:], stdout, stderr)
+	case "history":
+		return cmdHeartbeatHistory(ctx, st, orgID, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("heartbeat: unknown subcommand %q", args[0])
 	}
@@ -1156,6 +1158,40 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 	fmt.Fprintf(stdout, "grace:     %ds\n", hb.GraceSeconds)
 	fmt.Fprintf(stdout, "last seen: %s\n", lastSeen)
 	fmt.Fprintf(stdout, "ping url:  %s/ping/%s\n", baseURL(), hb.Token)
+	return nil
+}
+
+// cmdHeartbeatHistory prints a heartbeat's missed/recovered transitions, newest
+// first. Usage: tend heartbeat history <name> [-limit N].
+func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("heartbeat history: usage: tend heartbeat history <name> [-limit N]")
+	}
+	name := args[0]
+	fs := flag.NewFlagSet("heartbeat history", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	limit := fs.Int("limit", 20, "maximum number of transitions to show")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	// Resolve the name first so an unknown heartbeat is a clear error.
+	if _, err := st.GetHeartbeatByName(ctx, orgID, name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("heartbeat history: no heartbeat named %q", name)
+		}
+		return fmt.Errorf("heartbeat history: %w", err)
+	}
+	evs, err := st.ListHeartbeatEvents(ctx, orgID, name, *limit)
+	if err != nil {
+		return fmt.Errorf("heartbeat history: %w", err)
+	}
+	if len(evs) == 0 {
+		fmt.Fprintf(stdout, "(no transitions recorded for %q)\n", name)
+		return nil
+	}
+	for _, e := range evs {
+		fmt.Fprintf(stdout, "%s  %s\n", e.CreatedAt.UTC().Format(time.RFC3339), e.Type)
+	}
 	return nil
 }
 
