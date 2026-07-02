@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -212,6 +213,75 @@ func TestGetHeartbeatByName(t *testing.T) {
 		// Another org cannot see it -> ErrNotFound (org-scoped).
 		if _, err := s.GetHeartbeatByName(ctx, org.ID+999, "offsite-backup"); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("cross-org: err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestGetHeartbeatAndHistory verifies GetHeartbeat by id (org-scoped) and
+// ListHeartbeatEvents, which reads the missed/recovered transitions for a
+// heartbeat name out of the events table (source='heartbeat', payload=name),
+// newest first, respecting the limit.
+func TestGetHeartbeatAndHistory(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		id, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "offsite-backup", Token: "tok", PeriodSeconds: 60, GraceSeconds: 10,
+		})
+		if err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+
+		// --- GetHeartbeat by id ---
+		got, err := s.GetHeartbeat(ctx, org.ID, id)
+		if err != nil {
+			t.Fatalf("GetHeartbeat: %v", err)
+		}
+		if got.Name != "offsite-backup" {
+			t.Errorf("Name = %q, want offsite-backup", got.Name)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id+999); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("unknown id: %v, want ErrNotFound", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID+999, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org: %v, want ErrNotFound", err)
+		}
+
+		// --- ListHeartbeatEvents ---
+		// Emit missed then recovered for this heartbeat, plus noise (another
+		// heartbeat's event and a non-heartbeat event) that must be excluded.
+		for _, ev := range []core.Event{
+			{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "offsite-backup"},
+			{OrgID: org.ID, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "offsite-backup"},
+			{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "other-hb"},
+			{OrgID: org.ID, Type: "run.failed", Source: "jobs.runner", Payload: `{"job_name":"x"}`},
+		} {
+			if _, err := s.EmitEvent(ctx, ev); err != nil {
+				t.Fatalf("EmitEvent: %v", err)
+			}
+		}
+
+		hist, err := s.ListHeartbeatEvents(ctx, org.ID, "offsite-backup", 10)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents: %v", err)
+		}
+		if len(hist) != 2 {
+			t.Fatalf("history len = %d, want 2 (only offsite-backup's heartbeat events)", len(hist))
+		}
+		if hist[0].Type != "heartbeat.recovered" || hist[1].Type != "heartbeat.missed" {
+			t.Errorf("order = [%q, %q], want [recovered, missed] (newest first)", hist[0].Type, hist[1].Type)
+		}
+
+		lim, err := s.ListHeartbeatEvents(ctx, org.ID, "offsite-backup", 1)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents(limit=1): %v", err)
+		}
+		if len(lim) != 1 {
+			t.Errorf("limit=1 returned %d events, want 1", len(lim))
 		}
 	})
 }

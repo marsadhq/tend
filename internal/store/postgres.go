@@ -655,31 +655,39 @@ func (s *PostgresStore) ListEvents(ctx context.Context, orgID int64, limit int) 
 		return nil, fmt.Errorf("list events: %w", err)
 	}
 	defer rows.Close()
+	return scanEvents(rows)
+}
 
-	var out []core.Event
-	for rows.Next() {
-		var (
-			e        core.Event
-			source   sql.NullString
-			payload  sql.NullString
-			dedupKey sql.NullString
-			created  sql.NullString
-		)
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.Type, &source, &payload, &dedupKey, &created); err != nil {
-			return nil, fmt.Errorf("scan event: %w", err)
-		}
-		e.Source = source.String
-		e.Payload = payload.String
-		e.DedupKey = dedupKey.String
-		if e.CreatedAt, err = parseTime(created); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
+// GetHeartbeat returns the heartbeat with id for orgID, or ErrNotFound. Mirrors
+// the SQLite backend (shared heartbeatColumns/scanHeartbeat).
+func (s *PostgresStore) GetHeartbeat(ctx context.Context, orgID, id int64) (heartbeat.Heartbeat, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+heartbeatColumns+` FROM heartbeats WHERE org_id = $1 AND id = $2`, orgID, id)
+	hb, err := scanHeartbeat(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return heartbeat.Heartbeat{}, ErrNotFound
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate events: %w", err)
+	if err != nil {
+		return heartbeat.Heartbeat{}, fmt.Errorf("get heartbeat: %w", err)
 	}
-	return out, nil
+	return hb, nil
+}
+
+// ListHeartbeatEvents mirrors the SQLite backend: a heartbeat's transition
+// events by name (source='heartbeat', payload=name) newest first, bounded.
+func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		 FROM events WHERE org_id = $1 AND source = 'heartbeat' AND payload = $2
+		 ORDER BY id DESC LIMIT $3`, orgID, name, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list heartbeat events: %w", err)
+	}
+	defer rows.Close()
+	return scanEvents(rows)
 }
 
 // --- heartbeats ----------------------------------------------------------

@@ -919,7 +919,14 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, orgID int64, limit int) ([
 		return nil, fmt.Errorf("list events: %w", err)
 	}
 	defer rows.Close()
+	return scanEvents(rows)
+}
 
+// scanEvents reads core.Events from a SELECT of the standard event column list
+// (id, org_id, type, source, payload, dedup_key, created_at). It is shared by
+// both backends' ListEvents and ListHeartbeatEvents (the scan is dialect-free,
+// like scanHeartbeat/scanRun).
+func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 	var out []core.Event
 	for rows.Next() {
 		var (
@@ -935,6 +942,7 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, orgID int64, limit int) ([
 		e.Source = source.String
 		e.Payload = payload.String
 		e.DedupKey = dedupKey.String
+		var err error
 		if e.CreatedAt, err = parseTime(created); err != nil {
 			return nil, err
 		}
@@ -1009,6 +1017,39 @@ func (s *SQLiteStore) GetHeartbeatByName(ctx context.Context, orgID int64, name 
 		return heartbeat.Heartbeat{}, fmt.Errorf("get heartbeat by name: %w", err)
 	}
 	return hb, nil
+}
+
+// GetHeartbeat returns the heartbeat with id for orgID, or ErrNotFound.
+func (s *SQLiteStore) GetHeartbeat(ctx context.Context, orgID, id int64) (heartbeat.Heartbeat, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+heartbeatColumns+` FROM heartbeats WHERE org_id = ? AND id = ?`, orgID, id)
+	hb, err := scanHeartbeat(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return heartbeat.Heartbeat{}, ErrNotFound
+	}
+	if err != nil {
+		return heartbeat.Heartbeat{}, fmt.Errorf("get heartbeat: %w", err)
+	}
+	return hb, nil
+}
+
+// ListHeartbeatEvents returns a heartbeat's transition events by name
+// (source='heartbeat', payload=name) newest first, bounded by limit. Both
+// heartbeat.missed (watcher) and heartbeat.recovered (ping handler) are emitted
+// with the heartbeat name as the event payload.
+func (s *SQLiteStore) ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		 FROM events WHERE org_id = ? AND source = 'heartbeat' AND payload = ?
+		 ORDER BY id DESC LIMIT ?`, orgID, name, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list heartbeat events: %w", err)
+	}
+	defer rows.Close()
+	return scanEvents(rows)
 }
 
 // RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
