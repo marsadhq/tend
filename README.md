@@ -272,6 +272,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend serve` | Start the job runner, HTTP server, and heartbeat watcher. |
 | `tend sync [-prune] <file>` | Reconcile jobs/channels/rules/heartbeats from YAML. |
 | `tend version` | Print the binary version. |
+| `tend doctor` | Print the resolved driver, database, org, base URL, and resource counts (diagnose a CLI/server DB mismatch). |
 | `tend job list` | List all jobs. |
 | `tend job add [flags]` | Create a job (flags below). |
 | `tend job enable <name>` | Enable a job. |
@@ -286,6 +287,10 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend rule list` | List rules. |
 | `tend heartbeat add -name <n> -period <s> [-grace <s>]` | Create/update a heartbeat; prints the ping URL. |
 | `tend heartbeat list` | List heartbeats and their current status. |
+| `tend heartbeat show <name>` | Show a heartbeat's status, period, grace, last-seen, and ping URL. |
+| `tend heartbeat ping-url <name>` | Print a heartbeat's ping URL (recover a synced heartbeat's token). |
+| `tend heartbeat history <name> [-limit <n>]` | Show a heartbeat's missed/recovered transitions (default 20). |
+| `tend heartbeat rm <name>` | Delete a heartbeat (its past events are kept). |
 | `tend user add -email <e>` | Create an admin user; password read from stdin. |
 | `tend token create -name <n>` | Create an API token; printed once. |
 | `tend token list` | List API tokens (names and IDs; hash never shown). |
