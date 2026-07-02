@@ -66,6 +66,22 @@ func BuildProvider(kind ChannelType, cfg []byte) (Provider, error) {
 		}
 		return NewSMTP(c), nil
 
+	case Telegram:
+		var c struct {
+			BotToken string `json:"bot_token"`
+			ChatID   string `json:"chat_id"`
+		}
+		if err := json.Unmarshal(cfg, &c); err != nil {
+			return nil, fmt.Errorf("notify: telegram config: %w", err)
+		}
+		if c.BotToken == "" {
+			return nil, fmt.Errorf("notify: telegram config: missing bot_token")
+		}
+		if c.ChatID == "" {
+			return nil, fmt.Errorf("notify: telegram config: missing chat_id")
+		}
+		return NewTelegram(c.BotToken, c.ChatID), nil
+
 	default:
 		return nil, fmt.Errorf("notify: unknown channel kind %q", kind)
 	}

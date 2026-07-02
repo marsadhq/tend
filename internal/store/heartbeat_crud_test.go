@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -165,6 +167,173 @@ func TestListHeartbeats(t *testing.T) {
 		}
 		if hbs[0].Name != "hb-1" || hbs[1].Name != "hb-2" {
 			t.Errorf("order = [%q, %q], want [hb-1, hb-2]", hbs[0].Name, hbs[1].Name)
+		}
+	})
+}
+
+// TestGetHeartbeatByName verifies name lookup returns the heartbeat (with its
+// ping token) for the owning org, ErrNotFound for an unknown name, and
+// ErrNotFound across orgs. This is the store seam that lets the CLI recover a
+// config-as-code heartbeat's ping URL.
+func TestGetHeartbeatByName(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		if _, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "offsite-backup", Token: "tok-offsite",
+			PeriodSeconds: 86400, GraceSeconds: 3600,
+		}); err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+
+		// Found: returns the heartbeat WITH its token.
+		got, err := s.GetHeartbeatByName(ctx, org.ID, "offsite-backup")
+		if err != nil {
+			t.Fatalf("GetHeartbeatByName: %v", err)
+		}
+		if got.Name != "offsite-backup" {
+			t.Errorf("Name = %q, want offsite-backup", got.Name)
+		}
+		if got.Token != "tok-offsite" {
+			t.Errorf("Token = %q, want tok-offsite", got.Token)
+		}
+		if got.PeriodSeconds != 86400 || got.GraceSeconds != 3600 {
+			t.Errorf("period/grace = %d/%d, want 86400/3600", got.PeriodSeconds, got.GraceSeconds)
+		}
+
+		// Unknown name -> ErrNotFound.
+		if _, err := s.GetHeartbeatByName(ctx, org.ID, "nope"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("unknown name: err = %v, want ErrNotFound", err)
+		}
+
+		// Another org cannot see it -> ErrNotFound (org-scoped).
+		if _, err := s.GetHeartbeatByName(ctx, org.ID+999, "offsite-backup"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org: err = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+// TestGetHeartbeatAndHistory verifies GetHeartbeat by id (org-scoped) and
+// ListHeartbeatEvents, which reads the missed/recovered transitions for a
+// heartbeat name out of the events table (source='heartbeat', payload=name),
+// newest first, respecting the limit.
+func TestGetHeartbeatAndHistory(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		id, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "offsite-backup", Token: "tok", PeriodSeconds: 60, GraceSeconds: 10,
+		})
+		if err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+
+		// --- GetHeartbeat by id ---
+		got, err := s.GetHeartbeat(ctx, org.ID, id)
+		if err != nil {
+			t.Fatalf("GetHeartbeat: %v", err)
+		}
+		if got.Name != "offsite-backup" {
+			t.Errorf("Name = %q, want offsite-backup", got.Name)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id+999); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("unknown id: %v, want ErrNotFound", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID+999, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org: %v, want ErrNotFound", err)
+		}
+
+		// --- ListHeartbeatEvents ---
+		// Emit missed then recovered for this heartbeat, plus noise (another
+		// heartbeat's event and a non-heartbeat event) that must be excluded.
+		for _, ev := range []core.Event{
+			{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "offsite-backup"},
+			{OrgID: org.ID, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "offsite-backup"},
+			{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "other-hb"},
+			{OrgID: org.ID, Type: "run.failed", Source: "jobs.runner", Payload: `{"job_name":"x"}`},
+		} {
+			if _, err := s.EmitEvent(ctx, ev); err != nil {
+				t.Fatalf("EmitEvent: %v", err)
+			}
+		}
+
+		hist, err := s.ListHeartbeatEvents(ctx, org.ID, "offsite-backup", 10)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents: %v", err)
+		}
+		if len(hist) != 2 {
+			t.Fatalf("history len = %d, want 2 (only offsite-backup's heartbeat events)", len(hist))
+		}
+		if hist[0].Type != "heartbeat.recovered" || hist[1].Type != "heartbeat.missed" {
+			t.Errorf("order = [%q, %q], want [recovered, missed] (newest first)", hist[0].Type, hist[1].Type)
+		}
+
+		lim, err := s.ListHeartbeatEvents(ctx, org.ID, "offsite-backup", 1)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents(limit=1): %v", err)
+		}
+		if len(lim) != 1 {
+			t.Errorf("limit=1 returned %d events, want 1", len(lim))
+		}
+	})
+}
+
+// TestDeleteHeartbeat verifies delete by id (org-scoped), ErrNotFound on
+// unknown/cross-org, and that a heartbeat's past transition events survive the
+// delete (they are the audit trail).
+func TestDeleteHeartbeat(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		id, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+			OrgID: org.ID, Name: "gone", Token: "t", PeriodSeconds: 60, GraceSeconds: 10,
+		})
+		if err != nil {
+			t.Fatalf("CreateHeartbeat: %v", err)
+		}
+		if _, err := s.EmitEvent(ctx, core.Event{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "gone"}); err != nil {
+			t.Fatalf("EmitEvent: %v", err)
+		}
+
+		// Cross-org delete is a no-op -> ErrNotFound, and the row survives.
+		if err := s.DeleteHeartbeat(ctx, org.ID+999, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("cross-org delete: %v, want ErrNotFound", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id); err != nil {
+			t.Errorf("row should survive a cross-org delete: %v", err)
+		}
+
+		// Delete for real.
+		if err := s.DeleteHeartbeat(ctx, org.ID, id); err != nil {
+			t.Fatalf("DeleteHeartbeat: %v", err)
+		}
+		if _, err := s.GetHeartbeat(ctx, org.ID, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("after delete: %v, want ErrNotFound", err)
+		}
+		// Deleting again -> ErrNotFound.
+		if err := s.DeleteHeartbeat(ctx, org.ID, id); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("delete again: %v, want ErrNotFound", err)
+		}
+
+		// Past transition events remain (audit trail).
+		evs, err := s.ListHeartbeatEvents(ctx, org.ID, "gone", 10)
+		if err != nil {
+			t.Fatalf("ListHeartbeatEvents: %v", err)
+		}
+		if len(evs) != 1 {
+			t.Errorf("events after delete = %d, want 1 (audit trail preserved)", len(evs))
 		}
 	})
 }

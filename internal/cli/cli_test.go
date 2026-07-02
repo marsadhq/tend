@@ -15,6 +15,7 @@ import (
 	"github.com/marsadhq/tend/internal/cli"
 	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/config"
+	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -237,6 +238,164 @@ func TestSecretSetAndRun(t *testing.T) {
 
 // TestJobAddAcceptsNoSchedule asserts that `job add -name manual -command 'echo hi'`
 // with NO -cron or -interval succeeds and creates a manual/on-demand job.
+// TestHeartbeatShowAndPingURL verifies the ping-URL recovery commands:
+// `heartbeat ping-url <name>` prints exactly <TEND_BASE_URL>/ping/<token>, and
+// `heartbeat show <name>` prints name, status, period, grace, and the ping URL.
+// This makes a config-as-code heartbeat's token recoverable without the DB.
+func TestHeartbeatShowAndPingURL(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+	t.Setenv("TEND_BASE_URL", "https://tend.example.com")
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "offsite-backup", "-period", "3600", "-grace", "300"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+	addOut := stdout.String()
+	const marker = "ping URL: "
+	i := strings.Index(addOut, marker)
+	if i < 0 {
+		t.Fatalf("heartbeat add did not print a ping URL: %q", addOut)
+	}
+	wantURL := strings.TrimSpace(addOut[i+len(marker):])
+	if !strings.HasPrefix(wantURL, "https://tend.example.com/ping/") {
+		t.Fatalf("ping URL = %q, want https://tend.example.com/ping/<token>", wantURL)
+	}
+
+	// ping-url prints EXACTLY that URL (recoverable after the fact).
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "ping-url", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat ping-url: %v\nstderr: %s", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != wantURL {
+		t.Errorf("ping-url = %q, want %q", got, wantURL)
+	}
+
+	// show prints name, status, period, grace, and the ping URL.
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "show", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat show: %v\nstderr: %s", err, stderr.String())
+	}
+	showOut := stdout.String()
+	for _, want := range []string{"offsite-backup", "new", "3600", "300", wantURL} {
+		if !strings.Contains(showOut, want) {
+			t.Errorf("heartbeat show output missing %q; got:\n%s", want, showOut)
+		}
+	}
+
+	// Unknown name errors clearly rather than printing an empty/garbage URL.
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "ping-url", "nope"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("heartbeat ping-url on unknown name: expected error, got nil (out=%q)", stdout.String())
+	}
+}
+
+// TestDoctorReportsResolvedDBAndCounts verifies `tend doctor` surfaces the
+// resolved driver + DB path, the org, the base URL, and resource counts, which
+// is the fix for the silent CLI-vs-server DB mismatch (different TEND_DB).
+func TestDoctorReportsResolvedDBAndCounts(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+	t.Setenv("TEND_BASE_URL", "https://tend.example.com")
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "hb1", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("doctor: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"sqlite", cfg.DSN, "https://tend.example.com", "jobs=0", "heartbeats=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("doctor output missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestHeartbeatHistory verifies `tend heartbeat history <name>` prints the
+// missed/recovered transitions (newest first) with timestamps, and errors on an
+// unknown name.
+func TestHeartbeatHistory(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "offsite-backup", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+
+	// Emit transition events into the same database.
+	st := openTestStore(t, cfg.DSN)
+	org, err := st.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	for _, ev := range []core.Event{
+		{OrgID: org.ID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "offsite-backup"},
+		{OrgID: org.ID, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "offsite-backup"},
+	} {
+		if _, err := st.EmitEvent(ctx, ev); err != nil {
+			t.Fatalf("EmitEvent: %v", err)
+		}
+	}
+	_ = st.Close()
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "history", "offsite-backup"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat history: %v\nstderr: %s", err, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"heartbeat.missed", "heartbeat.recovered"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("history output missing %q; got:\n%s", want, out)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "history", "nope"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("history on unknown name: expected error, got nil (out=%q)", stdout.String())
+	}
+}
+
+// TestHeartbeatRm verifies `tend heartbeat rm <name>` deletes the heartbeat and
+// errors on an unknown name.
+func TestHeartbeatRm(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "temp-hb", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat add: %v\nstderr: %s", err, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "rm", "temp-hb"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat rm: %v\nstderr: %s", err, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "list"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("heartbeat list: %v", err)
+	}
+	if strings.Contains(stdout.String(), "temp-hb") {
+		t.Errorf("heartbeat still listed after rm:\n%s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "rm", "temp-hb"}, nil, &stdout, &stderr); err == nil {
+		t.Errorf("rm on unknown name: expected error, got nil")
+	}
+}
+
 func TestJobAddAcceptsNoSchedule(t *testing.T) {
 	cfg := tempConfig(t)
 	ctx := context.Background()

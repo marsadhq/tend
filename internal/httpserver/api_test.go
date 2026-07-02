@@ -440,6 +440,103 @@ func TestAPIListHeartbeatsNoToken(t *testing.T) {
 	}
 }
 
+// --- /api/heartbeats/{id} + /history -----------------------------------------
+
+func TestAPIGetHeartbeat(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	ts.seedHB(t, "offsite-backup", "secret-ping-tok", "up")
+	hb, err := ts.store.GetHeartbeatByName(context.Background(), ts.orgID, "offsite-backup")
+	if err != nil {
+		t.Fatalf("GetHeartbeatByName: %v", err)
+	}
+	h := newAuthServer(t, ts.store, authConfig(false)).Handler()
+
+	rec := apiGet(t, h, as, "/api/heartbeats/"+itoa(hb.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "secret-ping-tok") || strings.Contains(strings.ToLower(body), "token") {
+		t.Fatalf("heartbeat detail leaked the ping token; body=%q", body)
+	}
+	var got struct {
+		ID   int64  `json:"id"`
+		Name string `json:"name"`
+	}
+	decodeJSON(t, rec, &got)
+	if got.Name != "offsite-backup" {
+		t.Errorf("name = %q, want offsite-backup", got.Name)
+	}
+
+	if r := apiGet(t, h, as, "/api/heartbeats/9999"); r.Code != http.StatusNotFound {
+		t.Errorf("unknown id: got %d want 404", r.Code)
+	}
+	// Requires auth: no bearer token -> 401.
+	req := httptest.NewRequest(http.MethodGet, "/api/heartbeats/"+itoa(hb.ID), nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("no auth: got %d want 401", rr.Code)
+	}
+}
+
+func TestAPIHeartbeatHistory(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	ctx := context.Background()
+	ts.seedHB(t, "offsite-backup", "t", "up")
+	hb, err := ts.store.GetHeartbeatByName(ctx, ts.orgID, "offsite-backup")
+	if err != nil {
+		t.Fatalf("GetHeartbeatByName: %v", err)
+	}
+	for _, ev := range []core.Event{
+		{OrgID: ts.orgID, Type: "heartbeat.missed", Source: "heartbeat", Payload: "offsite-backup"},
+		{OrgID: ts.orgID, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "offsite-backup"},
+	} {
+		if _, err := ts.store.EmitEvent(ctx, ev); err != nil {
+			t.Fatalf("EmitEvent: %v", err)
+		}
+	}
+	h := newAuthServer(t, ts.store, authConfig(false)).Handler()
+
+	rec := apiGet(t, h, as, "/api/heartbeats/"+itoa(hb.ID)+"/history")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var got []struct {
+		Type string `json:"type"`
+	}
+	decodeJSON(t, rec, &got)
+	if len(got) != 2 {
+		t.Fatalf("history len = %d want 2; body=%q", len(got), rec.Body.String())
+	}
+	if got[0].Type != "heartbeat.recovered" || got[1].Type != "heartbeat.missed" {
+		t.Errorf("order = [%q, %q] want [recovered, missed] (newest first)", got[0].Type, got[1].Type)
+	}
+	if r := apiGet(t, h, as, "/api/heartbeats/9999/history"); r.Code != http.StatusNotFound {
+		t.Errorf("unknown id history: got %d want 404", r.Code)
+	}
+}
+
+func TestAPIHeartbeatsPostReturns405Hint(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	h := newAuthServer(t, ts.store, authConfig(false)).Handler()
+
+	rec := apiPost(t, h, as, "/api/heartbeats")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status: got %d want 405; body=%q", rec.Code, rec.Body.String())
+	}
+	body := strings.ToLower(rec.Body.String())
+	if !strings.Contains(body, "cli") && !strings.Contains(body, "sync") {
+		t.Errorf("405 body should hint the CLI/sync path; got %q", rec.Body.String())
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("Allow header = %q, want GET", allow)
+	}
+}
+
 // --- /api/events (payload as json.RawMessage; valid JSON for any payload) -----
 
 func TestAPIListEventsValidJSONPayloads(t *testing.T) {

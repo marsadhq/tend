@@ -27,6 +27,8 @@ const (
 	Discord ChannelType = "discord"
 	// SMTP sends email.
 	SMTP ChannelType = "smtp"
+	// Telegram posts to a chat via the Telegram Bot API.
+	Telegram ChannelType = "telegram"
 )
 
 // Message is a notification ready to be delivered by a Provider. It carries a

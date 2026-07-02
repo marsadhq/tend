@@ -103,6 +103,14 @@ notifications:
           - "oncall@example.com"
           - "ops@example.com"
 
+    - name: ops-telegram
+      type: telegram
+      config:
+        # Create a bot with @BotFather for bot_token; chat_id is the target chat
+        # (a negative number for a group/channel). Both are required.
+        bot_token: "{{ secret.telegram_bot_token }}"
+        chat_id: "-1001234567890"
+
   rules:
     # Send every failure and heartbeat transition to Slack.
     - channel: ops-slack
