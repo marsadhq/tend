@@ -153,6 +153,8 @@ TEND_DB=postgres://tend:secret@localhost:5432/tend?sslmode=disable tend serve
 
 When `TEND_DB` is unset it defaults to `tend.db` in the current directory. SQLite is appropriate for single-host deployments. Use Postgres when you want a managed/external database, `pg_dump` backups, or to run the database on a separate host from tend. (The job runner is single-instance; run one `tend serve` against a given database.) Tend runs migrations on every startup; for Postgres the database must already exist and the user must have DDL rights. Both backends have [identical behavior](docs/ARCHITECTURE.md#3-the-store-interface-and-sqlitepostgres-parity).
 
+**Troubleshooting: the CLI shows nothing but the dashboard shows your jobs (or vice versa).** The CLI and the running server each resolve `TEND_DB` independently, so they must point at the *same* database. Since the default is a *relative* `tend.db`, running a CLI command from a different directory (or against a container whose server uses `/data/tend.db`) reads a different, often empty, database. Run `tend doctor` to print the resolved driver, database path, org, base URL, and resource counts; the `tend serve` banner prints the same `db …(driver) org …`. For a containerized server, run CLI commands inside it, e.g. `docker exec <container> /tend doctor` or `docker exec <container> /tend heartbeat list`.
+
 ## Config-as-code (YAML)
 
 Job definitions, notification channels, rules, and heartbeats can be managed declaratively. The repo ships a minimal [`jobs.yaml`](jobs.yaml) you can apply right away to see tend working:
@@ -191,7 +193,7 @@ jobs:
 notifications:
   channels:
     - name: ops-slack
-      type: slack                 # webhook | slack | discord | smtp
+      type: slack                 # webhook | slack | discord | smtp | telegram
       config:
         webhook_url: "{{ secret.slack_webhook }}"
   rules:
@@ -221,6 +223,46 @@ printf 'the-secret-value' | tend secret set my_api_key
 
 `TEND_MASTER_KEY` must be set when storing secrets. Reference them in job `env` and channel `config` as `{{ secret.NAME }}`. List stored secret names (never values) via `GET /api/secrets`.
 
+## Alerting
+
+Tend emits events (`run.failed`, `heartbeat.missed`, `heartbeat.recovered`, and others). A **channel** is a delivery destination; a **rule** routes matching event types to a channel. Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
+
+### Alert on a missed heartbeat
+
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. Route both to a channel with a rule:
+
+```yaml
+notifications:
+  channels:
+    - name: ops-slack
+      type: slack
+      config:
+        webhook_url: "{{ secret.slack_webhook }}"
+  rules:
+    - channel: ops-slack
+      events: [heartbeat.missed, heartbeat.recovered]
+```
+
+Recover a synced heartbeat's ping URL any time with `tend heartbeat ping-url <name>` (or `tend heartbeat show <name>`), and inspect its transition history with `tend heartbeat history <name>`.
+
+### Send Tend events to Ward (or any sink)
+
+To forward events to an external incident sink (a webhook receiver, an aggregator, or [Ward](https://github.com/marsadhq)), point a webhook channel at it and route the event types you care about:
+
+```yaml
+notifications:
+  channels:
+    - name: ward
+      type: webhook
+      config:
+        url: "https://ward.example/ingest/tend"
+  rules:
+    - channel: ward
+      events: [run.failed, heartbeat.missed, heartbeat.recovered]
+```
+
+The webhook payload is JSON with `subject`, `body`, and the full originating `event` (type, source, and payload). Rules are org-wide; per-heartbeat routing is not yet supported.
+
 ## CLI reference
 
 All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands). The entrypoint is `tend`; in Docker it is `/tend`.
@@ -230,6 +272,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend serve` | Start the job runner, HTTP server, and heartbeat watcher. |
 | `tend sync [-prune] <file>` | Reconcile jobs/channels/rules/heartbeats from YAML. |
 | `tend version` | Print the binary version. |
+| `tend doctor` | Print the resolved driver, database, org, base URL, and resource counts (diagnose a CLI/server DB mismatch). |
 | `tend job list` | List all jobs. |
 | `tend job add [flags]` | Create a job (flags below). |
 | `tend job enable <name>` | Enable a job. |
@@ -244,6 +287,10 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend rule list` | List rules. |
 | `tend heartbeat add -name <n> -period <s> [-grace <s>]` | Create/update a heartbeat; prints the ping URL. |
 | `tend heartbeat list` | List heartbeats and their current status. |
+| `tend heartbeat show <name>` | Show a heartbeat's status, period, grace, last-seen, and ping URL. |
+| `tend heartbeat ping-url <name>` | Print a heartbeat's ping URL (recover a synced heartbeat's token). |
+| `tend heartbeat history <name> [-limit <n>]` | Show a heartbeat's missed/recovered transitions (default 20). |
+| `tend heartbeat rm <name>` | Delete a heartbeat (its past events are kept). |
 | `tend user add -email <e>` | Create an admin user; password read from stdin. |
 | `tend token create -name <n>` | Create an API token; printed once. |
 | `tend token list` | List API tokens (names and IDs; hash never shown). |
@@ -251,7 +298,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 `tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive); `-timeout <seconds>` (default `0` = no limit); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
 
-`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, or `smtp`. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
+`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, or `telegram` (Telegram config is `{"bot_token": "...", "chat_id": "..."}`). The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
 
 ## HTTP API
 

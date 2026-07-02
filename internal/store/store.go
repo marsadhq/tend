@@ -126,6 +126,19 @@ type Store interface {
 	CreateHeartbeat(ctx context.Context, hb heartbeat.Heartbeat) (id int64, token string, err error)
 	// ListHeartbeats returns all heartbeats for an org ordered by ID.
 	ListHeartbeats(ctx context.Context, orgID int64) ([]heartbeat.Heartbeat, error)
+	// GetHeartbeatByName returns the heartbeat named name for orgID, or
+	// ErrNotFound. It includes the ping token so the CLI can recover the ping URL
+	// of a config-as-code heartbeat.
+	GetHeartbeatByName(ctx context.Context, orgID int64, name string) (heartbeat.Heartbeat, error)
+	// GetHeartbeat returns the heartbeat with id for orgID, or ErrNotFound.
+	GetHeartbeat(ctx context.Context, orgID, id int64) (heartbeat.Heartbeat, error)
+	// ListHeartbeatEvents returns a heartbeat's transition events (heartbeat.missed
+	// / heartbeat.recovered, keyed by name in the events table), newest first,
+	// bounded by limit.
+	ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error)
+	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound. Its
+	// past events (the audit trail) are intentionally left in place.
+	DeleteHeartbeat(ctx context.Context, orgID, id int64) error
 	// RecordPing records a dead-man's-switch ping for the heartbeat identified by
 	// the globally-unique token: it stamps last_seen_at and sets status to 'up'.
 	// It returns ErrNotFound if no heartbeat owns the token. recovered is true iff

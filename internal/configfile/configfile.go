@@ -117,10 +117,11 @@ type jobSpec struct {
 
 // validChannelTypes enumerates the channel kinds the config may declare.
 var validChannelTypes = map[string]bool{
-	string(notify.Webhook): true,
-	string(notify.Slack):   true,
-	string(notify.Discord): true,
-	string(notify.SMTP):    true,
+	string(notify.Webhook):  true,
+	string(notify.Slack):    true,
+	string(notify.Discord):  true,
+	string(notify.SMTP):     true,
+	string(notify.Telegram): true,
 }
 
 // -------------------------------------------------------------------
