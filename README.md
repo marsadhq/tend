@@ -193,7 +193,7 @@ jobs:
 notifications:
   channels:
     - name: ops-slack
-      type: slack                 # webhook | slack | discord | smtp
+      type: slack                 # webhook | slack | discord | smtp | telegram
       config:
         webhook_url: "{{ secret.slack_webhook }}"
   rules:
@@ -253,7 +253,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 `tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive); `-timeout <seconds>` (default `0` = no limit); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
 
-`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, or `smtp`. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
+`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, or `telegram` (Telegram config is `{"bot_token": "...", "chat_id": "..."}`). The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
 
 ## HTTP API
 
