@@ -56,6 +56,14 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		return nil
 	}
 
+	// Refuse to invent a database. The old "./tend.db" relative default
+	// silently created or read a different DB per working directory, which
+	// bit operators repeatedly; every DB-touching command now requires an
+	// explicit TEND_DB.
+	if cfg.DSN == "" {
+		return errors.New("TEND_DB is not set; refusing to use default ./tend.db (set TEND_DB to an absolute SQLite path or a postgres:// DSN)")
+	}
+
 	// Open store.
 	st, err := store.Open(cfg.Driver, cfg.DSN)
 	if err != nil {

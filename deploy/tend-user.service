@@ -1,0 +1,32 @@
+# Tend — user-level systemd unit for prod1 (single-operator install, no root).
+# The system-wide hardened unit for root installs is deploy/tend.service.
+#
+# Install (as dan on prod1; lingering must be enabled once so the unit
+# survives logout: `loginctl enable-linger dan`):
+#
+#   install -m 644 tend-user.service ~/.config/systemd/user/tend.service
+#   install -d -m 700 ~/.config/tend   # env file: TEND_DB, TEND_MASTER_KEY,
+#                                      # TEND_ADDR, TEND_BASE_URL
+#   systemctl --user daemon-reload && systemctl --user enable --now tend
+#
+# Logs go to the user journal (rotation handled by journald):
+#   journalctl --user -u tend
+#
+# A user unit cannot order After=tailscaled.service (system scope), so
+# ExecStartPre waits for the tailscale IP that TEND_ADDR binds; Restart=always
+# additionally retries any startup race.
+
+[Unit]
+Description=Tend job runner & heartbeat monitor
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/tend/env
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip -4 addr show tailscale0 2>/dev/null | grep -q 100.73.180.5 && exit 0; sleep 2; done; echo "tend: tailscale IP never appeared" >&2; exit 1'
+ExecStart=%h/bin/tend serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
