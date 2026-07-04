@@ -26,6 +26,46 @@ const killGraceDelay = 5 * time.Second
 // agree on when an unfinished run is overdue.
 const DefaultTimeout = 30 * time.Minute
 
+// maxOutputBytes caps the captured output of one attempt (combined
+// stdout+stderr for shell jobs, response body for HTTP jobs) so a chatty or
+// runaway job cannot exhaust memory or bloat the job_runs table. Excess output
+// is discarded, never fails the run.
+const maxOutputBytes = 10 << 20 // 10 MiB
+
+// truncationMarker is appended to captured output that hit maxOutputBytes.
+const truncationMarker = "\n... [output truncated at 10MiB]"
+
+// cappedBuffer is an io.Writer keeping at most max bytes and discarding the
+// rest, recording that truncation happened. Write never errors, so a child
+// process is never killed by a full pipe — its extra output just vanishes.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	max       int
+	truncated bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.max - c.buf.Len(); room > 0 {
+		if len(p) > room {
+			c.buf.Write(p[:room])
+			c.truncated = true
+		} else {
+			c.buf.Write(p)
+		}
+	} else if len(p) > 0 {
+		c.truncated = true
+	}
+	return len(p), nil
+}
+
+// String returns the kept output, with the truncation marker when the cap hit.
+func (c *cappedBuffer) String() string {
+	if c.truncated {
+		return c.buf.String() + truncationMarker
+	}
+	return c.buf.String()
+}
+
 // RunResult holds the outcome of one complete Run (across all attempts).
 type RunResult struct {
 	Status   RunStatus
@@ -132,10 +172,9 @@ func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]stri
 	// commands like "sleep" (found via PATH) continue to work.
 	cmd.Env = append(os.Environ(), toEnvSlice(env)...)
 
-	// TODO(M2): cap captured output size (io.LimitReader) to bound memory for chatty/runaway jobs.
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+	buf := &cappedBuffer{max: maxOutputBytes}
+	cmd.Stdout = buf
+	cmd.Stderr = buf
 
 	err := cmd.Run()
 
@@ -207,13 +246,22 @@ func (e *Executor) runOnceHTTP(cctx context.Context, j Job, attempt int, started
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(resp.Body)
+	// Read at most one byte past the cap: the extra byte detects truncation
+	// without ever buffering an unbounded response.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOutputBytes+1))
 	if readErr != nil {
 		body = []byte(fmt.Sprintf("(error reading body: %v)", readErr))
+	}
+	truncated := len(body) > maxOutputBytes
+	if truncated {
+		body = body[:maxOutputBytes]
 	}
 
 	res.ExitCode = resp.StatusCode
 	res.Output = fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, string(body))
+	if truncated {
+		res.Output += truncationMarker
+	}
 	res.Ended = time.Now()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {

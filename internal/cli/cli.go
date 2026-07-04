@@ -323,10 +323,15 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	}()
 
 	// --- HTTP server ---
+	// All handlers are quick (ping, ingest, dashboard pages), so the write and
+	// idle timeouts mirror ReadHeaderTimeout: a stalled or abandoned client
+	// can hold a connection for at most ~10s instead of forever.
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           httpserver.New(st, clk, dispatch, logger, authCfg).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       10 * time.Second,
 	}
 	wg.Add(1)
 	go func() {

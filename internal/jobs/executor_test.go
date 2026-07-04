@@ -259,3 +259,51 @@ func TestExecutor_TimeoutKillsForkingJob(t *testing.T) {
 	}
 	t.Logf("TimeoutKillsForkingJob elapsed: %s", elapsed)
 }
+
+// Test 13: Shell output beyond the cap is discarded, the child still succeeds,
+// and the kept output carries the truncation marker. Output below the cap is
+// untouched (no marker).
+func TestExecutor_ShellOutputCapped(t *testing.T) {
+	e := NewExecutor()
+	// ~1 MiB over the cap, from /dev/zero so it's fast.
+	j := Job{Type: Shell, Command: "head -c $((11*1024*1024)) /dev/zero | tr '\\0' 'a'"}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s (output len %d)", res.Status, len(res.Output))
+	}
+	if len(res.Output) > maxOutputBytes+len(truncationMarker) {
+		t.Errorf("output len = %d, want <= cap+marker (%d)", len(res.Output), maxOutputBytes+len(truncationMarker))
+	}
+	if !strings.HasSuffix(res.Output, truncationMarker) {
+		t.Errorf("capped output missing truncation marker")
+	}
+
+	small := e.Run(context.Background(), Job{Type: Shell, Command: "echo small"}, nil)
+	if strings.Contains(small.Output, truncationMarker) {
+		t.Errorf("small output unexpectedly carries the truncation marker: %q", small.Output)
+	}
+}
+
+// Test 14: HTTP response bodies beyond the cap are truncated with the marker;
+// the run still reflects the HTTP status.
+func TestExecutor_HTTPBodyCapped(t *testing.T) {
+	big := strings.Repeat("b", maxOutputBytes+1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, big)
+	}))
+	defer srv.Close()
+
+	e := NewExecutor()
+	res := e.Run(context.Background(), Job{Type: HTTP, HTTPURL: srv.URL}, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s", res.Status)
+	}
+	if len(res.Output) > maxOutputBytes+len("HTTP 200\n")+len(truncationMarker) {
+		t.Errorf("output len = %d, want capped", len(res.Output))
+	}
+	if !strings.HasSuffix(res.Output, truncationMarker) {
+		t.Errorf("capped HTTP output missing truncation marker")
+	}
+}
