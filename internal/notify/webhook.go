@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +33,15 @@ func postJSON(ctx context.Context, rawURL string, payload any) error {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		// A transport error here is a *url.Error whose message embeds the full
+		// URL - which for webhook/Slack/Discord channels can carry a secret
+		// token in its path, and this error is surfaced to logs by the
+		// dispatcher. Unwrap it and report only the host.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("webhook POST %s: %w", safeHost(rawURL), err)
 	}
 	defer resp.Body.Close()
 	// Drain the body so the underlying connection can be reused.

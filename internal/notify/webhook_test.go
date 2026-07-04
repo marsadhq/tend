@@ -177,3 +177,21 @@ func TestWebhookProviderTransportError(t *testing.T) {
 		t.Fatal("expected transport error on closed server, got nil")
 	}
 }
+
+func TestTransportErrorRedactsURLToken(t *testing.T) {
+	// Start a server then immediately close it so the port is unreachable: the
+	// transport-level *url.Error would otherwise stringify the full URL,
+	// leaking the secret token embedded in its path.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	secretURL := srv.URL + "/ingest/wk_SUPERSECRETTOKEN"
+	srv.Close() // close before sending
+
+	ctx := context.Background()
+	err := notify.NewWebhook(secretURL).Send(ctx, notify.Message{Subject: "x", Body: "y"})
+	if err == nil {
+		t.Fatal("expected transport error on closed server, got nil")
+	}
+	if strings.Contains(err.Error(), "SUPERSECRETTOKEN") {
+		t.Fatalf("transport error leaked secret URL token: %v", err)
+	}
+}
