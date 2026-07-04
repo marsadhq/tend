@@ -36,6 +36,15 @@ const defaultTickInterval = 10 * time.Second
 // left unset (< 1).
 const defaultWorkers = 2
 
+// reapInterval is the cadence of the periodic stale-run sweep run by Start.
+const reapInterval = time.Minute
+
+// reapSlack is the grace added beyond a job's timeout before a 'running' run is
+// considered orphaned. The executor kills an attempt at the timeout, so a run
+// still 'running' this far past its deadline lost its worker (crash/exit
+// mid-run) and would otherwise block the job's no-overlap guard until restart.
+const reapSlack = 2 * time.Minute
+
 // RunnerStore is the persistence surface the runner needs. It is defined here
 // (in package jobs) rather than imported from store to avoid an import cycle:
 // store imports jobs. The concrete *store.SQLiteStore / *store.PostgresStore
@@ -55,6 +64,14 @@ type RunnerStore interface {
 	GetSecret(ctx context.Context, orgID int64, name string) (string, error)
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
 	RequeueOrphanedRuns(ctx context.Context) (int64, error)
+	// ListRunningRuns returns every run currently in 'running' (all orgs), for
+	// the periodic reaper sweep.
+	ListRunningRuns(ctx context.Context) ([]Run, error)
+	// ReapStaleRun atomically fails a run still in 'running' AND appends ev in
+	// the same transaction, mirroring FinishRunAndEmit. It returns false (no
+	// event written) when the run already reached a terminal state, closing the
+	// race with a worker finishing the run concurrently.
+	ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error)
 }
 
 // Runner ties the scheduler, run queue, executor, and event pipeline together.
@@ -177,11 +194,9 @@ func (r *Runner) DrainOnce(ctx context.Context) error {
 // returns claimed=true so draining continues.
 //
 // Recovery note: if claimAndRun returns an error after ClaimRun succeeds, the
-// run is left in 'running'. Single-instance v1 recovers these at the next
-// restart via RequeueOrphanedRuns (called by Start). There is NO in-process
-// periodic reaper - a run orphaned mid-claim blocks that job's no-overlap guard
-// until restart. M2 hardening: add a periodic reconcile that re-queues/fails
-// 'running' rows whose started_at exceeds the job timeout.
+// run is left in 'running'. It is recovered either at the next restart via
+// RequeueOrphanedRuns (called by Start) or by the periodic reaper (ReapOnce),
+// which fails it once started_at + timeout + reapSlack has passed.
 func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	run, ok, err := r.store.ClaimRun(ctx, workerID)
 	if err != nil {
@@ -257,6 +272,61 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	// alertable filter drops run.succeeded, so firing unconditionally is correct.
 	r.fire(ctx, termEv)
 	return true, nil
+}
+
+// ReapOnce fails every 'running' run whose deadline (started_at + job timeout +
+// reapSlack) has passed, emitting run.failed for each so the orphan is neither
+// silent nor left blocking the job's no-overlap guard until the next restart.
+// The store-side status guard in ReapStaleRun makes the sweep safe against a
+// worker finishing the run concurrently. Per-run errors do not abort the sweep;
+// the first error encountered is returned afterward.
+func (r *Runner) ReapOnce(ctx context.Context) error {
+	runs, err := r.store.ListRunningRuns(ctx)
+	if err != nil {
+		return err
+	}
+	now := r.clk.Now()
+
+	var firstErr error
+	record := func(e error) {
+		if e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+
+	for _, run := range runs {
+		if run.StartedAt.IsZero() {
+			continue // not actually started; RequeueOrphanedRuns territory
+		}
+		job, err := r.store.GetJob(ctx, run.OrgID, run.JobID)
+		if err != nil {
+			record(err)
+			continue
+		}
+		timeout := time.Duration(job.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = DefaultTimeout
+		}
+		if now.Before(run.StartedAt.Add(timeout + reapSlack)) {
+			continue // still within its window; the executor will finish it
+		}
+		termEv, err := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
+		if err != nil {
+			record(err)
+			continue
+		}
+		out := fmt.Sprintf("reaped: run still 'running' %s past its %s timeout (worker lost)",
+			reapSlack, timeout)
+		reaped, err := r.store.ReapStaleRun(ctx, run.ID, out, termEv)
+		if err != nil {
+			record(err)
+			continue
+		}
+		if reaped {
+			r.fire(ctx, termEv)
+		}
+	}
+	return firstErr
 }
 
 // resolveEnv builds the execution environment for a job, decrypting any value
@@ -356,11 +426,10 @@ func (r *Runner) emit(ctx context.Context, run Run, job Job, typ string, status 
 // returns nil.
 //
 // I3: crash/DB-orphaned 'running' runs are recovered at startup via
-// RequeueOrphanedRuns (at-least-once). There is NO in-process periodic reaper
-// - a run left 'running' by a transient mid-claim failure is recovered only on
-// the next restart; DueJobs' no-overlap guard means that job won't re-fire
-// until then. M2 hardening: add a periodic reconcile that re-queues/fails
-// 'running' rows whose started_at exceeds the job timeout.
+// RequeueOrphanedRuns (at-least-once). Runs orphaned while the process stays
+// up (worker goroutine lost mid-run) are failed by the periodic reaper
+// (ReapOnce) once started_at + timeout + reapSlack has passed, so an orphan
+// never blocks its job's no-overlap guard until the next restart.
 func (r *Runner) Start(ctx context.Context) error {
 	// 1. Reconcile crash-orphaned 'running' runs back to 'pending'.
 	if _, err := r.store.RequeueOrphanedRuns(ctx); err != nil {
@@ -396,6 +465,24 @@ func (r *Runner) Start(ctx context.Context) error {
 			case <-t.C:
 				// Tick errors are transient (DB hiccups); the next tick retries.
 				_ = r.Tick(ctx)
+			}
+		}
+	}()
+
+	// Stale-run reaper: periodically fail 'running' runs whose worker was lost
+	// mid-run, so an orphan can't silently block its job until the next restart.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(reapInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				// Reap errors are transient (DB hiccups); the next sweep retries.
+				_ = r.ReapOnce(ctx)
 			}
 		}
 	}()

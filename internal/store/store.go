@@ -80,6 +80,10 @@ type Store interface {
 	GetRun(ctx context.Context, orgID, runID int64) (jobs.Run, error)                // run detail incl. Output; ErrNotFound for a foreign/absent id
 	ListRuns(ctx context.Context, orgID, jobID int64, limit int) ([]jobs.Run, error) // newest first
 	RequeueOrphanedRuns(ctx context.Context) (int64, error)                          // reset 'running' runs -> 'pending' (crash recovery); returns rows affected
+	ListRunningRuns(ctx context.Context) ([]jobs.Run, error)                         // all 'running' runs (all orgs), for the reaper sweep
+	// ReapStaleRun atomically fails a run still in 'running' and appends ev in the
+	// same transaction (mirrors FinishRunAndEmit). false = run already terminal.
+	ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error)
 
 	// secrets (ciphertext in/out; encryption lives elsewhere)
 	PutSecret(ctx context.Context, orgID int64, name, ciphertext string) error // upsert by (org,name)

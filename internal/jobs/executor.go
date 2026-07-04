@@ -21,6 +21,11 @@ import (
 // force-closes them so Run can never hang waiting on a stuck/forked child.
 const killGraceDelay = 5 * time.Second
 
+// DefaultTimeout is the per-attempt execution timeout applied when a job's
+// TimeoutSeconds is unset. Shared with the runner's stale-run reaper so both
+// agree on when an unfinished run is overdue.
+const DefaultTimeout = 30 * time.Minute
+
 // RunResult holds the outcome of one complete Run (across all attempts).
 type RunResult struct {
 	Status   RunStatus
@@ -100,7 +105,7 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, attempt int) RunResult {
 	timeout := time.Duration(j.TimeoutSeconds) * time.Second
 	if timeout == 0 {
-		timeout = 30 * time.Minute
+		timeout = DefaultTimeout
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

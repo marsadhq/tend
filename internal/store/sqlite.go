@@ -569,6 +569,51 @@ func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status 
 	return id, nil
 }
 
+// ListRunningRuns returns every run currently in 'running' (all orgs), for the
+// runner's periodic stale-run reaper sweep.
+func (s *SQLiteStore) ListRunningRuns(ctx context.Context) ([]jobs.Run, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+runColumns+` FROM job_runs WHERE status = ? ORDER BY id`,
+		string(jobs.StatusRunning))
+	if err != nil {
+		return nil, fmt.Errorf("list running runs: %w", err)
+	}
+	defer rows.Close()
+	return scanRuns(rows)
+}
+
+// ReapStaleRun atomically fails a run still in 'running' AND appends ev in the
+// same transaction, mirroring FinishRunAndEmit. It returns false (writing
+// nothing) when the run already reached a terminal state, closing the race with
+// a worker finishing the run concurrently.
+func (s *SQLiteStore) ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("reap stale run begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx,
+		`UPDATE job_runs SET status = ?, exit_code = ?, output = ?, ended_at = ? WHERE id = ? AND status = ?`,
+		string(jobs.StatusFailed), -1, output, nowStr(), runID, string(jobs.StatusRunning))
+	if err != nil {
+		return false, fmt.Errorf("reap stale run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("reap stale run rows: %w", err)
+	}
+	if n == 0 {
+		return false, nil // finished concurrently; nothing to reap
+	}
+	if _, err := emitEventTx(ctx, tx, ev); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("reap stale run commit: %w", err)
+	}
+	return true, nil
+}
+
 // RequeueOrphanedRuns resets every run still in 'running' back to 'pending',
 // clearing claimed_by and started_at. The single-instance runner has no peer
 // workers, so any 'running' row found at startup was orphaned by a crash;
@@ -626,6 +671,23 @@ func scanRun(sc interface{ Scan(...any) error }) (jobs.Run, error) {
 		return jobs.Run{}, err
 	}
 	return r, nil
+}
+
+// scanRuns reads jobs.Runs from a SELECT of runColumns. Shared by both
+// backends (the scan is dialect-free, like scanEvents).
+func scanRuns(rows *sql.Rows) ([]jobs.Run, error) {
+	var out []jobs.Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate runs: %w", err)
+	}
+	return out, nil
 }
 
 // ListRuns returns up to limit runs for a job, newest first.

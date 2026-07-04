@@ -396,6 +396,51 @@ func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, statu
 	return id, nil
 }
 
+// ListRunningRuns returns every run currently in 'running' (all orgs), for the
+// runner's periodic stale-run reaper sweep.
+func (s *PostgresStore) ListRunningRuns(ctx context.Context) ([]jobs.Run, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+runColumns+` FROM job_runs WHERE status = $1 ORDER BY id`,
+		string(jobs.StatusRunning))
+	if err != nil {
+		return nil, fmt.Errorf("list running runs: %w", err)
+	}
+	defer rows.Close()
+	return scanRuns(rows)
+}
+
+// ReapStaleRun atomically fails a run still in 'running' AND appends ev in the
+// same transaction, mirroring FinishRunAndEmit. It returns false (writing
+// nothing) when the run already reached a terminal state, closing the race with
+// a worker finishing the run concurrently.
+func (s *PostgresStore) ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("reap stale run begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx,
+		`UPDATE job_runs SET status = $1, exit_code = $2, output = $3, ended_at = $4 WHERE id = $5 AND status = $6`,
+		string(jobs.StatusFailed), -1, output, nowStr(), runID, string(jobs.StatusRunning))
+	if err != nil {
+		return false, fmt.Errorf("reap stale run: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("reap stale run rows: %w", err)
+	}
+	if n == 0 {
+		return false, nil // finished concurrently; nothing to reap
+	}
+	if _, err := pgEmitEventTx(ctx, tx, ev); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("reap stale run commit: %w", err)
+	}
+	return true, nil
+}
+
 // RequeueOrphanedRuns resets every run still in 'running' back to 'pending',
 // clearing claimed_by and started_at. The single-instance runner has no peer
 // workers, so any 'running' row found at startup was orphaned by a crash;
