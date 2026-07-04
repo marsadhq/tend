@@ -62,4 +62,6 @@ jobs:
 
           # The maintainer and common automation accounts are pre-allowed and do not
           # need to sign the CLA themselves.
-          allowlist: "dquomsieh,dependabot[bot],github-actions[bot]"
+          # NOTE: matching is against the exact GitHub login (case-sensitive);
+          # both spellings of the maintainer's login are listed defensively.
+          allowlist: "DQuomsieh,dquomsieh,dependabot[bot],github-actions[bot]"
