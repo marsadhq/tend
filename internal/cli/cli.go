@@ -706,6 +706,23 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 		return fmt.Errorf("run: drain: %w", err)
 	}
 
+	// F4: a manual run must notify like a scheduled one. The terminal event
+	// enqueued its deliveries transactionally (FinishRunAndEmit); drain them
+	// inline so the notification goes out even when no serve process is
+	// running. A destination that fails here stays queued (pending with
+	// backoff) and is picked up by a running serve worker - claim atomicity
+	// makes the overlap safe. Without a master key the channel configs cannot
+	// be decrypted, so warn rather than silently dropping the alert.
+	if box != nil {
+		w := notify.NewWorker(st, box, notify.BuildProvider,
+			slog.New(slog.NewTextHandler(stderr, nil)))
+		if _, err := w.DrainOnce(ctx); err != nil {
+			fmt.Fprintf(stderr, "run: warning: notification delivery: %v\n", err)
+		}
+	} else {
+		fmt.Fprintln(stderr, "run: warning: no master key configured; notifications for this run cannot be delivered now (they stay queued for a serve process with a key)")
+	}
+
 	// Show the latest run's result.
 	runs, err := st.ListRuns(ctx, orgID, j.ID, 1)
 	if err != nil {
