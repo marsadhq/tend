@@ -147,11 +147,12 @@ type Store interface {
 	// name let the caller emit a heartbeat.recovered event without depending on a
 	// Heartbeat type (which package heartbeat defines later).
 	RecordPing(ctx context.Context, token string, now time.Time) (orgID int64, name string, recovered bool, err error)
-	// DueHeartbeats returns the 'up' heartbeats whose period+grace deadline has
-	// strictly passed at now (last_seen_at + (period+grace)s < now). The deadline
-	// is computed in Go (dialect-agnostic): the query selects every 'up' heartbeat
-	// with a non-NULL last_seen_at and the filter is applied per row. 'new' and
-	// 'down' heartbeats are never watched.
+	// DueHeartbeats returns the watched heartbeats whose period+grace deadline has
+	// strictly passed at now. The deadline is computed in Go (dialect-agnostic):
+	// the query selects every 'up' heartbeat with a non-NULL last_seen_at (anchored
+	// on last_seen_at) plus every 'new' heartbeat never pinged (anchored on
+	// created_at, arming the dead-man's switch for an unpinged monitor), and the
+	// filter is applied per row. 'down' heartbeats are never watched.
 	DueHeartbeats(ctx context.Context, now time.Time) ([]heartbeat.Heartbeat, error)
 	// SetHeartbeatStatus updates a heartbeat's status (e.g. 'up' -> 'down') by ID.
 	SetHeartbeatStatus(ctx context.Context, id int64, status string) error

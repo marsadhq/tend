@@ -68,15 +68,18 @@ func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core
 	return &Watcher{store: s, clock: c, dispatch: dispatch}
 }
 
-// Check marks overdue 'up' heartbeats 'down', emits heartbeat.missed, and
-// dispatches it. Idempotent: a heartbeat already 'down' is not returned by
-// DueHeartbeats, so it is not re-alerted.
+// Check marks overdue heartbeats 'down', emits heartbeat.missed, and dispatches
+// it. This covers both an 'up' heartbeat that stopped pinging and a 'new' one
+// that never pinged (armed on created_at) — the dead-man's-switch blind spot.
+// Idempotent: a heartbeat already 'down' is not returned by DueHeartbeats, so it
+// is not re-alerted.
 //
 // The down-transition is guarded via SetHeartbeatStatusIf: only when both the
-// observed status ('up') and last_seen_at still match the stored row will the
-// UPDATE fire. A RecordPing that re-stamped last_seen_at between DueHeartbeats
-// and SetHeartbeatStatusIf makes the conditional UPDATE a no-op (fired==false),
-// so no spurious heartbeat.missed is emitted for the now-healthy heartbeat.
+// observed status ('up' or 'new') and last_seen_at still match the stored row
+// will the UPDATE fire. A RecordPing that re-stamped last_seen_at (and, for a
+// 'new' heartbeat, flipped status to 'up') between DueHeartbeats and
+// SetHeartbeatStatusIf makes the conditional UPDATE a no-op (fired==false), so
+// no spurious heartbeat.missed is emitted for the now-healthy heartbeat.
 //
 // The status update is the commit point; the subsequent EmitEvent + dispatch
 // are best-effort (errors are not retried within this Check), matching Task 6's
@@ -90,7 +93,12 @@ func (w *Watcher) Check(ctx context.Context) error {
 		return err
 	}
 	for _, hb := range due {
-		fired, err := w.store.SetHeartbeatStatusIf(ctx, hb.ID, "up", "down", hb.LastSeenAt)
+		// hb.Status is the observed 'from' status: 'up' for a heartbeat that
+		// stopped pinging, or 'new' for one that never pinged at all (arming the
+		// dead-man's switch on created_at). Both transition to 'down' and emit the
+		// same heartbeat.missed event. The guard (status + last_seen_at, which is
+		// NULL for 'new') makes a concurrent ping win the race as a no-op.
+		fired, err := w.store.SetHeartbeatStatusIf(ctx, hb.ID, hb.Status, "down", hb.LastSeenAt)
 		if err != nil || !fired {
 			continue // error, or a ping won the race → do NOT emit a spurious miss
 		}

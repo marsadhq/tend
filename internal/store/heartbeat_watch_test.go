@@ -100,6 +100,78 @@ func TestDueHeartbeats(t *testing.T) {
 	}
 }
 
+// TestDueHeartbeatsNew covers the dead-man's-switch blind spot: a heartbeat
+// that never received its first ping stays status='new' with last_seen_at NULL.
+// It must still become due once created_at is older than period+grace, otherwise
+// an unpinged monitor is never armed and never alerts.
+func TestDueHeartbeatsNew(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+
+	for _, b := range backends(t) {
+		b := b
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			org, err := s.BootstrapDefaultOrg(ctx)
+			if err != nil {
+				t.Fatalf("BootstrapDefaultOrg: %v", err)
+			}
+
+			db := store.RawDB(s)
+			// seedNew inserts a status='new' heartbeat (last_seen_at NULL) with an
+			// explicit created_at and returns its row ID.
+			seedNew := func(name, token string, period, grace int, created time.Time) int64 {
+				t.Helper()
+				if _, err := db.ExecContext(ctx,
+					`INSERT INTO heartbeats (org_id, name, token, period_seconds, grace_seconds, status, last_seen_at, created_at)
+					 VALUES (`+phs(b.name, 1, 8)+`)`,
+					org.ID, name, token, period, grace, "new", nil, created.UTC().Format(hbTSLayout)); err != nil {
+					t.Fatalf("seed new heartbeat %q: %v", name, err)
+				}
+				var id int64
+				if err := db.QueryRowContext(ctx,
+					`SELECT id FROM heartbeats WHERE token = `+ph(b.name, 1), token).Scan(&id); err != nil {
+					t.Fatalf("read seeded heartbeat id: %v", err)
+				}
+				return id
+			}
+
+			// N1: new, created now-91s, period 60 grace 30 (deadline now-1s) -> DUE.
+			idN1 := seedNew("hb-n1", "tok-n1", 60, 30, now.Add(-91*time.Second))
+			// N2: new, created now-60s (deadline now+30s) -> NOT due yet.
+			seedNew("hb-n2", "tok-n2", 60, 30, now.Add(-60*time.Second))
+
+			due, err := s.DueHeartbeats(ctx, now)
+			if err != nil {
+				t.Fatalf("DueHeartbeats: %v", err)
+			}
+			var got *struct {
+				id     int64
+				status string
+			}
+			names := make([]string, len(due))
+			for i, hb := range due {
+				names[i] = hb.Name
+				if hb.ID == idN1 {
+					got = &struct {
+						id     int64
+						status string
+					}{hb.ID, hb.Status}
+				}
+			}
+			if got == nil {
+				t.Fatalf("DueHeartbeats = %v, want to include hb-n1 (an armed new heartbeat)", names)
+			}
+			if got.status != "new" {
+				t.Errorf("hb-n1 Status = %q, want new (transition to down happens in the watcher)", got.status)
+			}
+			if len(due) != 1 {
+				t.Fatalf("DueHeartbeats returned %d (%v), want exactly [hb-n1]", len(due), names)
+			}
+		})
+	}
+}
+
 func TestSetHeartbeatStatus(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)

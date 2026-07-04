@@ -1145,19 +1145,30 @@ func scanHeartbeat(sc interface{ Scan(...any) error }) (heartbeat.Heartbeat, err
 	return hb, nil
 }
 
-// dueFromCandidates filters 'up' heartbeats (already SELECTed with a non-NULL
-// last_seen_at) down to those strictly past their period+grace deadline at now.
-// The deadline math lives in Go so it is identical across dialects. This is the
-// single source of the filter; both backends call it after their SELECT.
+// dueFromCandidates filters watched heartbeats down to those strictly past
+// their period+grace deadline at now. The deadline math lives in Go so it is
+// identical across dialects. This is the single source of the filter; both
+// backends call it after their SELECT.
+//
+// The deadline anchor depends on status. An 'up' heartbeat (SELECTed with a
+// non-NULL last_seen_at) counts from its last ping. A 'new' heartbeat has never
+// been pinged (last_seen_at NULL), so it counts from created_at: this arms the
+// dead-man's switch for a monitor whose first ping never arrives — the cron that
+// was never installed, the ping URL with a typo — which would otherwise stay
+// unmonitored forever.
 func dueFromCandidates(candidates []heartbeat.Heartbeat, now time.Time) []heartbeat.Heartbeat {
 	var out []heartbeat.Heartbeat
 	for _, hb := range candidates {
 		// unconfigured period => not monitored; skip to avoid immediate false misses
-		// when period+grace == 0 (deadline == lastSeen, so now.After is true immediately).
+		// when period+grace == 0 (deadline == anchor, so now.After is true immediately).
 		if hb.PeriodSeconds <= 0 {
 			continue
 		}
-		deadline := hb.LastSeenAt.Add(time.Duration(hb.PeriodSeconds+hb.GraceSeconds) * time.Second)
+		anchor := hb.LastSeenAt
+		if hb.Status == "new" {
+			anchor = hb.CreatedAt
+		}
+		deadline := anchor.Add(time.Duration(hb.PeriodSeconds+hb.GraceSeconds) * time.Second)
 		if now.After(deadline) {
 			out = append(out, hb)
 		}
@@ -1165,13 +1176,14 @@ func dueFromCandidates(candidates []heartbeat.Heartbeat, now time.Time) []heartb
 	return out
 }
 
-// DueHeartbeats returns the 'up' heartbeats whose period+grace deadline has
-// strictly passed at now. The SELECT narrows to watched candidates ('up' with a
-// last_seen_at); the deadline filter runs in Go via dueFromCandidates.
+// DueHeartbeats returns the watched heartbeats whose period+grace deadline has
+// strictly passed at now. The SELECT narrows to watched candidates: 'up' rows
+// with a last_seen_at, plus 'new' rows (never pinged) which are anchored on
+// created_at. The deadline filter runs in Go via dueFromCandidates.
 func (s *SQLiteStore) DueHeartbeats(ctx context.Context, now time.Time) ([]heartbeat.Heartbeat, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+heartbeatColumns+` FROM heartbeats
-		 WHERE status = 'up' AND last_seen_at IS NOT NULL
+		 WHERE (status = 'up' AND last_seen_at IS NOT NULL) OR status = 'new'
 		 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("due heartbeats: %w", err)
@@ -1209,10 +1221,26 @@ func (s *SQLiteStore) SetHeartbeatStatus(ctx context.Context, id int64, status s
 // race: a RecordPing that re-stamped last_seen_at between DueHeartbeats and
 // SetHeartbeatStatusIf makes the conditional UPDATE a no-op, so no false miss is
 // emitted.
+//
+// A zero lastSeenAt matches a NULL last_seen_at column (SQL `=` never matches
+// NULL), which is the new→down path: a 'new' heartbeat has never been pinged, so
+// the guard becomes status='new' AND last_seen_at IS NULL. A concurrent first
+// ping flips status to 'up' (and stamps last_seen_at), so the guard rejects and
+// no spurious miss is emitted.
 func (s *SQLiteStore) SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE heartbeats SET status = ? WHERE id = ? AND status = ? AND last_seen_at = ?`,
-		toStatus, id, fromStatus, formatTime(lastSeenAt))
+	var (
+		res sql.Result
+		err error
+	)
+	if lastSeenAt.IsZero() {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE heartbeats SET status = ? WHERE id = ? AND status = ? AND last_seen_at IS NULL`,
+			toStatus, id, fromStatus)
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE heartbeats SET status = ? WHERE id = ? AND status = ? AND last_seen_at = ?`,
+			toStatus, id, fromStatus, formatTime(lastSeenAt))
+	}
 	if err != nil {
 		return false, fmt.Errorf("set heartbeat status if: %w", err)
 	}

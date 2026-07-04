@@ -815,15 +815,17 @@ func (s *PostgresStore) RecordPing(ctx context.Context, token string, now time.T
 	return orgID, name, recovered, nil
 }
 
-// DueHeartbeats returns the 'up' heartbeats whose period+grace deadline has
+// DueHeartbeats returns the watched heartbeats whose period+grace deadline has
 // strictly passed at now. The deadline filter runs in Go (dueFromCandidates),
 // so it is identical to the SQLite backend; only the SELECT differs ($N is moot
-// here as it takes no parameters). heartbeatColumns, scanHeartbeat and
-// dueFromCandidates are shared with the SQLite backend (defined in sqlite.go).
+// here as it takes no parameters). Watched candidates are 'up' rows with a
+// last_seen_at plus 'new' rows (never pinged, anchored on created_at).
+// heartbeatColumns, scanHeartbeat and dueFromCandidates are shared with the
+// SQLite backend (defined in sqlite.go).
 func (s *PostgresStore) DueHeartbeats(ctx context.Context, now time.Time) ([]heartbeat.Heartbeat, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+heartbeatColumns+` FROM heartbeats
-		 WHERE status = 'up' AND last_seen_at IS NOT NULL
+		 WHERE (status = 'up' AND last_seen_at IS NOT NULL) OR status = 'new'
 		 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("due heartbeats: %w", err)
@@ -858,10 +860,23 @@ func (s *PostgresStore) SetHeartbeatStatus(ctx context.Context, id int64, status
 // match the observed values. Returns (true, nil) when the row was updated, and
 // (false, nil) when the guard rejected the update (a concurrent ping changed
 // last_seen_at or the status no longer matches). Mirrors the SQLite backend.
+//
+// A zero lastSeenAt matches a NULL last_seen_at column (the new→down path); a
+// concurrent first ping flips status to 'up' so the guard rejects the update.
 func (s *PostgresStore) SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE heartbeats SET status = $1 WHERE id = $2 AND status = $3 AND last_seen_at = $4`,
-		toStatus, id, fromStatus, formatTime(lastSeenAt))
+	var (
+		res sql.Result
+		err error
+	)
+	if lastSeenAt.IsZero() {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE heartbeats SET status = $1 WHERE id = $2 AND status = $3 AND last_seen_at IS NULL`,
+			toStatus, id, fromStatus)
+	} else {
+		res, err = s.db.ExecContext(ctx,
+			`UPDATE heartbeats SET status = $1 WHERE id = $2 AND status = $3 AND last_seen_at = $4`,
+			toStatus, id, fromStatus, formatTime(lastSeenAt))
+	}
 	if err != nil {
 		return false, fmt.Errorf("set heartbeat status if: %w", err)
 	}

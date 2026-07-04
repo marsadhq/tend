@@ -165,6 +165,87 @@ func TestWatcherDeadMansSwitch(t *testing.T) {
 	}
 }
 
+// TestWatcherArmsNewHeartbeat covers the dead-man's-switch blind spot end to
+// end: a heartbeat that never receives its first ping stays status='new' with
+// last_seen_at NULL. Once created_at is older than period+grace the watcher must
+// mark it 'down' and emit heartbeat.missed — otherwise the monitor is never
+// armed and a broken cron/typo'd ping URL is never caught.
+func TestWatcherArmsNewHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	s, err := store.OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	org, err := s.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatalf("BootstrapDefaultOrg: %v", err)
+	}
+
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	t.Cleanup(func() { raw.Close() })
+
+	t0 := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	fk := clock.NewFake(t0)
+
+	// Seed a 'new' heartbeat (never pinged, last_seen_at NULL) created 91s before
+	// t0: period 60 + grace 30 = 90, so its deadline (created+90 = t0-1s) has
+	// already passed at t0.
+	created := t0.Add(-91 * time.Second).UTC().Format(tsLayout)
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO heartbeats (org_id, name, token, period_seconds, grace_seconds, status, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		org.ID, "never-pinged", "tok-new", 60, 30, "new", created,
+	); err != nil {
+		t.Fatalf("seed new heartbeat: %v", err)
+	}
+
+	rawStatus := func() string {
+		var st string
+		if err := raw.QueryRowContext(ctx,
+			`SELECT status FROM heartbeats WHERE token = ?`, "tok-new").Scan(&st); err != nil {
+			t.Fatalf("read status: %v", err)
+		}
+		return st
+	}
+
+	cap := &captureDispatch{}
+	w := heartbeat.NewWatcher(s, fk, cap.fn)
+
+	if err := w.Check(ctx); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if st := rawStatus(); st != "down" {
+		t.Fatalf("after Check: status = %q, want down", st)
+	}
+	dispatched := cap.snapshot()
+	if len(dispatched) != 1 || dispatched[0].Type != "heartbeat.missed" {
+		t.Fatalf("dispatched = %+v, want exactly one heartbeat.missed", dispatched)
+	}
+	if dispatched[0].Payload != "never-pinged" {
+		t.Fatalf("dispatched payload = %q, want never-pinged", dispatched[0].Payload)
+	}
+	if missed := countMissed(t, ctx, s, org.ID); missed != 1 {
+		t.Fatalf("stored %d heartbeat.missed events, want 1", missed)
+	}
+
+	// Idempotent: it is now 'down', excluded by DueHeartbeats, so no re-alert.
+	if err := w.Check(ctx); err != nil {
+		t.Fatalf("Check (idempotent): %v", err)
+	}
+	if missed := countMissed(t, ctx, s, org.ID); missed != 1 {
+		t.Fatalf("idempotent: stored %d heartbeat.missed events, want 1", missed)
+	}
+}
+
 // listMissed returns all stored heartbeat.missed events for the org.
 func listMissed(t *testing.T, ctx context.Context, s store.Store, orgID int64) []core.Event {
 	t.Helper()
