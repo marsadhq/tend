@@ -869,6 +869,48 @@ func (s *PostgresStore) FailDelivery(ctx context.Context, id int64) error {
 	return nil
 }
 
+// --- retention pruning -----------------------------------------------------
+
+// PruneEvents hard-deletes events created strictly before the cutoff, except
+// events still referenced by a pending delivery. Mirrors the SQLite backend.
+func (s *PostgresStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM events
+		WHERE created_at < $1
+		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = $2)`,
+		formatTime(before), notify.DeliveryPending)
+	if err != nil {
+		return 0, fmt.Errorf("prune events: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneJobRuns hard-deletes terminal job_runs created strictly before the
+// cutoff; pending/running rows are never pruned. Mirrors the SQLite backend.
+func (s *PostgresStore) PruneJobRuns(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM job_runs
+		WHERE created_at < $1 AND status NOT IN ($2, $3)`,
+		formatTime(before), string(jobs.StatusPending), string(jobs.StatusRunning))
+	if err != nil {
+		return 0, fmt.Errorf("prune job runs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneDeliveries hard-deletes finalized (delivered or failed) deliveries
+// created strictly before the cutoff. Mirrors the SQLite backend.
+func (s *PostgresStore) PruneDeliveries(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM deliveries
+		WHERE created_at < $1 AND state IN ($2, $3)`,
+		formatTime(before), notify.DeliveryDelivered, notify.DeliveryFailed)
+	if err != nil {
+		return 0, fmt.Errorf("prune deliveries: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // --- heartbeats ----------------------------------------------------------
 
 // CreateHeartbeat upserts a heartbeat by (org, name), returning its row ID and

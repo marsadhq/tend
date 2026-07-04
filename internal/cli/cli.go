@@ -132,6 +132,20 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 // watcherInterval is how often the heartbeat watcher scans for missed pings.
 const watcherInterval = 30 * time.Second
 
+// retentionSweepInterval is how often serve's retention sweep prunes old rows
+// from the audit tables (events, job_runs, finalized deliveries), which
+// otherwise grow without bound. The sweep also runs once at startup.
+const retentionSweepInterval = 24 * time.Hour
+
+// Retention windows for the daily sweep. Events and job runs are the forensic
+// record (kept a month); finalized deliveries only matter while debugging a
+// recent notification problem (kept a week -- pending rows are never pruned).
+const (
+	eventRetention    = 30 * 24 * time.Hour
+	jobRunRetention   = 30 * 24 * time.Hour
+	deliveryRetention = 7 * 24 * time.Hour
+)
+
 // serveShutdownTimeout bounds the HTTP server's graceful drain on ctx cancel.
 const serveShutdownTimeout = 5 * time.Second
 
@@ -352,6 +366,41 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 				if err := watcher.Check(serveCtx); err != nil {
 					logger.Error("heartbeat watcher check", "err", err)
 				}
+			}
+		}
+	}()
+
+	// --- retention sweep ---
+	// Prunes old events/job_runs/deliveries once at startup and then daily so
+	// the audit tables stay bounded. Errors are logged, never fatal: a failed
+	// sweep just retries next tick.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sweep := func() {
+			now := clk.Now()
+			prune := func(what string, fn func(context.Context, time.Time) (int64, error), retention time.Duration) {
+				n, err := fn(serveCtx, now.Add(-retention))
+				switch {
+				case err != nil && serveCtx.Err() == nil:
+					logger.Error("retention sweep: prune "+what, "err", err)
+				case n > 0:
+					logger.Info("retention sweep: pruned "+what, "rows", n)
+				}
+			}
+			prune("events", st.PruneEvents, eventRetention)
+			prune("job runs", st.PruneJobRuns, jobRunRetention)
+			prune("deliveries", st.PruneDeliveries, deliveryRetention)
+		}
+		sweep()
+		t := time.NewTicker(retentionSweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-serveCtx.Done():
+				return
+			case <-t.C:
+				sweep()
 			}
 		}
 	}()

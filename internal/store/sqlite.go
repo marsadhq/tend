@@ -1202,6 +1202,52 @@ func (s *SQLiteStore) FailDelivery(ctx context.Context, id int64) error {
 	return nil
 }
 
+// --- retention pruning -----------------------------------------------------
+
+// PruneEvents hard-deletes events created strictly before the cutoff, except
+// events still referenced by a pending delivery (the notify worker joins the
+// event when it claims the row; pruning it would orphan the queue entry).
+// Returns rows deleted.
+func (s *SQLiteStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM events
+		WHERE created_at < ?
+		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = ?)`,
+		formatTime(before), notify.DeliveryPending)
+	if err != nil {
+		return 0, fmt.Errorf("prune events: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneJobRuns hard-deletes terminal job_runs created strictly before the
+// cutoff. pending/running rows are never pruned regardless of age (the runner
+// and the orphan reaper own their lifecycle). Returns rows deleted.
+func (s *SQLiteStore) PruneJobRuns(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM job_runs
+		WHERE created_at < ? AND status NOT IN (?, ?)`,
+		formatTime(before), string(jobs.StatusPending), string(jobs.StatusRunning))
+	if err != nil {
+		return 0, fmt.Errorf("prune job runs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneDeliveries hard-deletes finalized (delivered or failed) deliveries
+// created strictly before the cutoff. Pending rows are kept regardless of age.
+// Returns rows deleted.
+func (s *SQLiteStore) PruneDeliveries(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM deliveries
+		WHERE created_at < ? AND state IN (?, ?)`,
+		formatTime(before), notify.DeliveryDelivered, notify.DeliveryFailed)
+	if err != nil {
+		return 0, fmt.Errorf("prune deliveries: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // --- heartbeats ----------------------------------------------------------
 
 // CreateHeartbeat upserts a heartbeat by (org, name), returning its row ID and

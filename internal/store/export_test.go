@@ -13,3 +13,7 @@ func RawDB(s Store) *sql.DB {
 	}
 	return nil
 }
+
+// FormatTime exposes the storage timestamp layout to external tests (e.g. for
+// backdating rows to exercise retention pruning).
+var FormatTime = formatTime

@@ -109,6 +109,17 @@ type Store interface {
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
 	ListEvents(ctx context.Context, orgID int64, limit int) ([]core.Event, error) // newest first
 
+	// retention pruning (the daily serve sweep). Each method hard-deletes rows
+	// created strictly before the cutoff and returns the rows removed.
+	// PruneEvents keeps events still referenced by a PENDING delivery (the
+	// notify worker joins the event on claim; pruning it would break the
+	// queue). PruneJobRuns keeps pending/running rows regardless of age (the
+	// runner and the orphan reaper own their lifecycle). PruneDeliveries only
+	// removes finalized rows (delivered or failed).
+	PruneEvents(ctx context.Context, before time.Time) (int64, error)
+	PruneJobRuns(ctx context.Context, before time.Time) (int64, error)
+	PruneDeliveries(ctx context.Context, before time.Time) (int64, error)
+
 	// durable notification deliveries. Pending rows are enqueued transactionally
 	// by every event insert (EmitEvent / FinishRunAndEmit / ReapStaleRun) for
 	// alertable event types with matching enabled rules; the notify.Worker
