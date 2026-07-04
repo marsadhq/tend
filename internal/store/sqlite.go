@@ -526,7 +526,56 @@ func emitEventTx(ctx context.Context, tx *sql.Tx, e core.Event) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("event id: %w", err)
 	}
+	if err := enqueueDeliveriesTx(ctx, tx, id, e); err != nil {
+		return 0, err
+	}
 	return id, nil
+}
+
+// enqueueDeliveriesTx inserts one pending deliveries row per channel with an
+// enabled matching rule for e, on the SAME transaction that inserted the
+// event. This is what makes notification delivery durable: a crash after
+// commit can no longer lose a matched alert, because the pending delivery row
+// commits atomically with the event. Non-alertable event types (including all
+// notification.*) enqueue nothing - the loop guard, enforced at the store
+// layer. Channels are deduplicated so overlapping rules (org-wide + job-scoped)
+// yield a single delivery.
+func enqueueDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64, e core.Event) error {
+	if !notify.Alertable(e.Type) {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT channel_id FROM notification_rules
+		 WHERE org_id = ? AND enabled = 1 AND event_type = ? AND (job_id = 0 OR job_id = ?)`,
+		e.OrgID, e.Type, notify.EventJobID(e))
+	if err != nil {
+		return fmt.Errorf("enqueue deliveries match: %w", err)
+	}
+	var channelIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan matched channel: %w", err)
+		}
+		channelIDs = append(channelIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate matched channels: %w", err)
+	}
+	rows.Close()
+
+	now := nowStr()
+	for _, chID := range channelIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries
+			(org_id, event_id, channel_id, attempts, state, next_attempt_at, created_at)
+			VALUES (?, ?, ?, 0, ?, ?, ?)`,
+			e.OrgID, eventID, chID, notify.DeliveryPending, now, now); err != nil {
+			return fmt.Errorf("enqueue delivery: %w", err)
+		}
+	}
+	return nil
 }
 
 // FinishRun records the terminal state of a run.
@@ -984,6 +1033,30 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, orgID int64, limit int) ([
 	return scanEvents(rows)
 }
 
+// scanEvent reads one core.Event from a row produced by a SELECT of the
+// standard event column list (id, org_id, type, source, payload, dedup_key,
+// created_at). Shared by both backends, like scanRun/scanHeartbeat.
+func scanEvent(sc interface{ Scan(...any) error }) (core.Event, error) {
+	var (
+		e        core.Event
+		source   sql.NullString
+		payload  sql.NullString
+		dedupKey sql.NullString
+		created  sql.NullString
+	)
+	if err := sc.Scan(&e.ID, &e.OrgID, &e.Type, &source, &payload, &dedupKey, &created); err != nil {
+		return core.Event{}, err
+	}
+	e.Source = source.String
+	e.Payload = payload.String
+	e.DedupKey = dedupKey.String
+	var err error
+	if e.CreatedAt, err = parseTime(created); err != nil {
+		return core.Event{}, err
+	}
+	return e, nil
+}
+
 // scanEvents reads core.Events from a SELECT of the standard event column list
 // (id, org_id, type, source, payload, dedup_key, created_at). It is shared by
 // both backends' ListEvents and ListHeartbeatEvents (the scan is dialect-free,
@@ -1014,6 +1087,119 @@ func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 		return nil, fmt.Errorf("iterate events: %w", err)
 	}
 	return out, nil
+}
+
+// --- durable notification deliveries --------------------------------------
+
+// deliveryColumns lists the deliveries columns in SELECT/RETURNING order,
+// matched positionally by scanDelivery. Shared with the Postgres backend.
+const deliveryColumns = `id, org_id, event_id, channel_id, attempts, state, next_attempt_at, created_at`
+
+// scanDelivery reads a notify.Delivery (without its joined Event) from a row
+// produced by a SELECT/RETURNING of deliveryColumns. Shared with Postgres.
+func scanDelivery(sc interface{ Scan(...any) error }) (notify.Delivery, error) {
+	var (
+		d       notify.Delivery
+		nextAt  sql.NullString
+		created sql.NullString
+	)
+	if err := sc.Scan(&d.ID, &d.OrgID, &d.EventID, &d.ChannelID, &d.Attempts, &d.State, &nextAt, &created); err != nil {
+		return notify.Delivery{}, err
+	}
+	var err error
+	if d.NextAttemptAt, err = parseTime(nextAt); err != nil {
+		return notify.Delivery{}, err
+	}
+	if d.CreatedAt, err = parseTime(created); err != nil {
+		return notify.Delivery{}, err
+	}
+	return d, nil
+}
+
+// ClaimDueDeliveries atomically claims up to limit pending deliveries due at
+// now: attempts+1 and next_attempt_at pushed to now+lease in one UPDATE, so a
+// crashed worker's claims become due again after the lease (at-least-once).
+// Each claimed delivery is returned with its originating event joined in.
+func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim deliveries begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ?
+		 WHERE id IN (
+		   SELECT id FROM deliveries WHERE state = ? AND next_attempt_at <= ? ORDER BY id LIMIT ?
+		 )
+		 RETURNING `+deliveryColumns,
+		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim deliveries: %w", err)
+	}
+	var out []notify.Delivery
+	for rows.Next() {
+		d, err := scanDelivery(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan delivery: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate deliveries: %w", err)
+	}
+	rows.Close()
+
+	for i := range out {
+		row := tx.QueryRowContext(ctx,
+			`SELECT id, org_id, type, source, payload, dedup_key, created_at FROM events WHERE id = ?`,
+			out[i].EventID)
+		ev, err := scanEvent(row)
+		if err != nil {
+			return nil, fmt.Errorf("join delivery event %d: %w", out[i].EventID, err)
+		}
+		out[i].Event = ev
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("claim deliveries commit: %w", err)
+	}
+	return out, nil
+}
+
+// MarkDeliveryDelivered finalizes a delivery as delivered.
+func (s *SQLiteStore) MarkDeliveryDelivered(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET state = ? WHERE id = ?`, notify.DeliveryDelivered, id)
+	if err != nil {
+		return fmt.Errorf("mark delivery delivered: %w", err)
+	}
+	return nil
+}
+
+// RescheduleDelivery sets the next attempt time of a still-pending delivery.
+func (s *SQLiteStore) RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET next_attempt_at = ? WHERE id = ? AND state = ?`,
+		formatTime(nextAttemptAt), id, notify.DeliveryPending)
+	if err != nil {
+		return fmt.Errorf("reschedule delivery: %w", err)
+	}
+	return nil
+}
+
+// FailDelivery finalizes a delivery as permanently failed.
+func (s *SQLiteStore) FailDelivery(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET state = ? WHERE id = ?`, notify.DeliveryFailed, id)
+	if err != nil {
+		return fmt.Errorf("fail delivery: %w", err)
+	}
+	return nil
 }
 
 // --- heartbeats ----------------------------------------------------------

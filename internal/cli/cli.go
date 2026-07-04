@@ -238,15 +238,21 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 		return fmt.Errorf("serve: build auth config: %w", err)
 	}
 
-	// One dispatcher shared by the runner, the HTTP server, and the watcher.
+	// One durable delivery worker shared by the runner, the HTTP server, and
+	// the watcher. Deliveries are enqueued by the STORE, transactionally with
+	// each event insert, so the dispatch seam handed to the components below
+	// only nudges the worker for a prompt drain - it never sends inline and can
+	// never block a runner worker, a ping response, or the watcher (F3).
 	// Only meaningful when a master key is configured - channel configs are
-	// encrypted, so without the box the dispatcher cannot decrypt them. dispatch
+	// encrypted, so without the box the worker cannot decrypt them. dispatch
 	// stays nil otherwise; all three components are nil-safe on dispatch (they
-	// still record/emit events).
+	// still record/emit events, and the enqueued deliveries are drained once
+	// serve runs with a key).
 	var dispatch func(context.Context, core.Event)
+	var worker *notify.Worker
 	if box != nil {
-		disp := notify.NewDispatcher(st, box, notify.BuildProvider, logger)
-		dispatch = disp.DispatchForEvent
+		worker = notify.NewWorker(st, box, notify.BuildProvider, logger)
+		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
 
 	addr := os.Getenv("TEND_ADDR")
@@ -275,10 +281,21 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var serveErr error // captured from a non-clean HTTP server exit; safe: written
 	// before wg.Done() in the http goroutine, read after wg.Wait() (happens-before).
 
+	// --- delivery worker ---
+	// Drains the durable deliveries queue with capped exponential backoff. All
+	// senders (runner, ping handler, watcher) only enqueue + nudge.
+	if worker != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker.Run(serveCtx)
+		}()
+	}
+
 	// --- runner ---
-	// v1 trade-off: runner.EventSink (DispatchForEvent) runs synchronously on the
-	// worker after each terminal event. Its retry backoff is ctx-aware, so a
-	// slow/failing channel never hangs shutdown.
+	// runner.EventSink only nudges the delivery worker (the delivery itself was
+	// already enqueued atomically by FinishRunAndEmit), so a slow/failing
+	// channel never blocks a runner worker or shutdown.
 	runner := jobs.NewRunner(st, jobs.NewExecutor(), box, clk)
 	runner.EventSink = dispatch
 	wg.Add(1)

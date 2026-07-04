@@ -109,6 +109,15 @@ type Store interface {
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
 	ListEvents(ctx context.Context, orgID int64, limit int) ([]core.Event, error) // newest first
 
+	// durable notification deliveries. Pending rows are enqueued transactionally
+	// by every event insert (EmitEvent / FinishRunAndEmit / ReapStaleRun) for
+	// alertable event types with matching enabled rules; the notify.Worker
+	// drains them. See notify.WorkerStore for the claim/lease semantics.
+	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error)
+	MarkDeliveryDelivered(ctx context.Context, id int64) error
+	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
+	FailDelivery(ctx context.Context, id int64) error
+
 	// notification channels (encrypted config blob in/out; encryption lives elsewhere)
 	CreateChannel(ctx context.Context, ch notify.Channel, configBlob string) (int64, error) // upsert by (org,name); returns row ID
 	GetChannel(ctx context.Context, orgID, id int64) (notify.Channel, string, error)        // channel + encrypted blob; ErrNotFound if absent

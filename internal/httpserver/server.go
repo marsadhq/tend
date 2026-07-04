@@ -100,14 +100,18 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// handlePing records a dead-man's-switch ping. On a down->up recovery it emits a
-// heartbeat.recovered event and then dispatches it best-effort.
+// handlePing records a dead-man's-switch ping. On a down->up recovery it emits
+// a heartbeat.recovered event; EmitEvent enqueues the matched notification
+// deliveries transactionally, and the dispatch func only nudges the delivery
+// worker. Nothing here blocks on a slow destination, so the ping response is
+// never held hostage by a down webhook receiver, and a client that times out
+// and cancels r.Context() can no longer make the recovered notification vanish
+// (F3): the enqueued delivery survives and is drained asynchronously.
 //
-// Ordering caveat: the status flip + event emit happen as two store calls and
-// the dispatch happens afterwards in-process. A crash between RecordPing's
-// commit and EmitEvent would lose the recovered event (the heartbeat would still
-// be correctly 'up'). This is acceptable for v1 and mirrors the heartbeat.missed
-// path in the Task 7 watcher.
+// Ordering caveat: the status flip + event emit happen as two store calls. A
+// crash between RecordPing's commit and EmitEvent would lose the recovered
+// event (the heartbeat would still be correctly 'up'). This is acceptable for
+// v1 and mirrors the heartbeat.missed path in the watcher.
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	orgID, name, recovered, err := s.store.RecordPing(r.Context(), token, s.clk.Now())

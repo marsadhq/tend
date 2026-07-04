@@ -353,7 +353,51 @@ func pgEmitEventTx(ctx context.Context, tx *sql.Tx, e core.Event) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("emit event: %w", err)
 	}
+	if err := pgEnqueueDeliveriesTx(ctx, tx, id, e); err != nil {
+		return 0, err
+	}
 	return id, nil
+}
+
+// pgEnqueueDeliveriesTx mirrors enqueueDeliveriesTx for Postgres: one pending
+// deliveries row per matched channel, committed atomically with the event
+// insert. See the SQLite twin for the durability/loop-guard rationale.
+func pgEnqueueDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64, e core.Event) error {
+	if !notify.Alertable(e.Type) {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT channel_id FROM notification_rules
+		 WHERE org_id = $1 AND enabled = 1 AND event_type = $2 AND (job_id = 0 OR job_id = $3)`,
+		e.OrgID, e.Type, notify.EventJobID(e))
+	if err != nil {
+		return fmt.Errorf("enqueue deliveries match: %w", err)
+	}
+	var channelIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan matched channel: %w", err)
+		}
+		channelIDs = append(channelIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate matched channels: %w", err)
+	}
+	rows.Close()
+
+	now := nowStr()
+	for _, chID := range channelIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries
+			(org_id, event_id, channel_id, attempts, state, next_attempt_at, created_at)
+			VALUES ($1, $2, $3, 0, $4, $5, $6)`,
+			e.OrgID, eventID, chID, notify.DeliveryPending, now, now); err != nil {
+			return fmt.Errorf("enqueue delivery: %w", err)
+		}
+	}
+	return nil
 }
 
 // FinishRun records the terminal state of a run.
@@ -733,6 +777,96 @@ func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, na
 	}
 	defer rows.Close()
 	return scanEvents(rows)
+}
+
+// --- durable notification deliveries --------------------------------------
+
+// ClaimDueDeliveries atomically claims up to limit pending deliveries due at
+// now: attempts+1 and next_attempt_at pushed to now+lease in one UPDATE, so a
+// crashed worker's claims become due again after the lease (at-least-once).
+// FOR UPDATE SKIP LOCKED keeps concurrent claimers (serve worker + a manual
+// `tend run` drain) from double-claiming a row.
+func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim deliveries begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = $1
+		 WHERE id IN (
+		   SELECT id FROM deliveries WHERE state = $2 AND next_attempt_at <= $3
+		   ORDER BY id LIMIT $4 FOR UPDATE SKIP LOCKED
+		 )
+		 RETURNING `+deliveryColumns,
+		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim deliveries: %w", err)
+	}
+	var out []notify.Delivery
+	for rows.Next() {
+		d, err := scanDelivery(rows)
+		if err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan delivery: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate deliveries: %w", err)
+	}
+	rows.Close()
+
+	for i := range out {
+		row := tx.QueryRowContext(ctx,
+			`SELECT id, org_id, type, source, payload, dedup_key, created_at FROM events WHERE id = $1`,
+			out[i].EventID)
+		ev, err := scanEvent(row)
+		if err != nil {
+			return nil, fmt.Errorf("join delivery event %d: %w", out[i].EventID, err)
+		}
+		out[i].Event = ev
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("claim deliveries commit: %w", err)
+	}
+	return out, nil
+}
+
+// MarkDeliveryDelivered finalizes a delivery as delivered.
+func (s *PostgresStore) MarkDeliveryDelivered(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET state = $1 WHERE id = $2`, notify.DeliveryDelivered, id)
+	if err != nil {
+		return fmt.Errorf("mark delivery delivered: %w", err)
+	}
+	return nil
+}
+
+// RescheduleDelivery sets the next attempt time of a still-pending delivery.
+func (s *PostgresStore) RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET next_attempt_at = $1 WHERE id = $2 AND state = $3`,
+		formatTime(nextAttemptAt), id, notify.DeliveryPending)
+	if err != nil {
+		return fmt.Errorf("reschedule delivery: %w", err)
+	}
+	return nil
+}
+
+// FailDelivery finalizes a delivery as permanently failed.
+func (s *PostgresStore) FailDelivery(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deliveries SET state = $1 WHERE id = $2`, notify.DeliveryFailed, id)
+	if err != nil {
+		return fmt.Errorf("fail delivery: %w", err)
+	}
+	return nil
 }
 
 // --- heartbeats ----------------------------------------------------------
