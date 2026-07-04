@@ -355,3 +355,34 @@ func TestListSecretsNoCiphertextLeak(t *testing.T) {
 		}
 	})
 }
+
+// TestTokenHashGloballyUnique proves the token hash is unique ACROSS orgs, not
+// just within one: AuthenticateToken looks up by hash alone, so a duplicate
+// hash in another org would make authentication ambiguous. (Parity with the
+// identical Ward fix.)
+func TestTokenHashGloballyUnique(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		hash := auth.HashToken("tend_sametoken")
+		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "a", TokenHash: hash}); err != nil {
+			t.Fatalf("CreateToken org1: %v", err)
+		}
+		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID + 1, Name: "b", TokenHash: hash}); err == nil {
+			t.Fatal("CreateToken with a duplicate hash in another org succeeded; token_hash must be globally unique")
+		}
+
+		// The unambiguous lookup still authenticates the original row.
+		gotOrg, gotName, err := s.AuthenticateToken(ctx, hash)
+		if err != nil {
+			t.Fatalf("AuthenticateToken: %v", err)
+		}
+		if gotOrg != org.ID || gotName != "a" {
+			t.Fatalf("AuthenticateToken = (org %d, %q), want (org %d, %q)", gotOrg, gotName, org.ID, "a")
+		}
+	})
+}
