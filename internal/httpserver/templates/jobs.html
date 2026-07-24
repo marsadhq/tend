@@ -7,16 +7,31 @@
   <p class="count-chip">{{len .Jobs}} defined</p>
 </section>
 
-{{template "jobsTable" .}}
+{{/* aria-live region announces the 5s htmx swap to screen readers without
+     stealing focus (aria-atomic="false": only changed content is announced).
+     The label says what the region is doing: it does not claim to auto-update
+     once the user has paused the polling. */}}
+<div id="jobs-live" role="region" aria-label="{{if .Paused}}Jobs (updates paused){{else}}Jobs (auto-updating every 5 seconds){{end}}" aria-live="polite" aria-atomic="false">
+  {{template "jobsTable" .}}
+</div>
+{{/* WCAG 2.2.2 pause control: a server-side toggle (no inline/eval JS, so the
+     strict CSP from T-08 stays intact) that re-renders the page with the
+     polling attributes omitted. */}}
+{{if .Paused}}
+<p class="jobs-poll-toggle"><a href="/">Resume live updates</a></p>
+{{else}}
+<p class="jobs-poll-toggle"><a href="/?static=1">Pause updates</a></p>
+{{end}}
 {{end}}
 
 {{/* jobsTable is rendered both inside the full page and standalone by the
-     /partials/jobs polling endpoint, so htmx can swap it on a 5s cadence. */}}
+     /partials/jobs polling endpoint, so htmx can swap it on a 5s cadence.
+     When Paused, the hx-* attributes are omitted entirely (not just
+     hx-trigger): a bare hx-get on a non-form element defaults to a "click"
+     trigger, which would make clicking the table fetch unexpectedly. */}}
 {{define "jobsTable"}}
 <div id="jobs-table"
-     hx-get="/partials/jobs"
-     hx-trigger="every 5s"
-     hx-swap="outerHTML">
+     {{if not .Paused}}hx-get="/partials/jobs" hx-trigger="every 5s" hx-swap="outerHTML"{{end}}>
   {{if .Jobs}}
   <table class="grid-table">
     <thead>
