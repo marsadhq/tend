@@ -181,6 +181,92 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+// TestServeHelp_PrintsUsage_NoSideEffects verifies `tend serve -h`/`--help`
+// print serve usage and return nil WITHOUT opening the store: the DSN file
+// must not be created, and the daemon must not start.
+func TestServeHelp_PrintsUsage_NoSideEffects(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			cfg := tempConfig(t)
+			var stdout, stderr bytes.Buffer
+			err := cli.Run(context.Background(), cfg, []string{"serve", flag}, nil, &stdout, &stderr)
+			if err != nil {
+				t.Fatalf("serve %s: %v\nstderr: %s", flag, err, stderr.String())
+			}
+			out := stdout.String()
+			for _, want := range []string{"tend serve", "heartbeat", "doctor"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("serve %s output missing %q; got: %q", flag, want, out)
+				}
+			}
+			if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+				t.Errorf("serve %s must not create the DB file at %s; stat err = %v", flag, cfg.DSN, statErr)
+			}
+		})
+	}
+}
+
+// TestServeHelp_WorksWithoutTendDB pins the order of the two early guards in
+// Run: help is answered first, so `tend serve -h` prints usage even when
+// TEND_DB is unset, while a plain `tend serve` with no TEND_DB is still
+// refused before any store is opened.
+func TestServeHelp_WorksWithoutTendDB(t *testing.T) {
+	cfg := config.Config{Driver: "sqlite", DSN: ""}
+
+	for _, flag := range []string{"-h", "--help"} {
+		var stdout, stderr bytes.Buffer
+		if err := cli.Run(context.Background(), cfg, []string{"serve", flag}, nil, &stdout, &stderr); err != nil {
+			t.Fatalf("serve %s with TEND_DB unset: %v", flag, err)
+		}
+		if !strings.Contains(stdout.String(), "TEND_DB") {
+			t.Errorf("serve %s usage should document TEND_DB; got: %q", flag, stdout.String())
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("plain serve with TEND_DB unset: expected a refusal, got nil")
+	}
+	if !strings.Contains(err.Error(), "TEND_DB is not set") {
+		t.Errorf("plain serve with TEND_DB unset: error = %v, want the TEND_DB refusal", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("refused serve must not print anything to stdout; got: %q", stdout.String())
+	}
+}
+
+// TestServe_NoHelp_StillServes guards against over-matching: a plain `serve`
+// (no help flag) must still reach cmdServe and open the store. We cancel the
+// context immediately so it returns promptly, and assert the DSN file WAS
+// created (proof the help short-circuit did not fire).
+func TestServe_NoHelp_StillServes(t *testing.T) {
+	// An ephemeral loopback port: serve would otherwise bind its default :8080.
+	t.Setenv("TEND_ADDR", "127.0.0.1:0")
+	cfg := tempConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	_ = cli.Run(ctx, cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if _, statErr := os.Stat(cfg.DSN); statErr != nil {
+		t.Errorf("plain serve should still open/create the store at %s: stat err = %v", cfg.DSN, statErr)
+	}
+}
+
+// TestPrintUsage_ListsDoctor verifies the top-level `-h` (no args) output
+// lists the doctor subcommand.
+func TestPrintUsage_ListsDoctor(t *testing.T) {
+	cfg := tempConfig(t)
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, nil, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run(nil args): %v", err)
+	}
+	if !strings.Contains(stderr.String(), "doctor") {
+		t.Errorf("usage output missing \"doctor\"; got: %q", stderr.String())
+	}
+}
+
 // TestSecretSetAndRun verifies that `secret set` stores a secret and a job
 // referencing it via {{ secret.X }} can run successfully with a master key.
 func TestSecretSetAndRun(t *testing.T) {
