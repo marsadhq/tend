@@ -27,6 +27,12 @@ type Server struct {
 	dispatch func(context.Context, core.Event) // may be nil; best-effort notification sink
 	log      *slog.Logger
 	auth     *AuthConfig // nil disables login/API/dashboard (M2 public-only behavior)
+
+	// loginLimiter and pingLimiter are per-(IP,endpoint) token buckets guarding
+	// POST /login and /ping/{token} against brute-force/flood, defense-in-depth
+	// beyond argon2 cost / token secrecy. See ratelimit.go.
+	loginLimiter *rateLimiter
+	pingLimiter  *rateLimiter
 }
 
 // New constructs a Server. dispatch may be nil (e.g. in tests or when no
@@ -37,7 +43,22 @@ type Server struct {
 // auth is non-nil, Handler() additionally mounts the login/logout endpoints,
 // the /static/ asset prefix, and the requireAuth-gated API + dashboard surface.
 func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Event), log *slog.Logger, auth *AuthConfig) *Server {
-	return &Server{store: s, clk: clk, dispatch: dispatch, log: log, auth: auth}
+	return &Server{
+		store:    s,
+		clk:      clk,
+		dispatch: dispatch,
+		log:      log,
+		auth:     auth,
+		// 1/s burst-5: slows online credential guessing hard; a human login is
+		// well within a 5-request burst.
+		loginLimiter: newRateLimiter(clk, 1, 5),
+		// 10/s burst-20: many heartbeats can legitimately share one source IP
+		// (NAT / one host running many cron jobs), so this is generous
+		// defense-in-depth against a flood, not per-token fairness - keying on
+		// the token itself would let an attacker rotate tokens to evade it and
+		// would penalize the exact identifier we want to protect.
+		pingLimiter: newRateLimiter(clk, 10, 20),
+	}
 }
 
 // Handler builds and returns the routing mux.
@@ -61,8 +82,8 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("POST /ping/{token}", s.handlePing)
-	mux.HandleFunc("GET /ping/{token}", s.handlePing)
+	mux.HandleFunc("POST /ping/{token}", s.rateLimit(s.pingLimiter, "ping", s.handlePing))
+	mux.HandleFunc("GET /ping/{token}", s.rateLimit(s.pingLimiter, "ping", s.handlePing))
 
 	if s.auth == nil {
 		return securityHeaders(mux)
@@ -70,7 +91,9 @@ func (s *Server) Handler() http.Handler {
 
 	// --- public auth surface (NOT gated; these inherently bypass requireAuth) ---
 	mux.HandleFunc("GET /login", s.handleLoginForm)
-	mux.HandleFunc("POST /login", s.handleLoginSubmit)
+	// Only the credential-checking POST is rate-limited; GET /login (the form)
+	// is cheap and unauthenticated-but-harmless.
+	mux.HandleFunc("POST /login", s.rateLimit(s.loginLimiter, "login", s.handleLoginSubmit))
 
 	// /static/ serves the embedded UI assets (htmx.min.js, row-nav.js, app.css,
 	// and the icons). It is NOT gated by auth: these are non-sensitive browser
