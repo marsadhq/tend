@@ -28,8 +28,9 @@ import (
 // cookie). Every page is org-scoped via the request Principal.
 
 // templatesFS embeds the page templates; staticFS embeds the browser assets
-// (the pre-vendored htmx.min.js and app.css). Both are compiled into the binary
-// so the server needs no on-disk assets at runtime (CGO-free, single binary).
+// (the pre-vendored htmx.min.js, row-nav.js, app.css, and the icons). Both are
+// compiled into the binary so the server needs no on-disk assets at runtime
+// (CGO-free, single binary).
 //
 //go:embed templates/*.html
 var templatesFS embed.FS

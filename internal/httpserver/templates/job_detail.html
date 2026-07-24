@@ -52,7 +52,7 @@
     </thead>
     <tbody>
       {{range .Runs}}
-      <tr class="row-link" onclick="location.href='/runs/{{.ID}}'">
+      <tr class="row-link" data-href="/runs/{{.ID}}">
         <td class="cell-name"><a href="/runs/{{.ID}}">#{{.ID}}</a></td>
         <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
         <td class="cell-mono">{{.Attempt}}</td>

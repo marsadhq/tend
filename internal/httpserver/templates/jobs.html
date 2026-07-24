@@ -48,10 +48,12 @@
      The row id lets each button target its own row with hx-swap="outerHTML".
      The action buttons carry the CSRF token via hx-headers (the exact header
      validCSRF reads, X-CSRF-Token); the token is rendered into the page meta tag
-     by the base layout. The actions cell stops click propagation so pressing a
-     button does not also trigger the row's navigate-on-click. */}}
+     by the base layout. Row navigation is handled by the external row-nav.js
+     (not an inline onclick, which a strict CSP script-src 'self' would block);
+     it ignores clicks inside .col-actions so a button press does not also
+     navigate. */}}
 {{define "jobRow"}}
-<tr id="job-row-{{.ID}}" class="row-link" onclick="location.href='/jobs/{{.ID}}'">
+<tr id="job-row-{{.ID}}" class="row-link" data-href="/jobs/{{.ID}}">
   <td class="cell-name"><a href="/jobs/{{.ID}}">{{.Name}}</a></td>
   <td class="cell-mono">{{.Type}}</td>
   <td class="cell-mono cell-muted">{{.Schedule}}</td>
@@ -63,7 +65,7 @@
     {{if .LastStatus}}<span class="pill {{.StatusClass}}">{{.LastStatus}}</span>
     {{else}}<span class="pill pill-none">no runs</span>{{end}}
   </td>
-  <td class="col-actions" onclick="event.stopPropagation()">
+  <td class="col-actions">
     <div class="row-actions">
       <button type="button" class="btn-action btn-run"
               hx-post="/jobs/{{.ID}}/run"
