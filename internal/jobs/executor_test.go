@@ -265,8 +265,8 @@ func TestExecutor_TimeoutKillsForkingJob(t *testing.T) {
 // untouched (no marker).
 func TestExecutor_ShellOutputCapped(t *testing.T) {
 	e := NewExecutor()
-	// ~1 MiB over the cap, from /dev/zero so it's fast.
-	j := Job{Type: Shell, Command: "head -c $((11*1024*1024)) /dev/zero | tr '\\0' 'a'"}
+	// 1 MiB over the cap, from /dev/zero so it's fast.
+	j := Job{Type: Shell, Command: "head -c $((2*1024*1024)) /dev/zero | tr '\\0' 'a'"}
 	res := e.Run(context.Background(), j, nil)
 
 	if res.Status != StatusSucceeded {
@@ -305,5 +305,108 @@ func TestExecutor_HTTPBodyCapped(t *testing.T) {
 	}
 	if !strings.HasSuffix(res.Output, truncationMarker) {
 		t.Errorf("capped HTTP output missing truncation marker")
+	}
+}
+
+// Test 15: Shell output beyond maxOutputBytes is capped and marked truncated.
+func TestRun_Shell_OutputCapped(t *testing.T) {
+	e := NewExecutor()
+	j := Job{Type: Shell, Command: "head -c 2000000 /dev/zero | tr '\\0' 'a'"}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s", res.Status)
+	}
+	if len(res.Output) > maxOutputBytes+len(truncationMarker) {
+		t.Errorf("expected output capped at %d+marker, got %d bytes", maxOutputBytes, len(res.Output))
+	}
+	if !strings.HasSuffix(res.Output, truncationMarker) {
+		t.Errorf("expected output to end with truncation marker, got suffix %q", res.Output[max(0, len(res.Output)-60):])
+	}
+}
+
+// Test 16: Shell output under the cap is captured exactly, with no marker.
+func TestRun_Shell_OutputUnderCap_NoMarker(t *testing.T) {
+	e := NewExecutor()
+	j := Job{Type: Shell, Command: "echo hello"}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s", res.Status)
+	}
+	if res.Output != "hello\n" {
+		t.Errorf("expected exact output %q, got %q", "hello\n", res.Output)
+	}
+	if strings.Contains(res.Output, truncationMarker) {
+		t.Errorf("did not expect truncation marker in under-cap output: %q", res.Output)
+	}
+}
+
+// Test 17: exit code / status are preserved even when output is truncated.
+func TestRun_Shell_ExitCodePreservedWhenTruncated(t *testing.T) {
+	e := NewExecutor()
+	j := Job{Type: Shell, Command: "head -c 2000000 /dev/zero | tr '\\0' 'a'; exit 3"}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusFailed {
+		t.Errorf("expected StatusFailed, got %s", res.Status)
+	}
+	if res.ExitCode != 3 {
+		t.Errorf("expected ExitCode 3, got %d", res.ExitCode)
+	}
+	if !strings.HasSuffix(res.Output, truncationMarker) {
+		t.Errorf("expected truncated output, got suffix %q", res.Output[max(0, len(res.Output)-60):])
+	}
+	// The cap is 1 MiB exactly: the kept output is that many bytes plus the
+	// marker. Written as a literal so a changed constant cannot hide here.
+	if want := 1<<20 + len(truncationMarker); len(res.Output) != want {
+		t.Errorf("truncated output is %d bytes, want %d (1 MiB + marker)", len(res.Output), want)
+	}
+}
+
+// Test 18: HTTP response body beyond maxOutputBytes is capped and marked truncated.
+func TestRun_HTTP_BodyCapped(t *testing.T) {
+	big := strings.Repeat("a", maxOutputBytes+1000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, big)
+	}))
+	defer srv.Close()
+
+	e := NewExecutor()
+	j := Job{Type: HTTP, HTTPURL: srv.URL}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s", res.Status)
+	}
+	if len(res.Output) > maxOutputBytes+len(truncationMarker)+64 { // + "HTTP 200\n" header
+		t.Errorf("expected output capped near %d, got %d bytes", maxOutputBytes, len(res.Output))
+	}
+	if !strings.HasSuffix(res.Output, truncationMarker) {
+		t.Errorf("expected output to end with truncation marker, got suffix %q", res.Output[max(0, len(res.Output)-60):])
+	}
+}
+
+// Test 19: HTTP response body under the cap is unchanged, with no marker.
+func TestRun_HTTP_BodyUnderCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer srv.Close()
+
+	e := NewExecutor()
+	j := Job{Type: HTTP, HTTPURL: srv.URL}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusSucceeded {
+		t.Fatalf("expected StatusSucceeded, got %s", res.Status)
+	}
+	if strings.Contains(res.Output, truncationMarker) {
+		t.Errorf("did not expect truncation marker in under-cap output: %q", res.Output)
+	}
+	if !strings.Contains(res.Output, "pong") {
+		t.Errorf("expected output to contain 'pong', got %q", res.Output)
 	}
 }

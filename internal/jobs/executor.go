@@ -30,10 +30,10 @@ const DefaultTimeout = 30 * time.Minute
 // stdout+stderr for shell jobs, response body for HTTP jobs) so a chatty or
 // runaway job cannot exhaust memory or bloat the job_runs table. Excess output
 // is discarded, never fails the run.
-const maxOutputBytes = 10 << 20 // 10 MiB
+const maxOutputBytes = 1 << 20 // 1 MiB
 
 // truncationMarker is appended to captured output that hit maxOutputBytes.
-const truncationMarker = "\n... [output truncated at 10MiB]"
+const truncationMarker = "\n... [output truncated at 1MiB]"
 
 // cappedBuffer is an io.Writer keeping at most max bytes and discarding the
 // rest, recording that truncation happened. Write never errors, so a child
