@@ -116,6 +116,15 @@ func TestParseValidation(t *testing.T) {
     cron: "* * * * *"`,
 			wantErr: "bad-type",
 		},
+		{
+			name: "invalid cron",
+			yaml: `jobs:
+  - name: bad-cron
+    type: shell
+    command: echo hi
+    cron: "nope"`,
+			wantErr: "bad-cron",
+		},
 	}
 
 	for _, tc := range tests {
@@ -448,5 +457,60 @@ func TestReconcileManualJobHasZeroNextRunAt(t *testing.T) {
 	}
 	if !stored.NextRunAt.IsZero() {
 		t.Errorf("NextRunAt = %v; want zero (manual job must not auto-fire)", stored.NextRunAt)
+	}
+}
+
+// TestSyncInvalidCronAbortsWithZeroJobsWritten verifies that a YAML file with
+// one good job and one bad-cron job fails at Parse (before Reconcile runs any
+// store write), a ref-tagged error names the offending job, and no job -
+// including the otherwise-valid one - is written. Validation is
+// backend-invariant (schedule.ValidateCron does not touch the store), so a
+// single SQLite pass here plus the store package's own dual-backend suite is
+// sufficient coverage.
+func TestSyncInvalidCronAbortsWithZeroJobsWritten(t *testing.T) {
+	dir := t.TempDir()
+	dsn := filepath.Join(dir, "tend_sync_bad_cron.db")
+
+	st, err := store.OpenSQLite(dsn)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	org, err := st.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatalf("bootstrap org: %v", err)
+	}
+
+	yaml := `jobs:
+  - name: good-job
+    type: shell
+    command: echo hi
+    cron: "0 3 * * *"
+  - name: bad-cron-job
+    type: shell
+    command: echo hi
+    cron: "not a cron"`
+
+	_, err = configfile.Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("expected Parse to fail on the invalid cron")
+	}
+	if !strings.Contains(err.Error(), "bad-cron-job") {
+		t.Errorf("error %q does not name the offending job", err.Error())
+	}
+
+	// Parse failed, so a sync command never reaches Reconcile; assert directly
+	// that nothing was written to the store.
+	jobsInStore, err := st.ListJobs(ctx, org.ID)
+	if err != nil {
+		t.Fatalf("ListJobs: %v", err)
+	}
+	if len(jobsInStore) != 0 {
+		t.Errorf("ListJobs = %d jobs, want 0 (a bad cron anywhere in the file must abort the whole sync)", len(jobsInStore))
 	}
 }

@@ -256,6 +256,11 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 	if schedCount > 1 {
 		return jobs.Job{}, fmt.Errorf("configfile: %s: only one schedule (cron, interval_seconds, or run_at) may be set, got %d", ref, schedCount)
 	}
+	if spec.Cron != "" {
+		if err := jobs.ValidateCron(spec.Cron); err != nil {
+			return jobs.Job{}, fmt.Errorf("configfile: %s: %w", ref, err)
+		}
+	}
 
 	// --- run_at ---
 	var runAt time.Time

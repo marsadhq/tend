@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,5 +119,28 @@ func TestNextRunDST(t *testing.T) {
 	// Must be strictly after base.
 	if !got.After(base) {
 		t.Fatalf("next run %v should be after base %v", got, base)
+	}
+}
+
+// TestValidateCron verifies ValidateCron accepts well-formed 5-field cron
+// expressions and rejects malformed ones with an error naming the expression.
+func TestValidateCron(t *testing.T) {
+	valid := []string{"* * * * *", "0 9 * * 1-5", "*/15 * * * *", "0 0 1 1 *"}
+	for _, expr := range valid {
+		if err := ValidateCron(expr); err != nil {
+			t.Errorf("ValidateCron(%q): unexpected error: %v", expr, err)
+		}
+	}
+
+	invalid := []string{"not a cron", "* * * *", "60 * * * *"}
+	for _, expr := range invalid {
+		err := ValidateCron(expr)
+		if err == nil {
+			t.Errorf("ValidateCron(%q): expected error, got nil", expr)
+			continue
+		}
+		if !strings.Contains(err.Error(), expr) {
+			t.Errorf("ValidateCron(%q): error %q does not mention the expression", expr, err.Error())
+		}
 	}
 }

@@ -415,6 +415,67 @@ func TestJobAddAcceptsNoSchedule(t *testing.T) {
 	}
 }
 
+// TestJobAdd_InvalidCron_Rejected asserts that an invalid -cron expression is
+// rejected before any job row is created, and that a valid cron still works.
+func TestJobAdd_InvalidCron_Rejected(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(ctx, cfg, []string{
+		"job", "add",
+		"-name", "bad-cron-job",
+		"-command", "true",
+		"-cron", "not a cron",
+	}, nil, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected job add with an invalid cron to fail")
+	}
+	if !strings.Contains(err.Error(), "not a cron") {
+		t.Errorf("error should name the bad cron expression, got: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"job", "list"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("job list: %v\nstderr: %s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "bad-cron-job") {
+		t.Errorf("job add with invalid cron must not create a job; job list:\n%s", stdout.String())
+	}
+
+	// A valid cron still creates the job with a non-zero NEXT_RUN.
+	stdout.Reset()
+	stderr.Reset()
+	err = cli.Run(ctx, cfg, []string{
+		"job", "add",
+		"-name", "good-cron-job",
+		"-command", "true",
+		"-cron", "0 3 * * *",
+	}, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("job add (valid cron): %v\nstderr: %s", err, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if err := cli.Run(ctx, cfg, []string{"job", "list"}, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("job list: %v\nstderr: %s", err, stderr.String())
+	}
+	listOut := stdout.String()
+	for _, line := range strings.Split(listOut, "\n") {
+		if strings.Contains(line, "good-cron-job") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			if last := fields[len(fields)-1]; last == "-" {
+				t.Errorf("NEXT_RUN for valid-cron job should not be \"-\"; line: %q", line)
+			}
+		}
+	}
+}
+
 // TestJobListShowsManualJobAsNoneWithDashNextRun asserts that `job list` shows
 // a no-schedule job with SCHEDULE=(none) and NEXT_RUN=-.
 func TestJobListShowsManualJobAsNoneWithDashNextRun(t *testing.T) {
