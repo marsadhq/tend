@@ -15,6 +15,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/marsadhq/tend/internal/clock"
@@ -60,12 +62,17 @@ type Watcher struct {
 	store    WatchStore
 	clock    clock.Clock
 	dispatch func(context.Context, core.Event) // may be nil
+	log      *slog.Logger                      // never nil; NewWatcher supplies a default
 }
 
 // NewWatcher returns a Watcher backed by s, using c as its time source and
-// dispatch to deliver heartbeat.missed events. dispatch may be nil.
-func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core.Event)) *Watcher {
-	return &Watcher{store: s, clock: c, dispatch: dispatch}
+// dispatch to deliver heartbeat.missed events. dispatch may be nil. log may be
+// nil, in which case per-heartbeat errors are discarded.
+func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core.Event), log *slog.Logger) *Watcher {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return &Watcher{store: s, clock: c, dispatch: dispatch, log: log}
 }
 
 // Check marks overdue heartbeats 'down', emits heartbeat.missed, and dispatches
@@ -99,8 +106,15 @@ func (w *Watcher) Check(ctx context.Context) error {
 		// same heartbeat.missed event. The guard (status + last_seen_at, which is
 		// NULL for 'new') makes a concurrent ping win the race as a no-op.
 		fired, err := w.store.SetHeartbeatStatusIf(ctx, hb.ID, hb.Status, "down", hb.LastSeenAt)
-		if err != nil || !fired {
-			continue // error, or a ping won the race → do NOT emit a spurious miss
+		if err != nil {
+			// A real DB failure here silently drops this heartbeat's missed alert;
+			// it must be visible. Do NOT abort the scan - other heartbeats may still
+			// transition. Payload carries no secret (heartbeat name/id only).
+			w.log.Error("heartbeat: set status failed", "heartbeat", hb.Name, "id", hb.ID, "err", err)
+			continue
+		}
+		if !fired {
+			continue // a ping won the race → do NOT emit a spurious miss (benign)
 		}
 		ev := core.Event{OrgID: hb.OrgID, Type: "heartbeat.missed", Source: "heartbeat", Payload: hb.Name}
 		_, _ = w.store.EmitEvent(ctx, ev)

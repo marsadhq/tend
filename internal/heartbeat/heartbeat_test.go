@@ -3,7 +3,10 @@ package heartbeat_test
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,7 +101,7 @@ func TestWatcherDeadMansSwitch(t *testing.T) {
 	}
 
 	cap := &captureDispatch{}
-	w := heartbeat.NewWatcher(s, fk, cap.fn)
+	w := heartbeat.NewWatcher(s, fk, cap.fn, nil)
 
 	// Advance 60s (total 60 <= 90 deadline): inside grace, not down.
 	fk.Advance(60 * time.Second)
@@ -218,7 +221,7 @@ func TestWatcherArmsNewHeartbeat(t *testing.T) {
 	}
 
 	cap := &captureDispatch{}
-	w := heartbeat.NewWatcher(s, fk, cap.fn)
+	w := heartbeat.NewWatcher(s, fk, cap.fn, nil)
 
 	if err := w.Check(ctx); err != nil {
 		t.Fatalf("Check: %v", err)
@@ -320,7 +323,7 @@ func TestWatcherSkipsRacingPing(t *testing.T) {
 	}
 
 	cap := &captureDispatch{}
-	w := heartbeat.NewWatcher(s, fk, cap.fn)
+	w := heartbeat.NewWatcher(s, fk, cap.fn, nil)
 
 	// Check at t0+91s: last_seen is now t0+91s, deadline = t0+181s → not overdue.
 	// DueHeartbeats should return nothing. No miss, no dispatch.
@@ -372,5 +375,113 @@ func TestNewToken(t *testing.T) {
 	}
 	if a == b {
 		t.Fatalf("two NewToken calls returned identical tokens %q", a)
+	}
+}
+
+// fakeWatchStore is an in-memory WatchStore for testing Check's per-heartbeat
+// error handling without a real store. setStatusIfResults maps heartbeat ID to
+// the (fired, err) pair SetHeartbeatStatusIf should return for that ID.
+type fakeWatchStore struct {
+	due               []heartbeat.Heartbeat
+	setStatusIfResult map[int64]struct {
+		fired bool
+		err   error
+	}
+	emitted []core.Event
+}
+
+func (f *fakeWatchStore) DueHeartbeats(_ context.Context, _ time.Time) ([]heartbeat.Heartbeat, error) {
+	return f.due, nil
+}
+
+func (f *fakeWatchStore) SetHeartbeatStatus(_ context.Context, _ int64, _ string) error {
+	return nil
+}
+
+func (f *fakeWatchStore) SetHeartbeatStatusIf(_ context.Context, id int64, _, _ string, _ time.Time) (bool, error) {
+	r := f.setStatusIfResult[id]
+	return r.fired, r.err
+}
+
+func (f *fakeWatchStore) EmitEvent(_ context.Context, e core.Event) (int64, error) {
+	f.emitted = append(f.emitted, e)
+	return int64(len(f.emitted)), nil
+}
+
+// TestCheck_DBError_IsLoggedAndContinues verifies that a DB error from
+// SetHeartbeatStatusIf on one heartbeat is logged (naming that heartbeat) and
+// does not abort the scan: a later due heartbeat still transitions and fires.
+func TestCheck_DBError_IsLoggedAndContinues(t *testing.T) {
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	fs := &fakeWatchStore{
+		due: []heartbeat.Heartbeat{
+			{ID: 1, OrgID: 1, Name: "flaky-db-write"},
+			{ID: 2, OrgID: 1, Name: "second-heartbeat"},
+		},
+		setStatusIfResult: map[int64]struct {
+			fired bool
+			err   error
+		}{
+			1: {fired: false, err: errors.New("db: connection reset")},
+			2: {fired: true, err: nil},
+		},
+	}
+	cap := &captureDispatch{}
+	fk := clock.NewFake(time.Now())
+	w := heartbeat.NewWatcher(fs, fk, cap.fn, logger)
+
+	if err := w.Check(context.Background()); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "flaky-db-write") {
+		t.Errorf("log output missing failing heartbeat name: %s", logOutput)
+	}
+	if !strings.Contains(strings.ToLower(logOutput), "error") {
+		t.Errorf("expected an error-level log entry, got: %s", logOutput)
+	}
+
+	dispatched := cap.snapshot()
+	if len(dispatched) != 1 {
+		t.Fatalf("dispatched %d events, want 1 (second heartbeat should still fire)", len(dispatched))
+	}
+	if dispatched[0].Payload != "second-heartbeat" {
+		t.Errorf("dispatched payload = %q, want second-heartbeat", dispatched[0].Payload)
+	}
+}
+
+// TestCheck_RaceLost_NotLogged verifies the benign race-lost no-op
+// (fired=false, err=nil) stays silent: no error log entry, no dispatched event.
+func TestCheck_RaceLost_NotLogged(t *testing.T) {
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+
+	fs := &fakeWatchStore{
+		due: []heartbeat.Heartbeat{
+			{ID: 1, OrgID: 1, Name: "raced-heartbeat"},
+		},
+		setStatusIfResult: map[int64]struct {
+			fired bool
+			err   error
+		}{
+			1: {fired: false, err: nil},
+		},
+	}
+	cap := &captureDispatch{}
+	fk := clock.NewFake(time.Now())
+	w := heartbeat.NewWatcher(fs, fk, cap.fn, logger)
+
+	if err := w.Check(context.Background()); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no log output for race-lost no-op, got: %s", logBuf.String())
+	}
+	if n := len(cap.snapshot()); n != 0 {
+		t.Errorf("dispatched %d events for race-lost no-op, want 0", n)
 	}
 }
