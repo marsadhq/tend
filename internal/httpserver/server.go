@@ -33,10 +33,9 @@ type Server struct {
 // notifier is wired); the ping handler is nil-safe. log must be non-nil.
 //
 // auth bundles the session/CSRF codec and cookie policy. When auth is nil,
-// Handler() registers ONLY the public M2 routes (/healthz, /ping/{token}) and
-// behaves byte-identically to M2. When auth is non-nil, Handler() additionally
-// mounts the login/logout endpoints, the /static/ asset prefix, and the
-// requireAuth-gated API + dashboard surface.
+// Handler() registers ONLY the public routes (/healthz, /ping/{token}). When
+// auth is non-nil, Handler() additionally mounts the login/logout endpoints,
+// the /static/ asset prefix, and the requireAuth-gated API + dashboard surface.
 func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Event), log *slog.Logger, auth *AuthConfig) *Server {
 	return &Server{store: s, clk: clk, dispatch: dispatch, log: log, auth: auth}
 }
@@ -52,8 +51,10 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 // (GET/POST /login, the /static/ asset prefix) and mounts the requireAuth-gated
 // API + dashboard behind the gate. POST /logout is a cookie-auth POST and is
 // registered behind the gate (not on the public mux) so it inherits the
-// cookie-auth CSRF requirement. When auth is nil, ONLY the two public M2 routes
-// above are registered (byte-identical M2 behavior).
+// cookie-auth CSRF requirement. When auth is nil, ONLY the two public routes
+// above are registered.
+//
+// Every route, in both modes, is wrapped in securityHeaders.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -64,16 +65,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ping/{token}", s.handlePing)
 
 	if s.auth == nil {
-		return mux
+		return securityHeaders(mux)
 	}
 
 	// --- public auth surface (NOT gated; these inherently bypass requireAuth) ---
 	mux.HandleFunc("GET /login", s.handleLoginForm)
 	mux.HandleFunc("POST /login", s.handleLoginSubmit)
 
-	// /static/ serves the embedded UI assets (htmx.min.js + app.css). It is NOT
-	// gated by auth: these are non-sensitive browser assets needed by the login
-	// and dashboard pages alike. The FileServer is rooted at the embedded
+	// /static/ serves the embedded UI assets (htmx.min.js, row-nav.js, app.css,
+	// and the icons). It is NOT gated by auth: these are non-sensitive browser
+	// assets needed by the login and dashboard pages alike. The FileServer is rooted at the embedded
 	// static/ directory (see dashboard.go).
 	mux.Handle("/static/", staticHandler())
 
@@ -97,7 +98,33 @@ func (s *Server) Handler() http.Handler {
 	s.registerDashboardRoutes(authed)
 	mux.Handle("/", s.requireAuth(authed))
 
-	return mux
+	return securityHeaders(mux)
+}
+
+// securityHeaders sets defensive response headers on every route. The CSP is
+// deliberately strict: the dashboard loads only same-origin /static/ assets
+// (htmx.min.js, row-nav.js, app.css) and uses no inline scripts, so 'self'
+// suffices with no 'unsafe-inline' for scripts. htmx attributes are HTML
+// attributes, not inline <script>, so they are unaffected by script-src.
+// style-src is 'self' as well: htmx would otherwise inject an inline <style>
+// for its request indicator at load, so the base template turns that off
+// (htmx-config includeIndicatorStyles=false; the dashboard has no indicator).
+//
+// HSTS is intentionally omitted: serve speaks plain HTTP by default (TLS is
+// terminated at a reverse proxy per README), and emitting HSTS over plain
+// HTTP is either ignored or, once cached, can lock a browser to HTTPS against
+// an HTTP-only deploy.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self'; style-src 'self'; "+
+				"img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handlePing records a dead-man's-switch ping. On a down->up recovery it emits
