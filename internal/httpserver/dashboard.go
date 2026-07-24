@@ -95,6 +95,9 @@ type pageData struct {
 type jobsPage struct {
 	pageData
 	Jobs []jobRow
+	// Paused suppresses the htmx auto-poll attributes (T-31: WCAG 2.2.2 pause
+	// control), toggled via the ?static=1 query param.
+	Paused bool
 }
 
 // jobRow is one row in the jobs table. It is rendered by the shared "jobRow"
@@ -471,6 +474,7 @@ func (s *Server) buildJobsPage(w http.ResponseWriter, r *http.Request) (jobsPage
 	return jobsPage{
 		pageData: s.pageData(r, "Jobs", "jobs"),
 		Jobs:     rows,
+		Paused:   r.URL.Query().Get("static") == "1",
 	}, true
 }
 
