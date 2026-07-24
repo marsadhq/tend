@@ -56,6 +56,15 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		return nil
 	}
 
+	// Help must be side-effect free and must not depend on configuration:
+	// handle it BEFORE the TEND_DB check and before opening the store, so
+	// `tend serve -h` works with no environment set and neither creates the
+	// DSN file nor starts the daemon.
+	if cmd == "serve" && wantsHelp(args[1:]) {
+		printServeUsage(stdout)
+		return nil
+	}
+
 	// Refuse to invent a database. The old "./tend.db" relative default
 	// silently created or read a different DB per working directory, which
 	// bit operators repeatedly; every DB-touching command now requires an
@@ -1567,9 +1576,52 @@ Commands:
   rule list           list notification rules
   heartbeat add ...   create/update a heartbeat (prints the ping URL)
   heartbeat list      list heartbeats
+  doctor              diagnose config/DB/connectivity
   user add [flags]    create a user (admin) - password read from stdin
   token create [flags]  create an API token (printed once)
   token list          list API tokens (never shows the hash)
   token revoke -id N  revoke an API token by id
   version             print version`)
+}
+
+// wantsHelp reports whether args contains a help flag.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "--help" || a == "help" {
+			return true
+		}
+	}
+	return false
+}
+
+// printServeUsage prints `tend serve`'s help text. It must stay accurate to
+// the components cmdServe starts and to serve's actual env knobs (TEND_DB and
+// TEND_MASTER_KEY at config.Load, TEND_ADDR at cmdServe's addr resolution,
+// TEND_COOKIE_SECURE at cookieSecure(), TEND_TRUST_PROXY in httpserver).
+func printServeUsage(w io.Writer) {
+	fmt.Fprintln(w, `tend serve - start the runner + HTTP server + heartbeat watcher
+
+Usage:
+  tend serve
+
+Runs these components until interrupted (Ctrl-C):
+  - the job runner (executes due jobs; fails runs left running past their timeout)
+  - the HTTP server (heartbeat ping + healthz; dashboard/API when a master key is set)
+  - the heartbeat watcher (flags missed dead-man's-switch pings)
+  - the notification delivery worker (when a master key is set)
+  - a daily retention sweep (prunes old events, job runs, and deliveries)
+
+Environment:
+  TEND_DB              sqlite file path, or a postgres://... DSN (required)
+  TEND_ADDR            listen address (default ":8080")
+  TEND_MASTER_KEY      base64 master key; enables alerts + dashboard/API
+  TEND_COOKIE_SECURE   mark session cookie Secure (default off; set behind TLS)
+  TEND_TRUST_PROXY     honor X-Forwarded-For for rate-limit keying (default off)
+
+Related commands:
+  tend doctor          diagnose config/DB/connectivity
+  tend heartbeat add   create a heartbeat (prints the ping URL)
+  tend heartbeat list  list heartbeats
+
+serve takes no flags; configure it via the environment above.`)
 }
