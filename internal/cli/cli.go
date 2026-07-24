@@ -365,7 +365,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	}()
 
 	// --- heartbeat watcher ---
-	watcher := heartbeat.NewWatcher(st, clk, dispatch)
+	watcher := heartbeat.NewWatcher(st, clk, dispatch, logger)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
