@@ -195,3 +195,42 @@ func TestTransportErrorRedactsURLToken(t *testing.T) {
 		t.Fatalf("transport error leaked secret URL token: %v", err)
 	}
 }
+
+// TestPostJSON_TransportError_RedactsToken guards that a *url.Error returned
+// by a transport failure (connection refused) does not leak a secret token
+// embedded in the webhook URL path into the error string surfaced to logs.
+func TestPostJSON_TransportError_RedactsToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	secretURL := srv.URL + "/services/T00/B00/SECRETTOKEN123"
+	srv.Close() // close before sending so Do fails at transport, not status
+
+	ctx := context.Background()
+	err := notify.NewWebhook(secretURL).Send(ctx, notify.Message{Subject: "x", Body: "y"})
+	if err == nil {
+		t.Fatal("expected transport error on closed server, got nil")
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN123") {
+		t.Fatalf("error leaked secret URL token: %v", err)
+	}
+	if !strings.Contains(err.Error(), strings.TrimPrefix(srv.URL, "http://")) {
+		t.Errorf("error should still contain the host for diagnosability: %v", err)
+	}
+}
+
+// TestPostJSON_TransportError_ContextCanceled guards that a canceled-context
+// error (also a *url.Error) does not leak the URL/token either.
+func TestPostJSON_TransportError_ContextCanceled(t *testing.T) {
+	srv, _, _, _ := captureServer(200)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before sending
+	secretURL := srv.URL + "/services/T00/B00/SECRETTOKEN123"
+	err := notify.NewWebhook(secretURL).Send(ctx, notify.Message{Subject: "x", Body: "y"})
+	if err == nil {
+		t.Fatal("expected error on canceled context, got nil")
+	}
+	if strings.Contains(err.Error(), "SECRETTOKEN123") {
+		t.Fatalf("error leaked secret URL token: %v", err)
+	}
+}
