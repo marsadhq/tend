@@ -2,12 +2,24 @@ package jobs
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/robfig/cron/v3"
 )
 
 var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// ValidateCron returns an error if expr is not a schedule the runner can
+// parse. It uses the same parser as NextRun, so an expression that validates
+// here is guaranteed to schedule (and vice-versa) - validation and execution
+// can never diverge.
+func ValidateCron(expr string) error {
+	if _, err := cronParser.Parse(expr); err != nil {
+		return fmt.Errorf("invalid cron expression %q: %w", expr, err)
+	}
+	return nil
+}
 
 // NextRun returns the next time this job should fire strictly after `now`.
 // A zero time means "never again" (e.g. an elapsed one-off).

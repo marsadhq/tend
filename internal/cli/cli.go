@@ -677,6 +677,11 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 	if schedCount > 1 {
 		return fmt.Errorf("job add: only one of -cron, -interval, or -run-at may be set")
 	}
+	if *cronExpr != "" {
+		if err := jobs.ValidateCron(*cronExpr); err != nil {
+			return fmt.Errorf("job add: %w", err)
+		}
+	}
 
 	var runAt time.Time
 	if *runAtStr != "" {
