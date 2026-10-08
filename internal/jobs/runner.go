@@ -39,10 +39,12 @@ const defaultWorkers = 2
 // reapInterval is the cadence of the periodic stale-run sweep run by Start.
 const reapInterval = time.Minute
 
-// reapSlack is the grace added beyond a job's timeout before a 'running' run is
-// considered orphaned. The executor kills an attempt at the timeout, so a run
-// still 'running' this far past its deadline lost its worker (crash/exit
-// mid-run) and would otherwise block the job's no-overlap guard until restart.
+// reapSlack is the grace added beyond the longest a run can legitimately take
+// (Executor.maxRunDuration: every attempt timing out, plus the backoff between
+// retries) before a 'running' run is considered orphaned. The executor kills
+// each attempt at the timeout, so a run still 'running' this far past that
+// limit lost its worker (crash/exit mid-run) and would otherwise block the
+// job's no-overlap guard until restart.
 const reapSlack = 2 * time.Minute
 
 // RunnerStore is the persistence surface the runner needs. It is defined here
@@ -196,7 +198,7 @@ func (r *Runner) DrainOnce(ctx context.Context) error {
 // Recovery note: if claimAndRun returns an error after ClaimRun succeeds, the
 // run is left in 'running'. It is recovered either at the next restart via
 // RequeueOrphanedRuns (called by Start) or by the periodic reaper (ReapOnce),
-// which fails it once started_at + timeout + reapSlack has passed.
+// which fails it once the run's time limit plus reapSlack has passed.
 func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	run, ok, err := r.store.ClaimRun(ctx, workerID)
 	if err != nil {
@@ -274,12 +276,16 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ReapOnce fails every 'running' run whose deadline (started_at + job timeout +
-// reapSlack) has passed, emitting run.failed for each so the orphan is neither
-// silent nor left blocking the job's no-overlap guard until the next restart.
-// The store-side status guard in ReapStaleRun makes the sweep safe against a
-// worker finishing the run concurrently. Per-run errors do not abort the sweep;
-// the first error encountered is returned afterward.
+// ReapOnce fails every 'running' run whose deadline has passed, emitting
+// run.failed for each so the orphan is neither silent nor left blocking the
+// job's no-overlap guard until the next restart. The deadline is started_at +
+// the longest the run can legitimately take + reapSlack. started_at is stamped
+// once, when the run is claimed, while the executor may spend up to
+// MaxRetries+1 attempts of the job's timeout each, with a backoff pause in
+// between, so the limit covers all of them: a run that is still retrying is
+// not an orphan. The store-side status guard in ReapStaleRun makes the sweep
+// safe against a worker finishing the run concurrently. Per-run errors do not
+// abort the sweep; the first error encountered is returned afterward.
 func (r *Runner) ReapOnce(ctx context.Context) error {
 	runs, err := r.store.ListRunningRuns(ctx)
 	if err != nil {
@@ -303,11 +309,9 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 			record(err)
 			continue
 		}
-		timeout := time.Duration(job.TimeoutSeconds) * time.Second
-		if timeout <= 0 {
-			timeout = DefaultTimeout
-		}
-		if now.Before(run.StartedAt.Add(timeout + reapSlack)) {
+		limit := r.exec.maxRunDuration(job)
+		// Written as two comparisons so a saturated limit cannot overflow.
+		if elapsed := now.Sub(run.StartedAt); elapsed < reapSlack || elapsed-reapSlack < limit {
 			continue // still within its window; the executor will finish it
 		}
 		termEv, err := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
@@ -315,8 +319,8 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 			record(err)
 			continue
 		}
-		out := fmt.Sprintf("reaped: run still 'running' %s past its %s timeout (worker lost)",
-			reapSlack, timeout)
+		out := fmt.Sprintf("reaped: run still 'running' %s past its %s time limit (worker lost)",
+			reapSlack, limit)
 		reaped, err := r.store.ReapStaleRun(ctx, run.ID, out, termEv)
 		if err != nil {
 			record(err)
@@ -428,7 +432,7 @@ func (r *Runner) emit(ctx context.Context, run Run, job Job, typ string, status 
 // I3: crash/DB-orphaned 'running' runs are recovered at startup via
 // RequeueOrphanedRuns (at-least-once). Runs orphaned while the process stays
 // up (worker goroutine lost mid-run) are failed by the periodic reaper
-// (ReapOnce) once started_at + timeout + reapSlack has passed, so an orphan
+// (ReapOnce) once the run's time limit plus reapSlack has passed, so an orphan
 // never blocks its job's no-overlap guard until the next restart.
 func (r *Runner) Start(ctx context.Context) error {
 	// 1. Reconcile crash-orphaned 'running' runs back to 'pending'.
