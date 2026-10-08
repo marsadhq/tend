@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marsadhq/tend/internal/urlredact"
 )
@@ -64,9 +65,29 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // String returns the kept output, with the truncation marker when the cap hit.
 func (c *cappedBuffer) String() string {
 	if c.truncated {
-		return c.buf.String() + truncationMarker
+		return string(trimPartialRune(c.buf.Bytes())) + truncationMarker
 	}
 	return c.buf.String()
+}
+
+// trimPartialRune drops a trailing, incomplete UTF-8 sequence from b. The cap
+// cuts at a byte offset, which can fall inside a multi-byte character; the
+// leftover bytes would make otherwise valid output invalid UTF-8, which a
+// Postgres TEXT column refuses to store. Only a sequence the cut left
+// unfinished is removed: complete characters, and bytes that were never valid
+// UTF-8 in the first place, are kept as they are.
+func trimPartialRune(b []byte) []byte {
+	// A sequence is at most utf8.UTFMax bytes long, so an unfinished one starts
+	// within the last UTFMax-1 bytes.
+	for i := 1; i < utf8.UTFMax && i <= len(b); i++ {
+		if start := len(b) - i; utf8.RuneStart(b[start]) {
+			if !utf8.FullRune(b[start:]) {
+				return b[:start]
+			}
+			return b
+		}
+	}
+	return b
 }
 
 // RunResult holds the outcome of one complete Run (across all attempts).
@@ -294,7 +315,7 @@ func (e *Executor) runOnceHTTP(cctx context.Context, j Job, attempt int, started
 	}
 	truncated := len(body) > maxOutputBytes
 	if truncated {
-		body = body[:maxOutputBytes]
+		body = trimPartialRune(body[:maxOutputBytes])
 	}
 
 	res.ExitCode = resp.StatusCode

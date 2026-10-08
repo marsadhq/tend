@@ -6,10 +6,12 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // zeroBackoff disables inter-attempt delays so retry tests are instant.
@@ -511,5 +513,77 @@ func TestMaxRunDuration(t *testing.T) {
 				t.Errorf("maxRunDuration = %s, want %s", got, c.want)
 			}
 		})
+	}
+}
+
+// Test 21: trimPartialRune removes only a sequence the cut left unfinished.
+func TestTrimPartialRune(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"ascii", "abc", "abc"},
+		{"complete 2-byte rune", "ab\u00e9", "ab\u00e9"},
+		{"complete 3-byte rune", "ab\u20ac", "ab\u20ac"},
+		{"complete 4-byte rune", "ab\U0001F600", "ab\U0001F600"},
+		{"1 of 2 bytes", "ab\xc3", "ab"},
+		{"1 of 3 bytes", "ab\xe2", "ab"},
+		{"2 of 3 bytes", "ab\xe2\x82", "ab"},
+		{"1 of 4 bytes", "ab\xf0", "ab"},
+		{"2 of 4 bytes", "ab\xf0\x9f", "ab"},
+		{"3 of 4 bytes", "ab\xf0\x9f\x98", "ab"},
+		{"only a partial rune", "\xe2\x82", ""},
+		{"invalid byte is not a partial rune", "ab\xff", "ab\xff"},
+		{"stray continuation bytes are kept", "ab\x80\x80\x80", "ab\x80\x80\x80"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := string(trimPartialRune([]byte(c.in))); got != c.want {
+				t.Errorf("trimPartialRune(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// Test 22: truncation never splits a multi-byte character. Output that was
+// valid UTF-8 stays valid after the cap for shell and HTTP jobs alike (a
+// Postgres TEXT column rejects anything else), at every alignment of the cut.
+func TestRun_TruncationKeepsOutputValidUTF8(t *testing.T) {
+	// A 3-byte character, so the cap lands in a different place inside it as
+	// the ASCII prefix grows.
+	const euro = "\u20ac"
+	for pad := 0; pad < len(euro); pad++ {
+		body := strings.Repeat("x", pad) + strings.Repeat(euro, maxOutputBytes/len(euro)+16)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		path := filepath.Join(t.TempDir(), "out.txt")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		e := NewExecutor()
+		for name, j := range map[string]Job{
+			"shell": {Type: Shell, Command: "cat '" + path + "'"},
+			"http":  {Type: HTTP, HTTPURL: srv.URL},
+		} {
+			res := e.Run(context.Background(), j, nil)
+			if res.Status != StatusSucceeded {
+				t.Fatalf("%s pad=%d: status %s, want succeeded", name, pad, res.Status)
+			}
+			if !strings.HasSuffix(res.Output, truncationMarker) {
+				t.Fatalf("%s pad=%d: output was not truncated", name, pad)
+			}
+			if !utf8.ValidString(res.Output) {
+				t.Errorf("%s pad=%d: truncated output is not valid UTF-8 (the cut split a character)", name, pad)
+			}
+			// At most one character's worth of bytes is given up to the cut.
+			kept := len(strings.TrimPrefix(strings.TrimSuffix(res.Output, truncationMarker), "HTTP 200\n"))
+			if kept > maxOutputBytes || kept <= maxOutputBytes-len(euro) {
+				t.Errorf("%s pad=%d: kept %d bytes, want within one character of the %d byte cap", name, pad, kept, maxOutputBytes)
+			}
+		}
+		srv.Close()
 	}
 }
