@@ -13,6 +13,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -47,6 +48,12 @@ const reapInterval = time.Minute
 // job's no-overlap guard until restart.
 const reapSlack = 2 * time.Minute
 
+// ErrRunNotRunning is returned by RunnerStore.FinishRun and FinishRunAndEmit
+// when the run exists but is no longer 'running', so nothing was written. In
+// practice the stale-run reaper got there first: it already recorded the run
+// as failed and emitted its terminal event, and that outcome stands.
+var ErrRunNotRunning = errors.New("run is not running")
+
 // RunnerStore is the persistence surface the runner needs. It is defined here
 // (in package jobs) rather than imported from store to avoid an import cycle:
 // store imports jobs. The concrete *store.SQLiteStore / *store.PostgresStore
@@ -57,11 +64,14 @@ type RunnerStore interface {
 	UpdateJob(ctx context.Context, j Job) error
 	GetJob(ctx context.Context, orgID, id int64) (Job, error)
 	ClaimRun(ctx context.Context, worker string) (Run, bool, error)
+	// FinishRun records the terminal state of a 'running' run; it returns
+	// ErrRunNotRunning, writing nothing, when the run is no longer 'running'.
 	FinishRun(ctx context.Context, runID int64, status RunStatus, exitCode int, output string) error
 	// FinishRunAndEmit atomically records the terminal run state (including the
 	// final attempt count) AND the terminal lifecycle event in one transaction
 	// (prevents lost terminal event on EmitEvent failure after FinishRun
-	// committed). Returns the new event ID.
+	// committed). Returns the new event ID, or ErrRunNotRunning, having written
+	// neither, when the run is no longer 'running'.
 	FinishRunAndEmit(ctx context.Context, runID int64, status RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error)
 	GetSecret(ctx context.Context, orgID int64, name string) (string, error)
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
@@ -237,6 +247,9 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 			return true, evErr
 		}
 		if _, ferr := r.store.FinishRunAndEmit(ctx, run.ID, StatusFailed, -1, run.Attempt, out, termEv); ferr != nil {
+			if errors.Is(ferr, ErrRunNotRunning) {
+				return true, nil // already failed by the reaper; see below
+			}
 			// Run may be left in 'running'; recovered at next restart.
 			return true, ferr
 		}
@@ -267,6 +280,12 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 
 	// I2: finish + terminal event in one atomic transaction - no lost terminal event.
 	if _, err := r.store.FinishRunAndEmit(ctx, run.ID, res.Status, res.ExitCode, res.Attempt, out, termEv); err != nil {
+		if errors.Is(err, ErrRunNotRunning) {
+			// The reaper failed this run while it was still executing and has
+			// already emitted its run.failed. A terminal state is final: the
+			// late result is dropped, with no second event and no sink call.
+			return true, nil
+		}
 		// Run is left in 'running'; recovered at next restart.
 		return true, err
 	}

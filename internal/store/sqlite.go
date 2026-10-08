@@ -489,10 +489,16 @@ func (s *SQLiteStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, bo
 // finishRunTx records the terminal state of a run on an existing transaction.
 // This is the single source of the finish-run SQL; both FinishRun and
 // FinishRunAndEmit go through here.
+//
+// Only a run still in 'running' is finished, the same guard ReapStaleRun uses:
+// once the reaper has failed a run, a worker that turns up late must not
+// overwrite that state or emit a second terminal event. Such a late finish
+// returns jobs.ErrRunNotRunning and writes nothing; an unknown run ID returns
+// ErrNotFound.
 func finishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	res, err := tx.ExecContext(ctx,
-		`UPDATE job_runs SET status = ?, exit_code = ?, output = ?, ended_at = ? WHERE id = ?`,
-		string(status), exitCode, output, nowStr(), runID)
+		`UPDATE job_runs SET status = ?, exit_code = ?, output = ?, ended_at = ? WHERE id = ? AND status = ?`,
+		string(status), exitCode, output, nowStr(), runID, string(jobs.StatusRunning))
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
@@ -501,7 +507,15 @@ func finishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunSt
 		return fmt.Errorf("finish run rows: %w", err)
 	}
 	if n == 0 {
-		return ErrNotFound
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM job_runs WHERE id = ?`, runID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("finish run lookup: %w", err)
+		}
+		return jobs.ErrRunNotRunning
 	}
 	return nil
 }
@@ -578,7 +592,9 @@ func enqueueDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64, e core.
 	return nil
 }
 
-// FinishRun records the terminal state of a run.
+// FinishRun records the terminal state of a run that is still 'running'. It
+// returns jobs.ErrRunNotRunning, writing nothing, when the run already left
+// that state (see finishRunTx).
 func (s *SQLiteStore) FinishRun(ctx context.Context, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -593,7 +609,9 @@ func (s *SQLiteStore) FinishRun(ctx context.Context, runID int64, status jobs.Ru
 
 // FinishRunAndEmit atomically records the terminal run state AND appends the
 // terminal lifecycle event in a single transaction, preventing a lost terminal
-// event if EmitEvent would fail after FinishRun committed.
+// event if EmitEvent would fail after FinishRun committed. Like FinishRun it
+// returns jobs.ErrRunNotRunning, writing neither, when the run is no longer
+// 'running'.
 func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

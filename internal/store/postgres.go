@@ -317,11 +317,14 @@ func (s *PostgresStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, 
 
 // pgFinishRunTx records the terminal state of a run on an existing transaction.
 // This is the single source of the Postgres finish-run SQL; both FinishRun and
-// FinishRunAndEmit go through here.
+// FinishRunAndEmit go through here. Like the SQLite twin it only finishes a
+// run still in 'running': a late finish of a run the reaper already failed
+// returns jobs.ErrRunNotRunning and writes nothing; an unknown run ID returns
+// ErrNotFound.
 func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	res, err := tx.ExecContext(ctx,
-		`UPDATE job_runs SET status = $1, exit_code = $2, output = $3, ended_at = $4 WHERE id = $5`,
-		string(status), exitCode, output, nowStr(), runID)
+		`UPDATE job_runs SET status = $1, exit_code = $2, output = $3, ended_at = $4 WHERE id = $5 AND status = $6`,
+		string(status), exitCode, output, nowStr(), runID, string(jobs.StatusRunning))
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
@@ -330,7 +333,15 @@ func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.Run
 		return fmt.Errorf("finish run rows: %w", err)
 	}
 	if n == 0 {
-		return ErrNotFound
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM job_runs WHERE id = $1`, runID).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("finish run lookup: %w", err)
+		}
+		return jobs.ErrRunNotRunning
 	}
 	return nil
 }
@@ -400,7 +411,9 @@ func pgEnqueueDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64, e cor
 	return nil
 }
 
-// FinishRun records the terminal state of a run.
+// FinishRun records the terminal state of a run that is still 'running'. It
+// returns jobs.ErrRunNotRunning, writing nothing, when the run already left
+// that state (see pgFinishRunTx).
 func (s *PostgresStore) FinishRun(ctx context.Context, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -415,7 +428,9 @@ func (s *PostgresStore) FinishRun(ctx context.Context, runID int64, status jobs.
 
 // FinishRunAndEmit atomically records the terminal run state AND appends the
 // terminal lifecycle event in a single transaction, preventing a lost terminal
-// event if EmitEvent would fail after FinishRun committed.
+// event if EmitEvent would fail after FinishRun committed. Like FinishRun it
+// returns jobs.ErrRunNotRunning, writing neither, when the run is no longer
+// 'running'.
 func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
