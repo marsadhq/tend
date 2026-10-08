@@ -234,3 +234,30 @@ func TestPostJSON_TransportError_ContextCanceled(t *testing.T) {
 		t.Fatalf("error leaked secret URL token: %v", err)
 	}
 }
+
+// TestPostJSON_RequestBuildError_RedactsToken guards the branch before any
+// network I/O: a channel URL that net/url rejects (here, a stray control
+// character) fails request construction with a *url.Error that quotes the
+// whole URL, so it must be redacted like a transport error.
+func TestPostJSON_RequestBuildError_RedactsToken(t *testing.T) {
+	const badURL = "http://127.0.0.1:9/services/T00/B00/SECRETTOKEN123\x7f"
+	providers := map[string]notify.Provider{
+		"webhook": notify.NewWebhook(badURL),
+		"slack":   notify.NewSlack(badURL),
+		"discord": notify.NewDiscord(badURL),
+	}
+	for name, p := range providers {
+		t.Run(name, func(t *testing.T) {
+			err := p.Send(context.Background(), notify.Message{Subject: "x", Body: "y"})
+			if err == nil {
+				t.Fatal("expected an error for an unparseable URL, got nil")
+			}
+			if strings.Contains(err.Error(), "SECRETTOKEN123") {
+				t.Fatalf("error leaked secret URL token: %v", err)
+			}
+			if strings.Contains(err.Error(), "/services/") {
+				t.Fatalf("error leaked the URL path: %v", err)
+			}
+		})
+	}
+}
