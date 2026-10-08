@@ -24,20 +24,25 @@ schedules resolve identically everywhere with no host `tzdata` dependency.
   cgo); Postgres (`pgx` stdlib driver) is available for scale. Both back the
   exact same `store.Store` interface (see §3).
 - **The `serve` process.** `tend serve` runs everything off **one clock and one
-  notification dispatcher**:
-  - the **runner** (scheduler tick + worker goroutines that claim and execute
-    runs),
+  notification delivery worker**:
+  - the **runner** (scheduler tick, worker goroutines that claim and execute
+    runs, and a periodic sweep that fails runs whose worker was lost),
   - the **HTTP server** (heartbeat ping endpoint, `/healthz`, the read + action
     REST API, and the htmx dashboard),
-  - the **heartbeat watcher** (periodic scan for missed dead-man's-switch pings).
+  - the **heartbeat watcher** (periodic scan for missed dead-man's-switch pings),
+  - the **delivery worker** (drains the durable notification queue; started
+    only when a master key is configured),
+  - the **retention sweep** (prunes old events, job runs, and deliveries at
+    startup and then daily).
 
-  All three share the injected `clock.Clock` and a single
-  `func(context.Context, core.Event)` dispatch closure, so behavior is consistent
-  and testable (a `clock.FakeClock` drives time in tests).
+  The runner, HTTP server, and watcher share the injected `clock.Clock` and a
+  single `func(context.Context, core.Event)` closure that nudges the delivery
+  worker, so behavior is consistent and testable (a `clock.FakeClock` drives
+  time in tests).
 
 Other subcommands (`sync`, `job`, `run`, `logs`, `secret`, `channel`, `rule`,
-`heartbeat`, `user`, `token`, `version`) are one-shot CLI operations dispatched
-from `internal/cli`.
+`heartbeat`, `doctor`, `user`, `token`, `version`) are one-shot CLI operations
+dispatched from `internal/cli`.
 
 ---
 
@@ -52,15 +57,16 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/core` | Cross-cutting domain types shared by everything: `Org` (tenant) and the generic `Event` record (the event-pipeline spine). |
 | `internal/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
-| `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`), the `Executor` (shell + HTTP), and the `Runner` loop (scheduler + workers + secret resolution + output redaction). |
+| `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 | `internal/auth` | Cryptographic identity primitives: argon2id passwords, API tokens, signed session cookies, CSRF; the `Principal`, `User`, `APIToken`, `Membership` types. |
-| `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP), rules, and the `Dispatcher`. |
+| `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP/Telegram), rules, the `Alertable` filter, and the `Worker` that drains the durable delivery queue. |
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
-| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, and the heartbeat ping/health endpoints. |
-| `internal/config` | Environment-driven process configuration (driver, DSN, master key, cookie-secure flag, etc.). |
-| `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, and dispatcher together. |
+| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, the security-headers middleware, and the rate limiter for `/login` and `/ping`. |
+| `internal/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, shared by `notify` and `jobs` so secret-bearing URLs stay out of logs and run output. |
+| `internal/config` | Environment-driven process configuration (driver, DSN, master key). `TEND_DB` has no default; an unset value leaves the DSN empty and `cli.Run` refuses to open a database. |
+| `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, delivery worker, and retention sweep together. |
 
 ---
 
@@ -81,8 +87,8 @@ store types satisfy it **structurally**. Examples:
 
 - `jobs.RunnerStore`: what the runner needs (`DueJobs`, `ClaimRun`,
   `FinishRunAndEmit`, …).
-- `notify.DispatchStore` / `notify.ChannelStore`: what the dispatcher and channel
-  helpers need.
+- `notify.WorkerStore` / `notify.ChannelStore`: what the delivery worker and
+  channel helpers need.
 - `heartbeat.WatchStore`: what the watcher needs.
 - `configfile.ReconcileStore`: what reconcile needs.
 
@@ -122,6 +128,13 @@ dialects force it:
   when the job is absent.
 - **Atomic finish + emit.** `FinishRunAndEmit` writes the terminal run state and
   the terminal lifecycle event in a single transaction (see §4).
+- **Atomic emit + enqueue.** Every event insert goes through one helper per
+  backend (`emitEventTx` / `pgEmitEventTx`), which also inserts the pending
+  `deliveries` rows for that event on the same transaction (see §4).
+- **Retention pruning.** `PruneEvents`, `PruneJobRuns`, and `PruneDeliveries`
+  hard-delete rows created before a cutoff. They never touch pending or
+  running runs, pending deliveries, or an event that a pending delivery still
+  references.
 
 The claim path differs subtly by engine: SQLite serializes writes at the pool
 (`SetMaxOpenConns(1)`) and uses a single atomic `UPDATE … RETURNING` to claim the
@@ -132,6 +145,29 @@ same run.
 Crash recovery is at-least-once: `RequeueOrphanedRuns` resets any `running` rows
 back to `pending` at startup (the single-instance runner has no peers, so a
 `running` row found at boot was orphaned by a crash).
+
+While `serve` is up, the runner's reaper (`Runner.ReapOnce`, every minute)
+covers the other case: a run whose worker was lost without the process
+restarting. `started_at` is stamped once, when the run is claimed, while the
+executor may spend `MaxRetries + 1` attempts on it, so the reaper waits for the
+longest the whole run can take (`Executor.maxRunDuration`: every attempt
+reaching the job's timeout, `jobs.DefaultTimeout` of 30 minutes when the job
+sets none, with its kill grace, plus the backoff between attempts) and two
+minutes of slack on top. A run still `running` after that is presumed orphaned
+and failed through `ReapStaleRun`. Like `FinishRunAndEmit`, that writes the
+terminal state and the `run.failed` event in one transaction. Without it the
+orphan would hold the job's no-overlap guard until the next restart.
+
+A terminal state is final in both directions. `ReapStaleRun` and the finish
+path (`FinishRun`, `FinishRunAndEmit`) each update only a run that is still
+`running`, so whichever commits first wins: reaping a run that just finished is
+a no-op, and a worker that finishes a run the reaper already failed gets
+`jobs.ErrRunNotRunning`, writes nothing, and emits no second terminal event.
+
+Captured output is arbitrary bytes. SQLite stores it as is; the Postgres finish
+path replaces invalid UTF-8 with U+FFFD and drops NUL bytes first, because a
+`TEXT` column accepts neither and a rejected value would leave the run
+`running`.
 
 ---
 
@@ -146,7 +182,9 @@ Event types currently emitted:
 - **Runs:** `run.started` (best-effort), `run.succeeded`, `run.failed`. Timeouts
   surface as `run.failed` with the precise status in the payload, so the
   `run.*` type vocabulary stays small.
-- **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`.
+- **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`. A heartbeat that
+  was never pinged is armed from its creation time, so `heartbeat.missed` also
+  covers a first ping that never arrives.
 - **Notifications:** `notification.failed` (emitted when delivery is exhausted).
 
 **Terminal run events are written atomically with the run.** The runner records
@@ -156,20 +194,43 @@ but a separate `EmitEvent` then fail. (`run.started` is explicitly *not* termina
 and is best-effort; a lost start event is non-critical because the terminal
 event is guaranteed.)
 
-**The runner's `EventSink`** (`Runner.EventSink func(context.Context,
-core.Event)`) is the seam through which terminal events reach the notifier. After
-a terminal event is durably recorded, the runner fires the sink. It is a plain
-`func` over `core.Event` (not a `notify` type) precisely so `jobs` never imports
-`notify`, keeping the graph acyclic. In `serve`, the sink is the dispatcher's
-`DispatchForEvent`. The runner fires on **every** terminal event (successes
-included) and lets the dispatcher decide what is alertable.
+**Notifications are a durable queue.** Every event insert (`EmitEvent`,
+`FinishRunAndEmit`, `ReapStaleRun`) also inserts, in the same transaction, one
+`pending` row in the `deliveries` table for each channel that has an enabled
+rule matching the event: org-wide rules plus rules scoped to the event's job.
+Because the delivery commits atomically with the event, neither a crash nor a
+slow destination can lose a matched notification. Overlapping rules for the
+same channel produce a single delivery.
 
-**The dispatcher's loop-guard.** `notify.Dispatcher` only acts on an `alertable`
-set (`run.failed`, `heartbeat.missed`, `heartbeat.recovered`). Non-alert events,
-including all `notification.*` events, are dropped *before any store query*. This
-is the loop guard: a delivery failure emits `notification.failed`, which can never
-feed back in and start a notification storm. It also means the runner can fire on
-`run.succeeded` harmlessly; the filter drops it.
+**The loop guard lives at enqueue time.** Only the `alertable` set
+(`run.failed`, `heartbeat.missed`, `heartbeat.recovered`; see
+`notify.Alertable`) ever enqueues deliveries. Every other event type, including
+all `notification.*` events, enqueues nothing. A delivery that is given up on
+emits `notification.failed`, which therefore can never feed back in and start a
+notification storm, and emitters can record `run.succeeded` freely.
+
+**`notify.Worker` drains the queue.** It claims due rows (`ClaimDueDeliveries`
+increments the attempt count and pushes `next_attempt_at` out by a one-minute
+lease, so a claim held by a crashed worker simply becomes due again), decrypts
+the channel config, builds the provider, and sends. Success marks the row
+`delivered`. Failure reschedules it with exponential backoff (1 second,
+doubling, capped at 5 minutes). Once a delivery has been failing for 24 hours it
+is marked `failed` and `notification.failed` is emitted, so a dropped alert is
+never silent. Delivery is at-least-once: a send that succeeded but could not be
+marked delivered is repeated after the lease.
+
+**The runner's `EventSink`** (`Runner.EventSink func(context.Context,
+core.Event)`) is the seam through which the runner signals that a terminal event
+was recorded. It is a plain `func` over `core.Event` (not a `notify` type)
+precisely so `jobs` never imports `notify`, keeping the graph acyclic. In
+`serve`, the sink, and the same closure handed to the HTTP server and the
+watcher, only calls `Worker.Nudge()` to wake the worker for a prompt drain.
+Nothing is sent inline, so a slow or failing destination never blocks a runner
+worker, a ping response, or the watcher. Without a master key the worker is not
+started (channel config cannot be decrypted) and the closure is nil; events are
+still recorded and their deliveries stay queued until `serve` runs with a key.
+`tend run` drains the queue once inline after its run, so a manual run notifies
+even when no server is running.
 
 ---
 
@@ -245,6 +306,33 @@ careful.
 - **Org-scoping on every query.** Every tenant-scoped store method takes an
   `orgID`, and handlers scope every call to `Principal.OrgID` resolved by
   `requireAuth`. A resource id belonging to another org is simply not found.
+- **Rate limiting on the unauthenticated endpoints.** `POST /login` (burst 5,
+  refill 1 per second) and `/ping/{token}` (burst 20, refill 10 per second) pass
+  through an in-memory token bucket keyed by client address and endpoint
+  (`internal/httpserver/ratelimit.go`); requests over the limit get `429` with
+  `Retry-After`. The ping limiter keys on the address rather than the token on
+  purpose, so rotating tokens does not evade it. The client address is the TCP
+  peer unless `TEND_TRUST_PROXY` is set, in which case the left-most
+  `X-Forwarded-For` entry is used; that is only sound behind a proxy that
+  overwrites the header. The entry must parse as an IP address and is keyed in
+  canonical form; anything else falls back to the TCP peer, so a header value
+  cannot become an arbitrary bucket key. Buckets live in the server process;
+  idle ones are evicted by a sweep that runs at most every 10 minutes.
+- **Security headers on every response.** `securityHeaders` wraps the whole mux
+  and sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` built on
+  `default-src 'self'` and `frame-ancestors 'none'`, with no inline scripts or
+  styles allowed. Templates therefore must not use inline event handlers,
+  inline `<script>` blocks, or `style` attributes; row navigation lives in
+  `static/row-nav.js` for that reason, and the base template turns off the
+  indicator stylesheet htmx would otherwise inject. HSTS is deliberately not
+  sent, because `serve` speaks plain HTTP and TLS is terminated at a reverse
+  proxy.
+- **URLs are kept out of error text.** A failed outbound request surfaces as a
+  `*url.Error` that quotes the full URL. `internal/urlredact` reduces it to the
+  host and the underlying cause; the webhook, Slack, Discord, and Telegram
+  providers and the HTTP job executor all go through it, so a token embedded in
+  a URL reaches neither the logs nor `job_runs.output`.
 
 `requireAuth` resolves a `Principal` from a session cookie **or** an
 `Authorization: Bearer` token, and **fails closed**: any error decoding the
@@ -282,12 +370,52 @@ declared config and runtime state, and to keep secret-write paths off the networ
 
 ---
 
+## 8. Operational safeguards
+
+These limits are constants in the code, not configuration.
+
+- **No implicit database.** `config.Load` leaves the DSN empty when `TEND_DB` is
+  unset, and `cli.Run` then refuses every command that would open the store.
+  `version`, top-level help (`help`, `-h`, `--help`), and `serve -h` are
+  answered before that check, so they need no configuration and never create a
+  database file or start the daemon. Every other subcommand parses its flags
+  after the store is open, so its `-h` still needs `TEND_DB`.
+- **Bounded captured output.** The executor keeps at most `maxOutputBytes`
+  (1 MiB) per attempt: shell jobs write through a `cappedBuffer` that discards
+  the excess without ever returning an error (so a chatty child is not killed by
+  a full pipe), and HTTP jobs read the body through an `io.LimitReader`. A
+  truncation marker is appended, after backing the cut off to a character
+  boundary so truncation never produces invalid UTF-8; status and exit code are
+  unaffected. A run stores the output of its last attempt.
+- **Retention sweep.** `serve` prunes at startup and every 24 hours: events and
+  terminal job runs older than 30 days, finalized deliveries older than 7 days
+  (the constants sit next to `cmdServe`). A failed sweep is logged and retried
+  on the next tick.
+- **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
+  and `IdleTimeout` are all 10 seconds (`newHTTPServer` in `internal/cli`).
+  Every handler is quick and the largest request body is a login form, so a
+  client that stalls while sending its headers or body, while reading the
+  response, or between requests cannot hold a connection open.
+- **Cron validation at the edges.** `jobs.ValidateCron` uses the same parser as
+  `Job.NextRun`. `tend job add` and `configfile.Parse` call it before anything is
+  written, so an expression that would never fire is rejected instead of stored.
+- **Deployment files.** `deploy/tend.service` is the hardened system-wide unit
+  and `deploy/tend-user.service` a user-level unit. `deploy/deploy-tend.sh`
+  builds the binary, stops the service, keeps the previous binary, copies the
+  new one, starts it, and rolls back if `/healthz` does not answer. The script
+  and the user unit carry the host name, paths, and addresses of the
+  maintainers' own installation and are meant to be adapted, not run as is.
+
+---
+
 ## Where to start reading
 
 - The persistence seam and parity conventions: `internal/store/store.go`, then
   `internal/store/sqlite.go` and `internal/store/postgres.go`.
 - The execution engine: `internal/jobs/runner.go` and `internal/jobs/executor.go`.
-- The notification path: `internal/notify/dispatcher.go`.
+- The notification path: `internal/notify/worker.go` (delivery and retries),
+  `internal/notify/message.go` (what is alertable, how messages are rendered),
+  and `enqueueDeliveriesTx` in `internal/store/sqlite.go` (the enqueue side).
 - The auth/security surface: `internal/auth/auth.go` and
   `internal/httpserver/auth.go`; DTOs in `internal/httpserver/api.go`.
 - Config-as-code: `internal/configfile/configfile.go`.

@@ -108,7 +108,7 @@ highlights every contributor should internalize:
   `*SQLiteStore` and `*PostgresStore` satisfy it.
 - **Consumer-defined interfaces (no import cycles).** `store` imports the domain
   packages; the domain packages **never** import `store`. Each consumer defines
-  its own small interface (e.g. `jobs.RunnerStore`, `notify.DispatchStore`) that
+  its own small interface (e.g. `jobs.RunnerStore`, `notify.WorkerStore`) that
   the concrete store types satisfy structurally. When you add a store method,
   add it to `Store` *and* to any consumer interface that needs it; never make a
   domain package import `store`.
