@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
@@ -324,7 +326,7 @@ func (s *PostgresStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, 
 func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE job_runs SET status = $1, exit_code = $2, output = $3, ended_at = $4 WHERE id = $5 AND status = $6`,
-		string(status), exitCode, output, nowStr(), runID, string(jobs.StatusRunning))
+		string(status), exitCode, pgText(output), nowStr(), runID, string(jobs.StatusRunning))
 	if err != nil {
 		return fmt.Errorf("finish run: %w", err)
 	}
@@ -344,6 +346,19 @@ func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.Run
 		return jobs.ErrRunNotRunning
 	}
 	return nil
+}
+
+// pgText makes captured job output storable in a Postgres TEXT column, which
+// accepts neither invalid UTF-8 nor NUL bytes. A job may print anything (binary
+// data, text in another encoding), and a rejected value would fail the finish
+// and leave the run 'running' with its real result lost. Each invalid sequence
+// becomes U+FFFD and NUL bytes are dropped; valid text is returned unchanged.
+// SQLite stores arbitrary bytes and needs no such step.
+func pgText(s string) string {
+	if utf8.ValidString(s) && !strings.Contains(s, "\x00") {
+		return s
+	}
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 }
 
 // pgEmitEventTx appends an event on an existing Postgres transaction and
