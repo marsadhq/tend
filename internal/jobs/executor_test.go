@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -477,5 +478,38 @@ func TestRun_HTTP_BodyUnderCap(t *testing.T) {
 	}
 	if !strings.Contains(res.Output, "pong") {
 		t.Errorf("expected output to contain 'pong', got %q", res.Output)
+	}
+}
+
+// Test 20: maxRunDuration covers every attempt (timeout plus kill grace) and
+// every backoff pause, so the stale-run reaper never mistakes a run that is
+// still retrying for an orphan.
+func TestMaxRunDuration(t *testing.T) {
+	const forever = time.Duration(math.MaxInt64)
+	attempt := func(timeout time.Duration) time.Duration { return timeout + killGraceDelay }
+
+	cases := []struct {
+		name string
+		e    *Executor
+		job  Job
+		want time.Duration
+	}{
+		{"no retries", NewExecutor(), Job{TimeoutSeconds: 600}, attempt(10 * time.Minute)},
+		{"unset timeout uses the default", NewExecutor(), Job{}, attempt(DefaultTimeout)},
+		{"negative retries count as none", NewExecutor(), Job{TimeoutSeconds: 600, MaxRetries: -3}, attempt(10 * time.Minute)},
+		{"one retry adds an attempt and a 1s pause", NewExecutor(), Job{TimeoutSeconds: 600, MaxRetries: 1},
+			2*attempt(10*time.Minute) + 1*time.Second},
+		{"three retries add 1s+4s+9s of pauses", NewExecutor(), Job{TimeoutSeconds: 60, MaxRetries: 3},
+			4*attempt(time.Minute) + 14*time.Second},
+		{"custom backoff is honoured", &Executor{Backoff: zeroBackoff}, Job{TimeoutSeconds: 60, MaxRetries: 3},
+			4 * attempt(time.Minute)},
+		{"absurd retry count saturates", NewExecutor(), Job{TimeoutSeconds: 600, MaxRetries: math.MaxInt32}, forever},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.e.maxRunDuration(c.job); got != c.want {
+				t.Errorf("maxRunDuration = %s, want %s", got, c.want)
+			}
+		})
 	}
 }

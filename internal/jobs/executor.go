@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -100,11 +101,44 @@ func (e *Executor) backoff(attempt int) time.Duration {
 	return time.Duration(attempt*attempt) * time.Second
 }
 
+// maxRunDuration returns the longest one complete Run of j can legitimately
+// take: every attempt running into its timeout, the grace period each kill is
+// given, and every backoff pause in between. The runner's stale-run reaper
+// uses it, so the reaper and the retry loop in Run agree on when a run is
+// overdue. The result saturates rather than overflowing for an absurd retry
+// count.
+func (e *Executor) maxRunDuration(j Job) time.Duration {
+	const forever = time.Duration(math.MaxInt64)
+
+	attempts := j.MaxRetries + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+	timeout := time.Duration(j.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	perAttempt := timeout + killGraceDelay
+
+	total := perAttempt
+	for attempt := 1; attempt < attempts; attempt++ {
+		pause := e.backoff(attempt)
+		if pause < 0 {
+			pause = 0
+		}
+		if total > forever-pause-perAttempt {
+			return forever
+		}
+		total += pause + perAttempt
+	}
+	return total
+}
+
 // Run executes j, retrying up to j.MaxRetries additional times on any
 // non-succeeded outcome - including StatusTimedOut. Each failed attempt
 // is followed by a backoff pause before the next attempt.
-// Worst-case wall time ≈ MaxRetries*TimeoutSeconds + Σ(i² for i in 1..MaxRetries) seconds
-// when using the default exponential backoff.
+// Worst-case wall time ≈ (MaxRetries+1)*TimeoutSeconds + Σ(i² for i in 1..MaxRetries)
+// seconds when using the default exponential backoff; see maxRunDuration.
 func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunResult {
 	maxAttempts := j.MaxRetries + 1
 	if maxAttempts < 1 {

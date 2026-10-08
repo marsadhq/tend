@@ -109,3 +109,74 @@ func TestReapOnceFailsStaleRunningRun(t *testing.T) {
 		t.Errorf("second sweep emitted events: %d -> %d", len(evts), len(evts2))
 	}
 }
+
+// TestReapOnceWaitsForRetries proves the reaper counts retries. started_at is
+// stamped once at claim, but a job with retries may legitimately run several
+// attempts of its timeout each, so a run that is past ONE timeout (plus slack)
+// is still inside its limit and must be left alone; only a run past the limit
+// of all its attempts is reaped.
+func TestReapOnceWaitsForRetries(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, ctx)
+	org, err := s.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two retries of a 10 minute timeout: three attempts plus pauses is a little
+	// over 30 minutes.
+	jobID, err := s.CreateJob(ctx, jobs.Job{
+		OrgID: org.ID, Name: "retrying", Type: jobs.Shell, Command: "sleep 999",
+		TimeoutSeconds: 600, MaxRetries: 2, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueRun(ctx, org.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+	// ClaimRun stamps started_at with the real wall clock.
+	if _, ok, err := s.ClaimRun(ctx, "runner"); err != nil || !ok {
+		t.Fatalf("ClaimRun: ok=%v err=%v", ok, err)
+	}
+
+	// 13 minutes in: past one timeout plus slack, in the middle of attempt 2.
+	fk := clock.NewFake(time.Now().Add(13 * time.Minute))
+	fired := 0
+	r := jobs.NewRunner(s, jobs.NewExecutor(), nil, fk)
+	r.EventSink = func(context.Context, core.Event) { fired++ }
+
+	if err := r.ReapOnce(ctx); err != nil {
+		t.Fatalf("ReapOnce: %v", err)
+	}
+	runs, err := s.ListRuns(ctx, org.ID, jobID, 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns: %v %d", err, len(runs))
+	}
+	if runs[0].Status != jobs.StatusRunning {
+		t.Fatalf("run status after 13m: got %s want running (still retrying, must not be reaped)", runs[0].Status)
+	}
+	evts, err := s.ListEvents(ctx, org.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasType(evts, "run.failed") || fired != 0 {
+		t.Fatalf("run.failed emitted for a run still inside its retry limit (sink fired %d)", fired)
+	}
+
+	// 40 minutes in: past every attempt, every pause, and the slack.
+	fk.Advance(27 * time.Minute)
+	if err := r.ReapOnce(ctx); err != nil {
+		t.Fatalf("ReapOnce: %v", err)
+	}
+	runs, err = s.ListRuns(ctx, org.ID, jobID, 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns: %v %d", err, len(runs))
+	}
+	if runs[0].Status != jobs.StatusFailed || !strings.Contains(runs[0].Output, "reaped") {
+		t.Errorf("run after 40m: status %s output %q, want failed and reaped", runs[0].Status, runs[0].Output)
+	}
+	if fired != 1 {
+		t.Errorf("EventSink fired %d times, want 1", fired)
+	}
+}
