@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/marsadhq/tend/internal/urlredact"
 )
 
 // killGraceDelay bounds how long cmd.Wait will block after the per-attempt
@@ -215,12 +217,16 @@ func (e *Executor) runOnceHTTP(cctx context.Context, j Job, attempt int, started
 		bodyReader = strings.NewReader(j.HTTPBody)
 	}
 
+	// HTTPURL may embed a secret token in its path or query string, and the
+	// errors below are stored as job_runs.output, which is retained and shown
+	// by the CLI, the API and the dashboard. Both error branches therefore
+	// report only the host and the underlying cause, never the URL.
 	req, err := http.NewRequestWithContext(cctx, method, j.HTTPURL, bodyReader)
 	if err != nil {
 		return RunResult{
 			Status:   StatusFailed,
 			ExitCode: -1,
-			Output:   err.Error(),
+			Output:   urlredact.Error(j.HTTPURL, err).Error(),
 			Attempt:  attempt,
 			Started:  started,
 			Ended:    time.Now(),
@@ -239,7 +245,7 @@ func (e *Executor) runOnceHTTP(cctx context.Context, j Job, attempt int, started
 		} else {
 			res.Status = StatusFailed
 			res.ExitCode = -1
-			res.Output = err.Error()
+			res.Output = urlredact.Error(j.HTTPURL, err).Error()
 		}
 		res.Ended = time.Now()
 		return res
