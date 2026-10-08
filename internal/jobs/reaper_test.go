@@ -2,6 +2,8 @@ package jobs_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -179,4 +181,96 @@ func TestReapOnceWaitsForRetries(t *testing.T) {
 	if fired != 1 {
 		t.Errorf("EventSink fired %d times, want 1", fired)
 	}
+}
+
+// TestRunnerDropsResultOfReapedRun proves a terminal state is final. If the
+// reaper fails a run while its worker is still executing, the worker's late
+// result must not overwrite that state, emit a second terminal event, or reach
+// the EventSink - and the worker must carry on without an error.
+func TestRunnerDropsResultOfReapedRun(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, ctx)
+	org, err := s.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The job blocks until the test releases it, so it is certainly still
+	// executing when the run is failed underneath it, and then exits 0.
+	release := filepath.Join(t.TempDir(), "release")
+	jobID, err := s.CreateJob(ctx, jobs.Job{
+		OrgID: org.ID, Name: "slow", Type: jobs.Shell,
+		Command:        "while [ ! -e '" + release + "' ]; do sleep 0.05; done",
+		TimeoutSeconds: 60, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueRun(ctx, org.ID, jobID); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	fired := 0
+	r := jobs.NewRunner(s, jobs.NewExecutor(), nil, clock.RealClock{})
+	r.EventSink = func(context.Context, core.Event) {
+		mu.Lock()
+		fired++
+		mu.Unlock()
+	}
+
+	drained := make(chan error, 1)
+	go func() { drained <- r.DrainOnce(ctx) }()
+
+	// Wait for the worker to claim the run, then fail it underneath the worker
+	// the way the reaper would.
+	var runID int64
+	for deadline := time.Now().Add(10 * time.Second); runID == 0; {
+		running, err := s.ListRunningRuns(ctx)
+		if err != nil {
+			t.Fatalf("ListRunningRuns: %v", err)
+		}
+		if len(running) == 1 {
+			runID = running[0].ID
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run was never claimed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	reaped, err := s.ReapStaleRun(ctx, runID, "reaped: worker lost", core.Event{
+		OrgID: org.ID, Type: "run.failed", Source: "jobs.runner", Payload: `{"status":"failed"}`,
+	})
+	if err != nil || !reaped {
+		t.Fatalf("ReapStaleRun: reaped=%v err=%v", reaped, err)
+	}
+
+	// Let the job finish: the worker now reports a success for a run that is
+	// already failed.
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-drained; err != nil {
+		t.Fatalf("DrainOnce after the run was reaped: %v", err)
+	}
+
+	runs, err := s.ListRuns(ctx, org.ID, jobID, 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns: %v %d", err, len(runs))
+	}
+	if runs[0].Status != jobs.StatusFailed || runs[0].Output != "reaped: worker lost" {
+		t.Errorf("reaped run was overwritten: status=%s output=%q", runs[0].Status, runs[0].Output)
+	}
+	evts, err := s.ListEvents(ctx, org.ID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasType(evts, "run.succeeded") {
+		t.Error("late result emitted run.succeeded for a run that was already failed")
+	}
+	mu.Lock()
+	if fired != 0 {
+		t.Errorf("EventSink fired %d times for the dropped result, want 0", fired)
+	}
+	mu.Unlock()
 }

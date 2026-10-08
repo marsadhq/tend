@@ -700,6 +700,74 @@ func TestFinishRunAndEmit(t *testing.T) {
 	})
 }
 
+// TestFinishRunLeavesTerminalRunAlone proves a terminal state is final: once
+// the reaper has failed a run, a late FinishRun / FinishRunAndEmit from the
+// worker that was still executing it writes nothing (no status overwrite, no
+// second terminal event) and reports jobs.ErrRunNotRunning. An unknown run ID
+// is still ErrNotFound.
+func TestFinishRunLeavesTerminalRunAlone(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		orgID, jobID := seedJob(t, ctx, s)
+
+		runID, err := s.EnqueueRun(ctx, orgID, jobID)
+		if err != nil {
+			t.Fatalf("EnqueueRun: %v", err)
+		}
+		if _, ok, err := s.ClaimRun(ctx, "worker"); err != nil || !ok {
+			t.Fatalf("ClaimRun: ok=%v err=%v", ok, err)
+		}
+
+		reaped, err := s.ReapStaleRun(ctx, runID, "reaped: worker lost", core.Event{
+			OrgID: orgID, Type: "run.failed", Source: "jobs.runner", Payload: `{"status":"failed"}`,
+		})
+		if err != nil || !reaped {
+			t.Fatalf("ReapStaleRun: reaped=%v err=%v", reaped, err)
+		}
+
+		// The worker finishes after all and tries to record a success.
+		_, err = s.FinishRunAndEmit(ctx, runID, jobs.StatusSucceeded, 0, 2, "late output", core.Event{
+			OrgID: orgID, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"status":"succeeded"}`,
+		})
+		if !errors.Is(err, jobs.ErrRunNotRunning) {
+			t.Fatalf("late FinishRunAndEmit: err = %v, want jobs.ErrRunNotRunning", err)
+		}
+		if err := s.FinishRun(ctx, runID, jobs.StatusSucceeded, 0, "late output"); !errors.Is(err, jobs.ErrRunNotRunning) {
+			t.Fatalf("late FinishRun: err = %v, want jobs.ErrRunNotRunning", err)
+		}
+
+		run, err := s.GetRun(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("GetRun: %v", err)
+		}
+		if run.Status != jobs.StatusFailed || run.Output != "reaped: worker lost" || run.Attempt != 1 {
+			t.Errorf("reaped run was overwritten: status=%s attempt=%d output=%q", run.Status, run.Attempt, run.Output)
+		}
+
+		evts, err := s.ListEvents(ctx, orgID, 10)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		var failed, succeeded int
+		for _, e := range evts {
+			switch e.Type {
+			case "run.failed":
+				failed++
+			case "run.succeeded":
+				succeeded++
+			}
+		}
+		if failed != 1 || succeeded != 0 {
+			t.Errorf("terminal events: %d run.failed, %d run.succeeded; want exactly one run.failed", failed, succeeded)
+		}
+
+		// A run that does not exist is still "not found", not "not running".
+		if err := s.FinishRun(ctx, runID+1000, jobs.StatusSucceeded, 0, "x"); !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("FinishRun(unknown id): err = %v, want store.ErrNotFound", err)
+		}
+	})
+}
+
 // TestOpenDispatcher checks the store.Open driver dispatcher.
 func TestOpenDispatcher(t *testing.T) {
 	ctx := context.Background()
