@@ -213,6 +213,75 @@ func TestExecutor_HTTPTimeout(t *testing.T) {
 	}
 }
 
+// Test 10b: HTTP transport error (connection refused) must not leak the
+// request URL into job output — HTTPURL may embed a secret token in its
+// query string or path, and job_runs.output is retained.
+func TestExecutor_HTTPTransportError_RedactsURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := srv.URL + "/webhook?token=supersecret"
+	srv.Close() // now refuses connections at the same host:port
+
+	e := NewExecutor()
+	j := Job{Type: HTTP, HTTPURL: deadURL, MaxRetries: 0}
+	res := e.Run(context.Background(), j, nil)
+
+	if res.Status != StatusFailed {
+		t.Fatalf("expected StatusFailed, got %s", res.Status)
+	}
+	if strings.Contains(res.Output, "supersecret") {
+		t.Errorf("output leaked secret token: %q", res.Output)
+	}
+	if strings.Contains(res.Output, deadURL) {
+		t.Errorf("output leaked full request URL: %q", res.Output)
+	}
+	if host := strings.TrimPrefix(srv.URL, "http://"); !strings.HasPrefix(res.Output, host+": ") {
+		t.Errorf("output should still name the host %q for diagnosability: %q", host, res.Output)
+	}
+}
+
+// Test 10c: a request that cannot even be built (before any network I/O) must
+// not leak the URL either. Two ways to get there: a URL net/url rejects, whose
+// parse error quotes the whole URL, and an invalid method on a valid URL.
+func TestExecutor_HTTPRequestBuildError_RedactsURL(t *testing.T) {
+	tests := []struct {
+		name       string
+		job        Job
+		wantPrefix string
+	}{
+		{
+			name:       "unparseable URL",
+			job:        Job{Type: HTTP, HTTPURL: "http://127.0.0.1:9/webhook?token=supersecret\x7f"},
+			wantPrefix: "<url>: ",
+		},
+		{
+			name:       "invalid method",
+			job:        Job{Type: HTTP, HTTPMethod: "BAD METHOD", HTTPURL: "http://127.0.0.1:9/webhook?token=supersecret"},
+			wantPrefix: "127.0.0.1:9: ",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := NewExecutor().Run(context.Background(), tc.job, nil)
+
+			if res.Status != StatusFailed {
+				t.Fatalf("expected StatusFailed, got %s (output %q)", res.Status, res.Output)
+			}
+			if res.ExitCode != -1 {
+				t.Errorf("expected ExitCode -1 for a request that was never sent, got %d", res.ExitCode)
+			}
+			if strings.Contains(res.Output, "supersecret") {
+				t.Errorf("output leaked secret token: %q", res.Output)
+			}
+			if strings.Contains(res.Output, "/webhook") {
+				t.Errorf("output leaked the request path: %q", res.Output)
+			}
+			if !strings.HasPrefix(res.Output, tc.wantPrefix) {
+				t.Errorf("output = %q, want prefix %q", res.Output, tc.wantPrefix)
+			}
+		})
+	}
+}
+
 // Test 11: Parent context cancellation stops retrying
 func TestExecutor_ParentCancelStopsRetries(t *testing.T) {
 	e := NewExecutor()
