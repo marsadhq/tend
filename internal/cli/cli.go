@@ -56,8 +56,17 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		return nil
 	}
 
-	// Help must be side-effect free and must not depend on configuration:
-	// handle it BEFORE the TEND_DB check and before opening the store, so
+	// Help must be side-effect free and must not depend on configuration, so
+	// the two requests below are answered BEFORE the TEND_DB check and before
+	// opening the store. (Every other subcommand parses its own flags once the
+	// store is open, so its -h still needs TEND_DB.)
+	//
+	// Top-level help: the command list is what a new user asks for first, with
+	// nothing configured yet.
+	if cmd == "-h" || cmd == "--help" || cmd == "help" {
+		printUsage(stdout)
+		return nil
+	}
 	// `tend serve -h` works with no environment set and neither creates the
 	// DSN file nor starts the daemon.
 	if cmd == "serve" && wantsHelp(args[1:]) {
@@ -1581,7 +1590,8 @@ Commands:
   token create [flags]  create an API token (printed once)
   token list          list API tokens (never shows the hash)
   token revoke -id N  revoke an API token by id
-  version             print version`)
+  version             print version
+  help                print this list (also -h, --help)`)
 }
 
 // wantsHelp reports whether args contains a help flag.

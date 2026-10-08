@@ -267,6 +267,37 @@ func TestPrintUsage_ListsDoctor(t *testing.T) {
 	}
 }
 
+// TestTopLevelHelp_PrintsUsage_NoSideEffects verifies `tend -h`, `tend --help`
+// and `tend help` print the command list on stdout and return nil before the
+// TEND_DB check: they work with TEND_DB unset, and with it set they do not
+// create the database file.
+func TestTopLevelHelp_PrintsUsage_NoSideEffects(t *testing.T) {
+	for _, arg := range []string{"-h", "--help", "help"} {
+		t.Run(arg, func(t *testing.T) {
+			for _, cfg := range []config.Config{{Driver: "sqlite", DSN: ""}, tempConfig(t)} {
+				var stdout, stderr bytes.Buffer
+				if err := cli.Run(context.Background(), cfg, []string{arg}, nil, &stdout, &stderr); err != nil {
+					t.Fatalf("tend %s (DSN %q): %v", arg, cfg.DSN, err)
+				}
+				for _, want := range []string{"Usage:", "serve", "doctor", "help"} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Errorf("tend %s (DSN %q) output missing %q; got: %q", arg, cfg.DSN, want, stdout.String())
+					}
+				}
+				if stderr.Len() != 0 {
+					t.Errorf("tend %s (DSN %q) wrote to stderr: %q", arg, cfg.DSN, stderr.String())
+				}
+				if cfg.DSN == "" {
+					continue
+				}
+				if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+					t.Errorf("tend %s must not create the DB file at %s; stat err = %v", arg, cfg.DSN, statErr)
+				}
+			}
+		})
+	}
+}
+
 // TestSecretSetAndRun verifies that `secret set` stores a secret and a job
 // referencing it via {{ secret.X }} can run successfully with a master key.
 func TestSecretSetAndRun(t *testing.T) {
