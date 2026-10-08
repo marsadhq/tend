@@ -213,6 +213,77 @@ func TestWorkerGivesUpAfterMaxAgeAndEmitsNotificationFailed(t *testing.T) {
 	}
 }
 
+// cancelingProvider cancels the worker's context from inside Send and then
+// fails with the context's error, the way a send interrupted by shutdown does.
+type cancelingProvider struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (p *cancelingProvider) Send(ctx context.Context, _ Message) error {
+	p.calls++
+	p.cancel()
+	return ctx.Err()
+}
+
+// TestWorkerShutdownIsNotAFailure pins that a shutdown is not a delivery
+// failure. The deliveries are older than MaxAge, so a genuine send error would
+// be final (FailDelivery + notification.failed); an error caused by the
+// context being cancelled must instead leave the delivery exactly as claimed,
+// for the lease expiry to retry after the restart.
+func TestWorkerShutdownIsNotAFailure(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-25 * time.Hour)
+
+	untouched := func(t *testing.T, fs *fakeWorkerStore) {
+		t.Helper()
+		if len(fs.delivered) != 0 || len(fs.failed) != 0 || len(fs.rescheduled) != 0 || len(fs.emitted) != 0 {
+			t.Errorf("shutdown must not finalize or reschedule anything: delivered=%v failed=%v rescheduled=%v emitted=%v",
+				fs.delivered, fs.failed, fs.rescheduled, fs.emitted)
+		}
+	}
+
+	t.Run("cancelled mid-send", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fs := &fakeWorkerStore{due: []Delivery{
+			due(1, "heartbeat.missed", "db-backup", old),
+			due(2, "heartbeat.missed", "db-backup", old),
+		}}
+		p := &cancelingProvider{cancel: cancel}
+		w := newTestWorker(t, fs, p)
+		w.now = func() time.Time { return now }
+
+		n, err := w.DrainOnce(ctx)
+		if err != nil || n != 0 {
+			t.Fatalf("DrainOnce = %d, %v; want 0, nil", n, err)
+		}
+		// The first send is interrupted; the rest of the batch is not attempted.
+		if p.calls != 1 {
+			t.Errorf("sends = %d, want 1", p.calls)
+		}
+		untouched(t, fs)
+	})
+
+	t.Run("cancelled before the pass", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		fs := &fakeWorkerStore{due: []Delivery{due(1, "heartbeat.missed", "db-backup", old)}}
+		p := &fakeProvider{failN: 1000}
+		w := newTestWorker(t, fs, p)
+		w.now = func() time.Time { return now }
+
+		n, err := w.DrainOnce(ctx)
+		if err != nil || n != 0 {
+			t.Fatalf("DrainOnce = %d, %v; want 0, nil", n, err)
+		}
+		if p.calls != 0 || len(fs.claimed) != 0 {
+			t.Errorf("a cancelled pass must not claim or send: claimed=%d sends=%d", len(fs.claimed), p.calls)
+		}
+		untouched(t, fs)
+	})
+}
+
 // TestAlertableLoopGuard pins the contract the store's transactional enqueue
 // relies on: notification.* and non-terminal lifecycle events never enqueue.
 func TestAlertableLoopGuard(t *testing.T) {
