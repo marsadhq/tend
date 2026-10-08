@@ -6,8 +6,8 @@ import (
 )
 
 // BuildProvider constructs the concrete Provider for a channel kind from its
-// decrypted JSON configuration. It is the production wiring used by the
-// dispatcher (a field on Dispatcher, injectable for tests).
+// decrypted JSON configuration. It is the production wiring handed to
+// NewWorker; tests pass their own builder instead.
 //
 // It returns an error on malformed JSON, an unknown kind, or a missing required
 // field, so a misconfigured channel is skipped (and logged) rather than panicking

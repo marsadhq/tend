@@ -178,8 +178,8 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if recovered {
-		// Payload is the plain heartbeat NAME: the dispatcher's jobIDFromPayload
-		// treats non-JSON as job 0, and messageFor uses it for the subject.
+		// Payload is the plain heartbeat NAME: notify.EventJobID treats non-JSON
+		// as job 0, and messageFor uses it for the subject.
 		ev := core.Event{
 			OrgID:   orgID,
 			Type:    "heartbeat.recovered",
