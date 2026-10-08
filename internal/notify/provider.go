@@ -2,10 +2,11 @@
 // contract that delivers messages to external destinations (webhook, Slack,
 // Discord, SMTP), and the encryption helpers for channel configuration.
 //
-// Layering: notify depends only on core (+ stdlib + secrets). It MUST NOT import
-// store or jobs. The store package imports notify (for notify.Channel), and the
-// channel persistence helpers below talk to the store through the consumer-side
-// ChannelStore interface, never by importing store - so there is no cycle.
+// Layering: notify depends only on core, secrets and urlredact (+ stdlib). It
+// MUST NOT import store or jobs. The store package imports notify (for
+// notify.Channel), and the channel persistence helpers below talk to the store
+// through the consumer-side ChannelStore interface, never by importing store -
+// so there is no cycle.
 package notify
 
 import (

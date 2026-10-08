@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"time"
+
+	"github.com/marsadhq/tend/internal/urlredact"
 )
 
 // httpClient is the shared HTTP client for all HTTP-based providers. The
@@ -18,9 +18,9 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // postJSON marshals payload as JSON, POSTs it to rawURL with Content-Type:
 // application/json, and returns a non-nil error if the response status is
-// outside the 2xx range so callers can retry. Errors report only the host, not
-// the full URL: webhook/Slack/Discord URLs embed a secret token in the path,
-// and this error is surfaced to logs by the dispatcher.
+// outside the 2xx range so callers can retry. Transport and status errors
+// report only the host, not the full URL: webhook/Slack/Discord URLs embed a
+// secret token in the path, and this error is logged by the delivery worker.
 func postJSON(ctx context.Context, rawURL string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -34,32 +34,17 @@ func postJSON(ctx context.Context, rawURL string, payload any) error {
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		// A transport error here is a *url.Error whose message embeds the full
-		// URL - which for webhook/Slack/Discord channels can carry a secret
-		// token in its path, and this error is surfaced to logs by the
-		// dispatcher. Unwrap it and report only the host.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return fmt.Errorf("webhook POST %s: %w", safeHost(rawURL), err)
+		// URL, secret token included; urlredact.Error keeps only the host and
+		// the underlying cause.
+		return fmt.Errorf("webhook POST %w", urlredact.Error(rawURL, err))
 	}
 	defer resp.Body.Close()
 	// Drain the body so the underlying connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook POST %s: status %d", safeHost(rawURL), resp.StatusCode)
+		return fmt.Errorf("webhook POST %s: status %d", urlredact.Host(rawURL), resp.StatusCode)
 	}
 	return nil
-}
-
-// safeHost returns the host of rawURL for use in error messages, so a secret
-// token embedded in the URL path is never logged. Falls back to "<url>" if the
-// URL cannot be parsed (never the raw URL itself).
-func safeHost(rawURL string) string {
-	if u, err := url.Parse(rawURL); err == nil && u.Host != "" {
-		return u.Host
-	}
-	return "<url>"
 }
 
 // SlackProvider delivers notifications to a Slack incoming webhook URL. The
