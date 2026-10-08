@@ -24,8 +24,8 @@ Tend is a self-hosted job runner with a web dashboard. It runs shell commands an
 Most teams stitch this together from three or four moving parts: system cron to schedule, a hosted service like Healthchecks or Cronitor to watch for misses, and a separate notifier to page someone. Tend folds those concerns into a single program you run yourself:
 
 - **Scheduling**: shell or HTTP jobs on cron expressions, fixed intervals, or a one-off `run_at` time.
-- **Run monitoring**: every execution is recorded with its status, exit code, timing, and full captured output, browsable in the dashboard or over the HTTP API.
-- **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, or SMTP channels, globally or scoped to a single job.
+- **Run monitoring**: every execution is recorded with its status, exit code, timing, and captured output (up to 1 MiB per attempt), browsable in the dashboard or over the HTTP API.
+- **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, SMTP, or Telegram channels, globally or scoped to a single job.
 - **Dead-man's-switch heartbeats**: give Tend a ping URL for any external job; if a ping doesn't arrive within its period plus grace, Tend alerts.
 
 It's a **single static, CGO-free binary**. SQLite is the default store (no database to stand up), with an optional Postgres backend for a managed or external database. **No Redis, no external dependencies.** Configure it imperatively with the CLI or declaratively with a YAML file you keep in version control.
@@ -123,7 +123,9 @@ printf 'yourpassword' | TEND_DB=/var/lib/tend/tend.db \
 # 5. Open http://localhost:8080/login and sign in
 ```
 
-For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a hardened systemd unit) and [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
+For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a hardened system-wide systemd unit), [`deploy/tend-user.service`](deploy/tend-user.service) (a user-level unit for a single-operator install without root), and [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
+
+[`deploy/deploy-tend.sh`](deploy/deploy-tend.sh) is the push-style script the maintainers use to ship a build to their own host: it builds the binary, stops the service, keeps the previous binary, copies the new one, starts the service, and rolls back automatically if `/healthz` does not answer. The host name, paths, and health URL in it, and the network-address wait in the user unit, are specific to that setup; adapt them before reusing either file.
 
 ---
 
@@ -133,11 +135,12 @@ For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a har
 
 | Variable             | Default                 | Description |
 |----------------------|-------------------------|-------------|
-| `TEND_DB`            | `tend.db`               | SQLite file path **or** a `postgres://` / `postgresql://` URL. (In the Docker image the default is `/data/tend.db`.) |
+| `TEND_DB`            | *(required)*            | SQLite file path **or** a `postgres://` / `postgresql://` URL. There is no default: every command that opens the database refuses to run while it is unset (`tend version`, `tend help`, and `tend serve -h` are the exceptions). Use an absolute path for SQLite. The Docker image sets it to `/data/tend.db` and the shipped system unit to `/var/lib/tend/tend.db`. |
 | `TEND_MASTER_KEY`    | *(none)*                | Base64-encoded 32-byte key. Required for the dashboard, session signing, and secrets encryption. Generate once with `head -c 32 /dev/urandom \| base64`. **Must be stable** across restarts; changing it invalidates all sessions and makes all stored secrets unreadable. |
 | `TEND_ADDR`          | `:8080`                 | TCP listen address for the HTTP server. |
 | `TEND_BASE_URL`      | `http://localhost:8080` | Externally-reachable base URL. Used when printing heartbeat ping URLs. Set this when Tend is behind a reverse proxy. |
 | `TEND_COOKIE_SECURE` | `false`                 | Set to `1`, `true`, `yes`, or `on` to mark session cookies as `Secure` (HTTPS-only). Leave `false` when TLS is terminated at a reverse proxy. |
+| `TEND_TRUST_PROXY`   | `false`                 | Set to `1`, `true`, `yes`, or `on` when Tend runs behind a reverse proxy you control. [Rate limiting](#limits-and-housekeeping) then keys on the left-most `X-Forwarded-For` address instead of the TCP peer (an entry that is not an IP address is ignored). Only enable it when the proxy **overwrites** that header; if clients can reach Tend directly, or the proxy merely appends to the header, they can forge it and dodge the limit. |
 
 Without `TEND_MASTER_KEY` the server starts in **public-only mode**: the dashboard, `/login`, secrets, and notification channels are all disabled. The master key serves two roles: it derives a stable session-cookie signing key (HKDF-SHA256, so restarts keep existing sessions valid) and it encrypts stored secrets and channel configs. See the [security model](docs/ARCHITECTURE.md#6-security-model) for details.
 
@@ -151,9 +154,9 @@ TEND_DB=/data/tend.db tend serve
 TEND_DB=postgres://tend:secret@localhost:5432/tend?sslmode=disable tend serve
 ```
 
-When `TEND_DB` is unset it defaults to `tend.db` in the current directory. SQLite is appropriate for single-host deployments. Use Postgres when you want a managed/external database, `pg_dump` backups, or to run the database on a separate host from tend. (The job runner is single-instance; run one `tend serve` against a given database.) Tend runs migrations on every startup; for Postgres the database must already exist and the user must have DDL rights. Both backends have [identical behavior](docs/ARCHITECTURE.md#3-the-store-interface-and-sqlitepostgres-parity).
+`TEND_DB` must be set; there is no default, and Tend refuses to open a database without it rather than create a `tend.db` in whatever directory it was started from. SQLite is appropriate for single-host deployments. Use Postgres when you want a managed/external database, `pg_dump` backups, or to run the database on a separate host from tend. (The job runner is single-instance; run one `tend serve` against a given database.) Tend runs migrations on every startup; for Postgres the database must already exist and the user must have DDL rights. Both backends have [identical behavior](docs/ARCHITECTURE.md#3-the-store-interface-and-sqlitepostgres-parity).
 
-**Troubleshooting: the CLI shows nothing but the dashboard shows your jobs (or vice versa).** The CLI and the running server each resolve `TEND_DB` independently, so they must point at the *same* database. Since the default is a *relative* `tend.db`, running a CLI command from a different directory (or against a container whose server uses `/data/tend.db`) reads a different, often empty, database. Run `tend doctor` to print the resolved driver, database path, org, base URL, and resource counts; the `tend serve` banner prints the same `db …(driver) org …`. For a containerized server, run CLI commands inside it, e.g. `docker exec <container> /tend doctor` or `docker exec <container> /tend heartbeat list`.
+**Troubleshooting: the CLI shows nothing but the dashboard shows your jobs (or vice versa).** The CLI and the running server each resolve `TEND_DB` independently, so they must point at the *same* database. A *relative* SQLite path resolves against the directory the command is run from, so running a CLI command from a different directory (or against a container whose server uses `/data/tend.db`) reads a different, often empty, database. Use an absolute path, and run `tend doctor` to print the resolved driver, database path, org, base URL, and resource counts; the `tend serve` banner prints the same `db …(driver) org …`. For a containerized server, run CLI commands inside it, e.g. `docker exec <container> /tend doctor` or `docker exec <container> /tend heartbeat list`.
 
 ## Config-as-code (YAML)
 
@@ -164,7 +167,7 @@ tend sync jobs.yaml              # default: jobs absent from the file are DISABL
 tend sync -prune=false jobs.yaml # leave absent jobs untouched
 ```
 
-`sync` is idempotent: the file is the source of truth, so re-running it converges the store to match. For the full set of options (http jobs, every schedule type, secrets, notification channels, and heartbeats), see the commented [`jobs.example.yaml`](jobs.example.yaml).
+`sync` is idempotent: the file is the source of truth, so re-running it converges the store to match. The file is parsed and validated in full before anything is written, so a bad entry, such as an invalid cron expression, aborts the sync and names the offending job. For the full set of options (http jobs, every schedule type, secrets, notification channels, and heartbeats), see the commented [`jobs.example.yaml`](jobs.example.yaml).
 
 It prints a summary: `jobs(created=N updated=N disabled=N) channels=N rules=N heartbeats=N`.
 
@@ -227,9 +230,11 @@ printf 'the-secret-value' | tend secret set my_api_key
 
 Tend emits events (`run.failed`, `heartbeat.missed`, `heartbeat.recovered`, and others). A **channel** is a delivery destination; a **rule** routes matching event types to a channel. Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
 
+**Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
+
 ### Alert on a missed heartbeat
 
-A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. Route both to a channel with a rule:
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. Route both to a channel with a rule:
 
 ```yaml
 notifications:
@@ -269,9 +274,10 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 | Command | Description |
 |---------|-------------|
-| `tend serve` | Start the job runner, HTTP server, and heartbeat watcher. |
+| `tend serve` | Start the job runner, HTTP server, heartbeat watcher, notification delivery worker, and daily retention sweep. `tend serve -h` prints its usage and environment variables without opening the database. |
 | `tend sync [-prune] <file>` | Reconcile jobs/channels/rules/heartbeats from YAML. |
 | `tend version` | Print the binary version. |
+| `tend help` (or `-h`, `--help`) | Print the command list. Like `version`, it works without `TEND_DB`. |
 | `tend doctor` | Print the resolved driver, database, org, base URL, and resource counts (diagnose a CLI/server DB mismatch). |
 | `tend job list` | List all jobs. |
 | `tend job add [flags]` | Create a job (flags below). |
@@ -296,7 +302,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend token list` | List API tokens (names and IDs; hash never shown). |
 | `tend token revoke -id <n>` | Revoke an API token by ID. |
 
-`tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive); `-timeout <seconds>` (default `0` = no limit); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
+`tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive; a cron expression that does not parse is rejected and no job is created); `-timeout <seconds>` per attempt (default `0` = 30 minutes); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
 
 `tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, or `telegram` (Telegram config is `{"bot_token": "...", "chat_id": "..."}`). The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
 
@@ -319,9 +325,24 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `POST` | `/api/jobs/{id}/enable` | Enable a job. Returns the updated job. |
 | `POST` | `/api/jobs/{id}/disable` | Disable a job. Returns the updated job. |
 
-Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `GET`/`POST` `/ping/{token}` is the heartbeat ping receiver.
+Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `GET`/`POST` `/ping/{token}` is the heartbeat ping receiver. `/ping/{token}` and `POST /login` are rate limited per client address; see [Limits and housekeeping](#limits-and-housekeeping).
 
 The API is **read-mostly by design**: resource definitions are managed via the CLI and config-as-code; only run-now, enable, and disable are exposed as mutations. See the [capability asymmetries](docs/ARCHITECTURE.md#7-capability-asymmetries-by-design) for the rationale.
+
+## Limits and housekeeping
+
+These are built in and not configurable in this release.
+
+| What | Behavior |
+|------|----------|
+| Captured output | At most 1 MiB per attempt (stdout and stderr combined for shell jobs, the response body for HTTP jobs). The rest is discarded and the output ends with `... [output truncated at 1MiB]`; the cut never splits a UTF-8 character. The run's status and exit code are not affected. When a job retries, the run stores the output of its last attempt. On Postgres, output that is not valid UTF-8 text is stored with the invalid bytes replaced. |
+| Job timeout | A job without a timeout gets 30 minutes per attempt. |
+| Stale runs | On startup, runs left `running` by a crash are put back in the queue. While `serve` is up, a sweep every minute looks for runs still `running` more than 2 minutes past the longest they could legitimately take, counted from the start of the run: every attempt (`max_retries` + 1 of them) reaching its timeout, plus the pauses between retries. Such a run is presumed to have lost its worker: it is marked failed and `run.failed` is emitted, so the job is not blocked until the next restart. That result is final; if the worker turns up after all, its late result is discarded. |
+| Retention | `serve` prunes at startup and then every 24 hours: events and finished job runs older than 30 days, and finished (delivered or failed) notification deliveries older than 7 days. Pending and running runs, pending deliveries, and the events they refer to are never pruned. |
+| Rate limits | `POST /login`: a burst of 5 requests, then 1 per second. `/ping/{token}`: a burst of 20, then 10 per second. Both are counted per client address and held in memory by the server process. Requests over the limit get `429 Too Many Requests` with a `Retry-After` header. Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
+| HTTP timeouts | The server gives up on a connection after 10 seconds spent reading a request (headers and body), writing a response, or sitting idle. |
+| Security headers | Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` that only allows same-origin scripts, styles, and images. `Strict-Transport-Security` is not sent because Tend itself serves plain HTTP; add it at the proxy that terminates TLS. |
+| URLs in errors | When a webhook, Slack, Discord, or Telegram delivery or an HTTP job fails, the error names only the host. The rest of the URL, where tokens usually live, is kept out of logs and stored run output. |
 
 ## Backups
 
