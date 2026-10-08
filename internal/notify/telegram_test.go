@@ -88,3 +88,27 @@ func TestTelegramErrorNeverLeaksToken(t *testing.T) {
 		t.Errorf("transport error leaked the bot token: %v", err)
 	}
 }
+
+// TestTelegramRequestBuildErrorNeverLeaksToken covers the error raised before
+// any request is sent. A token holding a character net/url rejects (here a
+// control character, as a stray newline from a config file would be) fails in
+// http.NewRequest with an error that quotes the whole URL - and quotes it with
+// the control character escaped, so searching the text for the raw token finds
+// nothing to replace. No part of the token may survive, while the cause must,
+// so the failure stays diagnosable.
+func TestTelegramRequestBuildErrorNeverLeaksToken(t *testing.T) {
+	p := NewTelegram("7777777:SUPERSECRET\x7fBOTTOKEN", "1")
+
+	err := p.Send(context.Background(), Message{Subject: "s", Body: "b"})
+	if err == nil {
+		t.Fatal("expected an error for a token net/url rejects")
+	}
+	for _, part := range []string{"7777777", "SUPERSECRET", "BOTTOKEN"} {
+		if strings.Contains(err.Error(), part) {
+			t.Errorf("request-construction error leaked part of the bot token (%q): %v", part, err)
+		}
+	}
+	if !strings.HasPrefix(err.Error(), "telegram sendMessage: ") || !strings.Contains(err.Error(), "invalid control character") {
+		t.Errorf("error should name the method and keep the cause: %v", err)
+	}
+}

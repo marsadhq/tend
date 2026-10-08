@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+
+	"github.com/marsadhq/tend/internal/urlredact"
 )
 
 // telegramAPIBase is the Telegram Bot API root. It is a package var so tests can
@@ -29,8 +30,9 @@ func NewTelegram(token, chatID string) *TelegramProvider {
 
 // Send POSTs {chat_id, text} to the Bot API sendMessage method, where text is
 // the subject and body joined by a newline (same composition as Slack/Discord).
-// Any error is scrubbed of the bot token first: net/http embeds the full request
-// URL (whose path contains the token) in transport errors.
+// net/http quotes the full request URL (whose path contains the token) in both
+// request-construction and transport errors, so every error goes through
+// urlredact.Error and names only the API host.
 func (p *TelegramProvider) Send(ctx context.Context, m Message) error {
 	body, err := json.Marshal(map[string]string{
 		"chat_id": p.chatID,
@@ -42,12 +44,12 @@ func (p *TelegramProvider) Send(ctx context.Context, m Message) error {
 	rawURL := telegramAPIBase + "/bot" + p.token + "/sendMessage"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
-		return p.scrub(err)
+		return fmt.Errorf("telegram sendMessage: %w", urlredact.Error(rawURL, err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return p.scrub(err)
+		return fmt.Errorf("telegram sendMessage: %w", urlredact.Error(rawURL, err))
 	}
 	defer resp.Body.Close()
 	// Drain so the connection can be reused.
@@ -56,14 +58,6 @@ func (p *TelegramProvider) Send(ctx context.Context, m Message) error {
 		return fmt.Errorf("telegram sendMessage: status %d", resp.StatusCode)
 	}
 	return nil
-}
-
-// scrub removes the bot token from an error so it can never reach logs.
-func (p *TelegramProvider) scrub(err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("telegram sendMessage: %s", strings.ReplaceAll(err.Error(), p.token, "***"))
 }
 
 // Compile-time assertion: TelegramProvider must satisfy the Provider interface.
