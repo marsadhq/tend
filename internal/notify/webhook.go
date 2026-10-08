@@ -18,9 +18,10 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // postJSON marshals payload as JSON, POSTs it to rawURL with Content-Type:
 // application/json, and returns a non-nil error if the response status is
-// outside the 2xx range so callers can retry. Transport and status errors
-// report only the host, not the full URL: webhook/Slack/Discord URLs embed a
-// secret token in the path, and this error is logged by the delivery worker.
+// outside the 2xx range so callers can retry. Every error that could quote the
+// URL (request construction, transport, non-2xx status) reports only the host:
+// webhook/Slack/Discord URLs embed a secret token in the path, and this error
+// is logged by the delivery worker.
 func postJSON(ctx context.Context, rawURL string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -28,7 +29,9 @@ func postJSON(ctx context.Context, rawURL string, payload any) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		// A URL that net/url rejects comes back as a *url.Error quoting the
+		// whole URL, just like the transport failure below.
+		return fmt.Errorf("webhook POST %w", urlredact.Error(rawURL, err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
