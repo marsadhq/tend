@@ -282,9 +282,10 @@ func buildServeHandler(masterKeyB64 string) (http.Handler, error) {
 	return httpserver.New(st, clock.RealClock{}, nil, logger, authCfg).Handler(), nil
 }
 
-// cmdServe runs the three long-lived components - the job runner, the HTTP
-// server (heartbeat ping + healthz), and the heartbeat watcher - concurrently
-// off ONE clock and ONE dispatcher. All three watch ctx and stop on cancel;
+// cmdServe runs serve's long-lived components concurrently off ONE clock: the
+// job runner (scheduler, workers and stale-run reaper), the HTTP server, the
+// heartbeat watcher, the retention sweep and, when a master key is configured,
+// the notification delivery worker. All of them watch ctx and stop on cancel;
 // cmdServe returns nil after every component has stopped (clean shutdown).
 //
 // A fatal HTTP error (e.g. EADDRINUSE on startup) tears down all components via

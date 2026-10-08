@@ -42,7 +42,7 @@ type Message struct {
 }
 
 // Provider delivers a Message to a single destination. Implementations should
-// return a non-nil error on any non-success so the dispatcher can retry.
+// return a non-nil error on any non-success so the delivery worker can retry.
 type Provider interface {
 	Send(ctx context.Context, m Message) error
 }

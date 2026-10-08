@@ -100,15 +100,17 @@ type Runner struct {
 
 	// EventSink, when non-nil, is invoked with each terminal run event
 	// (run.succeeded / run.failed) AFTER it has been durably recorded by
-	// FinishRunAndEmit. It is the seam through which the notify dispatcher
-	// alerts on failures. It is nil-safe (see fire) and a settable field like
-	// TickInterval/Workers - not a NewRunner argument.
+	// FinishRunAndEmit or ReapStaleRun. serve uses it to nudge the notification
+	// delivery worker; the deliveries themselves were already enqueued by the
+	// store, in the same transaction as the event. It is nil-safe (see fire)
+	// and a settable field like TickInterval/Workers - not a NewRunner argument.
 	//
 	// The runner fires terminal events UNCONDITIONALLY (both successes and
-	// failures): the dispatcher's own `alertable` filter decides which event
-	// types actually trigger a notification (run.succeeded is dropped), so the
-	// runner does not need to know the alerting policy. The best-effort
-	// run.started event is NOT a terminal event and is never fired here.
+	// failures): the store decides at enqueue time, through notify.Alertable
+	// and the notification rules, which events become deliveries
+	// (run.succeeded never does), so the runner does not need to know the
+	// alerting policy. The best-effort run.started event is NOT a terminal
+	// event and is never fired here.
 	//
 	// jobs deliberately keeps this a plain func over core.Event (not a notify
 	// type) so package jobs never imports notify - avoiding an import cycle.
@@ -289,8 +291,9 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		// Run is left in 'running'; recovered at next restart.
 		return true, err
 	}
-	// Terminal event durably recorded - fire the sink (nil-safe). The dispatcher's
-	// alertable filter drops run.succeeded, so firing unconditionally is correct.
+	// Terminal event durably recorded - fire the sink (nil-safe). The store's
+	// Alertable filter already kept run.succeeded out of the delivery queue, so
+	// firing unconditionally is correct.
 	r.fire(ctx, termEv)
 	return true, nil
 }

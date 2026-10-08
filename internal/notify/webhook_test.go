@@ -148,7 +148,7 @@ func TestSlackProviderErrorsOnNon2xx(t *testing.T) {
 }
 
 // TestErrorRedactsURLToken guards that a secret token embedded in the webhook
-// URL path is NOT leaked into the error string (which the dispatcher logs).
+// URL path is NOT leaked into the error string (which the delivery worker logs).
 func TestErrorRedactsURLToken(t *testing.T) {
 	srv, _, _, _ := captureServer(500)
 	defer srv.Close()
