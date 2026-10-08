@@ -175,6 +175,31 @@ const (
 // serveShutdownTimeout bounds the HTTP server's graceful drain on ctx cancel.
 const serveShutdownTimeout = 5 * time.Second
 
+// httpTimeout bounds each phase of an HTTP connection; see newHTTPServer.
+const httpTimeout = 10 * time.Second
+
+// newHTTPServer returns the HTTP server serve runs, with every phase of a
+// connection bounded by timeout: reading the request headers, reading the
+// whole request including its body, writing the response, and sitting idle
+// between requests. All handlers are quick (ping, login, dashboard pages, API
+// calls) and the largest request body is a login form, so one short limit fits
+// them all and a stalled or abandoned client can hold a connection for at most
+// about that long instead of forever.
+//
+// ReadTimeout is what bounds the body. Without it a client could send complete
+// headers, promise a body, and never send it: the connection and its goroutine
+// then stayed open indefinitely, including on the unauthenticated routes.
+func newHTTPServer(addr string, h http.Handler, timeout time.Duration) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: timeout,
+		ReadTimeout:       timeout,
+		WriteTimeout:      timeout,
+		IdleTimeout:       timeout,
+	}
+}
+
 // sessionKeyInfo is the HKDF "info" label that domain-separates the session
 // signing key from any other key derived from the same master key. Bumping the
 // version suffix would rotate (and thus invalidate) all existing sessions.
@@ -349,16 +374,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	}()
 
 	// --- HTTP server ---
-	// All handlers are quick (ping, ingest, dashboard pages), so the write and
-	// idle timeouts mirror ReadHeaderTimeout: a stalled or abandoned client
-	// can hold a connection for at most ~10s instead of forever.
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           httpserver.New(st, clk, dispatch, logger, authCfg).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       10 * time.Second,
-	}
+	srv := newHTTPServer(addr, httpserver.New(st, clk, dispatch, logger, authCfg).Handler(), httpTimeout)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
