@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -764,6 +765,56 @@ func TestFinishRunLeavesTerminalRunAlone(t *testing.T) {
 		// A run that does not exist is still "not found", not "not running".
 		if err := s.FinishRun(ctx, runID+1000, jobs.StatusSucceeded, 0, "x"); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("FinishRun(unknown id): err = %v, want store.ErrNotFound", err)
+		}
+	})
+}
+
+// TestFinishRunStoresOutputThatIsNotText proves a run can always be finished,
+// whatever its job printed. Captured output is arbitrary bytes; a Postgres TEXT
+// column takes neither invalid UTF-8 nor NUL, and a rejected value would leave
+// the run 'running' with its real result lost. Both finish paths must succeed
+// on every backend and keep the readable part of the output.
+func TestFinishRunStoresOutputThatIsNotText(t *testing.T) {
+	const out = "before \xff\xfe middle \x00 caf\xc3 after"
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		orgID, jobID := seedJob(t, ctx, s)
+
+		finish := map[string]func(runID int64) error{
+			"FinishRun": func(runID int64) error {
+				return s.FinishRun(ctx, runID, jobs.StatusSucceeded, 0, out)
+			},
+			"FinishRunAndEmit": func(runID int64) error {
+				_, err := s.FinishRunAndEmit(ctx, runID, jobs.StatusSucceeded, 0, 1, out, core.Event{
+					OrgID: orgID, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"status":"succeeded"}`,
+				})
+				return err
+			},
+		}
+		for name, fn := range finish {
+			runID, err := s.EnqueueRun(ctx, orgID, jobID)
+			if err != nil {
+				t.Fatalf("EnqueueRun: %v", err)
+			}
+			if _, ok, err := s.ClaimRun(ctx, "worker"); err != nil || !ok {
+				t.Fatalf("ClaimRun: ok=%v err=%v", ok, err)
+			}
+			if err := fn(runID); err != nil {
+				t.Fatalf("%s with non-text output: %v", name, err)
+			}
+			run, err := s.GetRun(ctx, orgID, runID)
+			if err != nil {
+				t.Fatalf("GetRun: %v", err)
+			}
+			if run.Status != jobs.StatusSucceeded {
+				t.Errorf("%s: status = %s, want succeeded", name, run.Status)
+			}
+			for _, want := range []string{"before ", " middle ", " caf", " after"} {
+				if !strings.Contains(run.Output, want) {
+					t.Errorf("%s: stored output lost %q: %q", name, want, run.Output)
+				}
+			}
 		}
 	})
 }
