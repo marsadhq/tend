@@ -73,14 +73,16 @@ type Store interface {
 	ClaimRun(ctx context.Context, worker string) (jobs.Run, bool, error) // atomically claim one 'pending' run -> 'running'; ok=false if none
 	// FinishRun records the terminal state of a 'running' run. A run that is no
 	// longer 'running' (the reaper failed it first) is left untouched and
-	// jobs.ErrRunNotRunning is returned; ErrNotFound for an absent id.
+	// jobs.ErrRunNotRunning is returned. An absent id gives an error that is
+	// both ErrNotFound and jobs.ErrRunGone.
 	FinishRun(ctx context.Context, runID int64, status jobs.RunStatus, exitCode int, output string) error
 	// FinishRunAndEmit atomically records the terminal run state (including the
 	// final attempt count) AND appends the terminal lifecycle event in a single
 	// transaction. This prevents the lost-event scenario where FinishRun commits
 	// but EmitEvent fails. Returns the new event ID. Like FinishRun it returns
 	// jobs.ErrRunNotRunning, writing neither the state nor the event, when the
-	// run is no longer 'running'.
+	// run is no longer 'running', and ErrNotFound and jobs.ErrRunGone for an
+	// absent id.
 	FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error)
 	GetRun(ctx context.Context, orgID, runID int64) (jobs.Run, error)                // run detail incl. Output; ErrNotFound for a foreign/absent id
 	ListRuns(ctx context.Context, orgID, jobID int64, limit int) ([]jobs.Run, error) // newest first

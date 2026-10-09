@@ -105,7 +105,7 @@ func TestRunnerLogsStoreErrors(t *testing.T) {
 				return runID
 			},
 			act:     func(ctx context.Context, r *jobs.Runner) error { return r.DrainOnce(ctx) },
-			wantMsg: "runner: finish run",
+			wantMsg: "runner: finish run failed, result not recorded",
 			wantJob: "unrecorded",
 			wantRun: true,
 		},
@@ -122,6 +122,7 @@ func TestRunnerLogsStoreErrors(t *testing.T) {
 				// One hour ahead, so a run claimed just now is long overdue.
 				r := jobs.NewRunner(fs, noBackoffExecutor(), nil, clock.NewFake(time.Now().Add(time.Hour)))
 				r.Logger = logger
+				r.FinishBackoff = func(int) time.Duration { return 0 }
 
 				if err := tc.act(ctx, r); !errors.Is(err, boom) {
 					t.Fatalf("returned error = %v, want the store error", err)

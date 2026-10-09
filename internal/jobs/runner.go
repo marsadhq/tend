@@ -50,11 +50,27 @@ const reapInterval = time.Minute
 // job's no-overlap guard until restart.
 const reapSlack = 2 * time.Minute
 
+// finishRetryPauses are the waits between the attempts to record a run's
+// result: after the first failure, after the second, and so on. One attempt is
+// made up front and one after each pause. They grow so that a cause that
+// clears quickly (another process letting go of the SQLite write lock) gets a
+// prompt second try and a slower one gets a little longer. They stay short
+// because the worker is held up meanwhile, and because the time spent here
+// comes out of reapSlack for a run that used its whole time limit: the pauses
+// add up to about five seconds of those two minutes.
+var finishRetryPauses = []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second}
+
 // ErrRunNotRunning is returned by RunnerStore.FinishRun and FinishRunAndEmit
 // when the run exists but is no longer 'running', so nothing was written. In
 // practice the stale-run reaper got there first: it already recorded the run
 // as failed and emitted its terminal event, and that outcome stands.
 var ErrRunNotRunning = errors.New("run is not running")
+
+// ErrRunGone is returned by RunnerStore.FinishRun and FinishRunAndEmit when
+// there is no run with that ID, so nothing was written. For a run a worker is
+// finishing that means its job was deleted while the run was in flight, which
+// removes the job's runs with it.
+var ErrRunGone = errors.New("run no longer exists")
 
 // RunnerStore is the persistence surface the runner needs. It is defined here
 // (in package jobs) rather than imported from store to avoid an import cycle:
@@ -67,13 +83,15 @@ type RunnerStore interface {
 	GetJob(ctx context.Context, orgID, id int64) (Job, error)
 	ClaimRun(ctx context.Context, worker string) (Run, bool, error)
 	// FinishRun records the terminal state of a 'running' run; it returns
-	// ErrRunNotRunning, writing nothing, when the run is no longer 'running'.
+	// ErrRunNotRunning, writing nothing, when the run is no longer 'running',
+	// and ErrRunGone when there is no such run.
 	FinishRun(ctx context.Context, runID int64, status RunStatus, exitCode int, output string) error
 	// FinishRunAndEmit atomically records the terminal run state (including the
 	// final attempt count) AND the terminal lifecycle event in one transaction
 	// (prevents lost terminal event on EmitEvent failure after FinishRun
 	// committed). Returns the new event ID, or ErrRunNotRunning, having written
-	// neither, when the run is no longer 'running'.
+	// neither, when the run is no longer 'running', or ErrRunGone when there
+	// is no such run.
 	FinishRunAndEmit(ctx context.Context, runID int64, status RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error)
 	GetSecret(ctx context.Context, orgID int64, name string) (string, error)
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
@@ -118,12 +136,21 @@ type Runner struct {
 	// type) so package jobs never imports notify - avoiding an import cycle.
 	EventSink func(context.Context, core.Event)
 
+	// FinishBackoff, if non-nil, returns the pause before the retry that
+	// follows failed finish attempt n (1-based), in place of finishRetryPauses.
+	// Tests set it to return 0. The number of attempts does not change.
+	FinishBackoff func(attempt int) time.Duration
+
 	// Logger, when non-nil, receives the runner's log lines: every store error
 	// from the scheduler tick, the reaper and the claim/finish path at ERROR
-	// (a lost run.started event, which is only advisory, at WARN), each reaped
-	// run and each discarded late result at WARN, and the number of runs
-	// requeued at startup at INFO. Left nil, the runner logs nothing. Like the
-	// fields above it is set before Start and not changed afterwards.
+	// (a lost run.started event, which is only advisory, and a failed finish
+	// that is about to be retried at WARN), each reaped run and each discarded
+	// late result at WARN, and the number of runs requeued at startup at INFO.
+	// Left nil, the runner logs nothing. Like the fields above it is set before
+	// Start and not changed afterwards.
+	//
+	// A result that shutdown kept from being recorded is logged at WARN as
+	// well: it is not an error, but its run is executed again.
 	Logger *slog.Logger
 
 	// claimErrs tracks a claim that keeps failing. That is the one error not
@@ -383,31 +410,94 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 // then fires the sink. Both ways a run ends go through here: a result from the
 // executor, and a secret that could not be resolved.
 //
-// A run that is no longer 'running' was failed by the reaper while its worker
-// was still busy, and the reaper has already emitted its run.failed. A terminal
-// state is final: the late result is dropped, with no second event and no sink
-// call, and that is logged so the lost result is not silent. finish returns nil
-// for it, since the worker has nothing left to do.
+// A finish that fails is retried, after the pauses in finishRetryPauses. The
+// result exists only in this worker's memory: giving up on the first error
+// would lose it and leave a run that did finish in 'running', blocking its
+// job's schedule until the reaper fails it as "worker lost" with an alert that
+// is not true. Each failed attempt is logged; if the last one fails too, that
+// is logged at ERROR with the run and its job and the error is returned, and
+// the run is then recovered at the next restart or by the reaper as before.
 //
-// Any other error leaves the run in 'running' (recovered at the next restart
-// or by the reaper); it is logged with the run and its job and returned.
+// A cancelled context ends the attempts at once, since shutdown is not going
+// to let the next one through. The run stays 'running' and is executed again
+// after the next start, so that is logged with the run and its job. It is the
+// usual end of a run that shutdown interrupted, and also that of a job that
+// had finished and whose result was still being retried.
+//
+// A run that is no longer 'running' is never retried: it was failed by the
+// reaper while its worker was still busy, and the reaper has already emitted
+// its run.failed. A terminal state is final: the late result is dropped, with
+// no second event and no sink call, and that is logged so the lost result is
+// not silent. finish returns nil for it, since the worker has nothing left to
+// do. A retry can meet this state too, and then cannot tell whether the reaper
+// got in between or its own earlier attempt was committed although it reported
+// an error; either way the run has exactly one terminal state and one terminal
+// event, so it is handled the same, but logged in other words, because the
+// result may well have been recorded. (The sink is then not fired; that costs
+// nothing, because the deliveries were queued with the event and the delivery
+// worker polls.)
+//
+// A run that no longer exists is not retried either: its job was deleted while
+// it was in flight, and there is nothing left to record the result on. That is
+// logged, and finish returns nil.
 func (r *Runner) finish(ctx context.Context, run Run, job Job, status RunStatus, exitCode, attempt int, output string, termEv core.Event) error {
-	_, err := r.store.FinishRunAndEmit(ctx, run.ID, status, exitCode, attempt, output, termEv)
-	if errors.Is(err, ErrRunNotRunning) {
-		r.log().Warn("runner: discarded late result of a run that is no longer running",
-			"run", run.ID, "job", job.Name, "status", string(status), "exit_code", exitCode)
-		return nil
+	// shutdown logs that the attempts were ended by a cancelled context. It is
+	// not an error, but the job is going to run a second time.
+	shutdown := func(try int, err error) {
+		r.log().Warn("runner: result not recorded because of shutdown; the run is left running, to be requeued at the next start",
+			"run", run.ID, "job", job.Name, "status", string(status), "finish_attempt", try, "err", err)
 	}
-	if err != nil {
-		r.logError(ctx, "runner: finish run", err,
-			"run", run.ID, "job", job.Name, "status", string(status))
-		return err
+	for try := 1; ; try++ {
+		_, err := r.store.FinishRunAndEmit(ctx, run.ID, status, exitCode, attempt, output, termEv)
+		if err == nil {
+			// Terminal event durably recorded - fire the sink (nil-safe). The
+			// store's Alertable filter already kept run.succeeded out of the
+			// delivery queue, so firing unconditionally is correct.
+			r.fire(ctx, termEv)
+			return nil
+		}
+		if errors.Is(err, ErrRunNotRunning) {
+			msg := "runner: discarded late result of a run that is no longer running"
+			if try > 1 {
+				msg = "runner: run was already finished when its finish was retried; this attempt wrote nothing"
+			}
+			r.log().Warn(msg,
+				"run", run.ID, "job", job.Name, "status", string(status), "exit_code", exitCode, "finish_attempt", try)
+			return nil
+		}
+		if errors.Is(err, ErrRunGone) {
+			r.log().Warn("runner: run no longer exists, result dropped",
+				"run", run.ID, "job", job.Name, "status", string(status), "exit_code", exitCode, "finish_attempt", try)
+			// Not retried, but still an error for the caller: nothing was
+			// recorded, and `tend run` has always reported that by failing.
+			return err
+		}
+		if ctx.Err() != nil {
+			shutdown(try, err)
+			return err
+		}
+		if try > len(finishRetryPauses) {
+			r.log().Error("runner: finish run failed, result not recorded",
+				"run", run.ID, "job", job.Name, "status", string(status), "finish_attempts", try, "err", err)
+			return err
+		}
+		pause := r.finishBackoff(try)
+		r.log().Warn("runner: finish run failed, retrying",
+			"run", run.ID, "job", job.Name, "finish_attempt", try, "retry_in", pause, "err", err)
+		if sleep(ctx, pause) {
+			shutdown(try, err)
+			return err
+		}
 	}
-	// Terminal event durably recorded - fire the sink (nil-safe). The store's
-	// Alertable filter already kept run.succeeded out of the delivery queue, so
-	// firing unconditionally is correct.
-	r.fire(ctx, termEv)
-	return nil
+}
+
+// finishBackoff returns the pause before the retry that follows failed finish
+// attempt n (1-based, at most len(finishRetryPauses)).
+func (r *Runner) finishBackoff(attempt int) time.Duration {
+	if r.FinishBackoff != nil {
+		return r.FinishBackoff(attempt)
+	}
+	return finishRetryPauses[attempt-1]
 }
 
 // ReapOnce fails every 'running' run whose deadline has passed, emitting

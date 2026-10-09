@@ -158,6 +158,19 @@ and failed through `ReapStaleRun`. Like `FinishRunAndEmit`, that writes the
 terminal state and the `run.failed` event in one transaction. Without it the
 orphan would hold the job's no-overlap guard until the next restart.
 
+A finish that fails is retried. Until `FinishRunAndEmit` commits, the result of
+a run exists only in its worker's memory, so on an error (a locked SQLite
+database, a full disk) the runner tries again after 250 ms, 1 s and 4 s, four
+attempts in all, logging each failure. Only when the last one fails as well is
+the run left `running`, to be requeued at the next start or failed by the
+reaper. Two errors are not retried, because no retry can change them:
+`jobs.ErrRunNotRunning` (below) and `jobs.ErrRunGone`, a run that no longer
+exists because its job was deleted while it was in flight. That result is
+dropped and logged, and the error is still returned, so `tend run` exits
+non-zero as it always has. Shutdown ends the attempts at once; the run stays
+`running` to be requeued at the next start, which is logged with the run and
+its job, since the job will then be executed a second time.
+
 A terminal state is final in both directions. `ReapStaleRun` and the finish
 path (`FinishRun`, `FinishRunAndEmit`) each update only a run that is still
 `running`, so whichever commits first wins: reaping a run that just finished is
