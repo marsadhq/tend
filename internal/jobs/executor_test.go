@@ -244,13 +244,16 @@ func TestExecutor_HTTPTransportError_RedactsURL(t *testing.T) {
 }
 
 // Test 10c: a request that cannot even be built (before any network I/O) must
-// not leak the URL either. Two ways to get there: a URL net/url rejects, whose
-// parse error quotes the whole URL, and an invalid method on a valid URL.
+// not leak the URL either. The ways to get there: a URL net/url rejects, whose
+// parse error quotes the whole URL and, for a bad escape, a bad character in
+// the host or a bad port, the offending text once more; and an invalid method
+// on a valid URL.
 func TestExecutor_HTTPRequestBuildError_RedactsURL(t *testing.T) {
 	tests := []struct {
 		name       string
 		job        Job
 		wantPrefix string
+		want       string // the whole output, when it is fixed text
 	}{
 		{
 			name:       "unparseable URL",
@@ -261,6 +264,24 @@ func TestExecutor_HTTPRequestBuildError_RedactsURL(t *testing.T) {
 			name:       "invalid method",
 			job:        Job{Type: HTTP, HTTPMethod: "BAD METHOD", HTTPURL: "http://127.0.0.1:9/webhook?token=supersecret"},
 			wantPrefix: "127.0.0.1:9: ",
+		},
+		{
+			name:       "bad escape inside the token",
+			job:        Job{Type: HTTP, HTTPURL: "http://127.0.0.1:9/webhook/super%secret"},
+			wantPrefix: "<url>: ",
+			want:       "<url>: invalid URL escape",
+		},
+		{
+			name:       "bad character in the host",
+			job:        Job{Type: HTTP, HTTPURL: "http://super{secret/webhook"},
+			wantPrefix: "<url>: ",
+			want:       "<url>: invalid character in host name",
+		},
+		{
+			name:       "token where the port belongs",
+			job:        Job{Type: HTTP, HTTPURL: "http://127.0.0.1:supersecret/webhook"},
+			wantPrefix: "<url>: ",
+			want:       "<url>: invalid URL",
 		},
 	}
 	for _, tc := range tests {
@@ -281,6 +302,9 @@ func TestExecutor_HTTPRequestBuildError_RedactsURL(t *testing.T) {
 			}
 			if !strings.HasPrefix(res.Output, tc.wantPrefix) {
 				t.Errorf("output = %q, want prefix %q", res.Output, tc.wantPrefix)
+			}
+			if tc.want != "" && res.Output != tc.want {
+				t.Errorf("output = %q, want %q (no character of the URL quoted)", res.Output, tc.want)
 			}
 		})
 	}

@@ -375,7 +375,14 @@ careful.
   `*url.Error` that quotes the full URL. `internal/urlredact` reduces it to the
   host and the underlying cause; the webhook, Slack, Discord, and Telegram
   providers and the HTTP job executor all go through it, so a token embedded in
-  a URL reaches neither the logs nor `job_runs.output`.
+  a URL reaches neither the logs nor `job_runs.output`. Two causes would quote
+  a few characters of the URL themselves, a bad percent-escape and a character
+  that is not allowed in a host name (`url.EscapeError`,
+  `url.InvalidHostError`); those are replaced by a fixed phrase. So is any
+  other reason for which `net/url` rejects the URL, unless it is one of its
+  fixed phrases ("missing protocol scheme"): `invalid port ":..." after host`
+  quotes everything after the colon, which in a URL that has lost its host is
+  the token, and is reported as "invalid URL".
 
 `requireAuth` resolves a `Principal` from a session cookie **or** an
 `Authorization: Bearer` token, and **fails closed**: any error decoding the
