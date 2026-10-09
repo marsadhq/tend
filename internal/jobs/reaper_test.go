@@ -2,8 +2,10 @@ package jobs_test
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
+	"github.com/marsadhq/tend/internal/store"
 )
 
 // TestReapOnceFailsStaleRunningRun proves the periodic reaper: a 'running' run
@@ -273,4 +276,58 @@ func TestRunnerDropsResultOfReapedRun(t *testing.T) {
 		t.Errorf("EventSink fired %d times for the dropped result, want 0", fired)
 	}
 	mu.Unlock()
+}
+
+// TestReapOnceLeavesARunWithAnEnormousTimeoutAlone proves a timeout too large
+// for a Duration does not get its run reaped. The limit used to overflow: for a
+// timeout of 9223372036 seconds into a negative one, so the run was failed as
+// soon as the two minutes of slack had passed, and for the larger ones below
+// into a negative timeout that was taken for "unset", the 30 minute default. A
+// century in, such a run must still be running, while a run with an ordinary
+// timeout next to it is reaped as usual.
+func TestReapOnceLeavesARunWithAnEnormousTimeoutAlone(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s store.Store) {
+		ctx := context.Background()
+		orgID := seedOrg(t, ctx, s)
+
+		// The most a Postgres INTEGER column holds, with enough retries to carry
+		// the total past what a Duration can express.
+		enormous := []jobs.Job{{Name: "int32-max-with-retries", TimeoutSeconds: math.MaxInt32, MaxRetries: 9}}
+		// SQLite stores 64-bit integers, so there a timeout can overflow on its own.
+		if backendOf(t) == "sqlite" && strconv.IntSize == 64 {
+			maxSeconds := math.MaxInt64 / int64(time.Second)
+			for name, secs := range map[string]int64{
+				"fits-until-the-kill-grace-is-added": maxSeconds,
+				"one-second-too-many":                maxSeconds + 1,
+				"ten-digits":                         9999999999,
+				"int64-max":                          math.MaxInt64,
+			} {
+				enormous = append(enormous, jobs.Job{Name: name, TimeoutSeconds: int(secs)})
+			}
+		}
+
+		runIDs := map[string]int64{}
+		for _, job := range enormous {
+			job.OrgID, job.Type, job.Command, job.Enabled = orgID, jobs.Shell, "sleep 999", true
+			runIDs[job.Name] = claimRunOf(t, ctx, s, job)
+		}
+		ordinaryID := claimRunOf(t, ctx, s, jobs.Job{
+			OrgID: orgID, Name: "ordinary", Type: jobs.Shell, Command: "sleep 999", TimeoutSeconds: 60, Enabled: true,
+		})
+
+		century := 100 * 365 * 24 * time.Hour
+		r := jobs.NewRunner(s, jobs.NewExecutor(), nil, clock.NewFake(time.Now().Add(century)))
+		if err := r.ReapOnce(ctx); err != nil {
+			t.Fatalf("ReapOnce: %v", err)
+		}
+
+		for name, runID := range runIDs {
+			if run := mustGetRun(t, ctx, s, orgID, runID); run.Status != jobs.StatusRunning {
+				t.Errorf("%s: run status = %s %q, want running", name, run.Status, run.Output)
+			}
+		}
+		if run := mustGetRun(t, ctx, s, orgID, ordinaryID); run.Status != jobs.StatusFailed {
+			t.Errorf("the run with a one minute timeout is %s, want it reaped", run.Status)
+		}
+	})
 }
