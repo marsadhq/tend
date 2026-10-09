@@ -198,10 +198,19 @@ so a claim that keeps failing is logged when it first fails, then at most once
 a minute with the number of failed claims so far, and once more at INFO when a
 claim works again.
 
-Captured output is arbitrary bytes. SQLite stores it as is; the Postgres finish
-path replaces invalid UTF-8 with U+FFFD and drops NUL bytes first, because a
-`TEXT` column accepts neither and a rejected value would leave the run
-`running`.
+Captured output is arbitrary bytes; what is stored is text. Before finishing a
+run the runner (`storedOutput`) drops NUL bytes and replaces invalid UTF-8 with
+U+FFFD, then redacts the job's secret values, then trims the result back to the
+output cap. Cleaning comes before redaction on purpose: redaction is a literal
+match, so it has to see the text as it will be stored, or a secret printed with
+NUL bytes between its characters would slip past and be reassembled when the
+NULs are dropped. A secret that is not valid UTF-8 is matched one step earlier
+as well, byte for byte, once the NULs are gone and before its invalid bytes are
+replaced. Both backends are handed the same valid text, so they store
+identical bytes and the dashboard is never served invalid UTF-8. The Postgres
+finish path still applies the same clean-up (`pgText`), because a `TEXT` column
+accepts neither NUL nor invalid UTF-8 and a rejected value would leave the run
+`running`; for output that came through the runner it changes nothing.
 
 ---
 
@@ -420,7 +429,14 @@ These limits are constants in the code, not configuration.
   a full pipe), and HTTP jobs read the body through an `io.LimitReader`. A
   truncation marker is appended, after backing the cut off to a character
   boundary so truncation never produces invalid UTF-8; status and exit code are
-  unaffected. A run stores the output of its last attempt.
+  unaffected. A run stores the output of its last attempt. Replacing invalid
+  bytes and redacting a short secret can make the text longer than the bytes
+  that were captured, so the runner applies the cap once more to what it is
+  about to store: the stored output, the `HTTP <status>` line of an HTTP job
+  included, never exceeds 1 MiB plus the marker. That second cut comes after
+  redaction. The capture cap does not: it falls on the raw bytes, so the first
+  part of a secret that straddles the end of a capture cut at 1 MiB matches
+  nothing and is stored. This is a known limitation.
 - **Retention sweep.** `serve` prunes at startup and every 24 hours: events and
   terminal job runs older than 30 days, finalized deliveries older than 7 days
   (the constants sit next to `cmdServe`). A failed sweep is logged and retried

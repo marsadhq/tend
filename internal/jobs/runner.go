@@ -1,7 +1,7 @@
 // Package jobs - runner.go wires the engine end-to-end: the scheduler tick
 // enqueues due jobs, worker goroutines claim pending runs, the executor runs
-// them with injected secrets, output is redacted, the terminal state is
-// recorded, and lifecycle events are emitted. Startup reconciliation re-queues
+// them with injected secrets, output is cleaned and redacted, the terminal
+// state is recorded, and lifecycle events are emitted. Startup reconciliation re-queues
 // runs orphaned by a crash. What goes wrong along the way is logged through
 // Runner.Logger.
 //
@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/core"
@@ -437,7 +438,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	}
 
 	res := r.exec.Run(ctx, job, env)
-	out := redact(res.Output, secretValues)
+	out := storedOutput(res.Output, secretValues)
 
 	// I1: Map terminal event type to the documented vocabulary:
 	//   run.succeeded  - when execution succeeded
@@ -673,6 +674,92 @@ func (r *Runner) resolveEnv(ctx context.Context, job Job) (map[string]string, []
 		secretValues = append(secretValues, string(plain))
 	}
 	return result, secretValues, nil
+}
+
+// storedOutput turns the bytes a job printed into the text that is stored as
+// its run's output: cleaned, with the secret values redacted, and within the
+// output cap. Every backend is handed the same valid text.
+//
+// The order is the point. Redaction is a literal match, so it has to see the
+// text exactly as it will be stored. If the output were cleaned after it (as
+// the Postgres store once did on its own), a secret printed with NUL bytes
+// between its characters would not match, and dropping the NULs would then
+// put the plain secret back together. So the output is cleaned first and the
+// cleaned text is what gets redacted.
+//
+// A secret that is not valid UTF-8 needs one more step, because it stops
+// looking like itself once the output is cleaned: its invalid bytes become
+// U+FFFD, or, at either end of the secret, join a neighbouring byte of the
+// output into a character. Such a secret is matched byte for byte between the
+// two halves of the clean-up: after the NULs are dropped, so that printing it
+// with NULs in between does not hide it, and before invalid UTF-8 is replaced,
+// while its bytes are still there. Its cleaned form is matched afterwards with
+// the others, which catches it where the job had replaced the invalid bytes
+// itself. A cleaned form with nothing but U+FFFD left in it identifies nothing
+// and is not matched: it would only turn every replacement character in the
+// output into "***".
+//
+// The cap is applied last. Cleaning can grow the text (one invalid byte
+// becomes the three bytes of U+FFFD) and so can redaction (a secret shorter
+// than "***"), and this cut, being made after redaction, cannot leave the
+// first half of a secret behind. The executor's cap on what it captures is a
+// different matter: it falls on the raw bytes, before any of this, so the
+// first part of a secret that straddles the end of a capture cut at
+// maxOutputBytes is captured without the rest, matches nothing and is stored.
+// That is a known limitation.
+func storedOutput(raw string, secretValues []string) string {
+	var bytewise, cleaned []string
+	for _, v := range secretValues {
+		b := dropNULs(v)
+		c := cleanOutput(b)
+		if c != b {
+			bytewise = append(bytewise, b)
+		}
+		if strings.Trim(c, "\uFFFD") != "" {
+			cleaned = append(cleaned, c)
+		}
+	}
+	out := cleanOutput(redact(dropNULs(raw), bytewise))
+	return capOutput(redact(out, cleaned))
+}
+
+// cleanOutput makes captured output plain text: NUL bytes are dropped, then
+// each run of bytes that is not valid UTF-8 is replaced by one U+FFFD. A job
+// may print anything (binary data, text in another encoding), while a Postgres
+// TEXT column takes neither NUL nor invalid UTF-8 and the dashboard and API
+// serve the output as UTF-8. Text that is already clean is returned unchanged.
+//
+// The Postgres store applies the same two steps again to whatever it is given
+// (pgText); the two must stay the same so that pass changes nothing.
+func cleanOutput(s string) string {
+	if utf8.ValidString(s) && !strings.Contains(s, "\x00") {
+		return s
+	}
+	return strings.ToValidUTF8(dropNULs(s), "\uFFFD")
+}
+
+// dropNULs is the first half of cleanOutput on its own. Text without a NUL is
+// returned unchanged.
+func dropNULs(s string) string {
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
+// capOutput holds the stored text to maxOutputBytes, not counting the
+// truncation marker. The executor already caps what it captures, but that is a
+// cap on the raw bytes; see storedOutput for what can grow them afterwards.
+// Text over the cap is cut on a character boundary (s is valid UTF-8 by now)
+// and ends with the marker exactly once, whether or not the executor had
+// already added it. Text within the cap is returned unchanged.
+func capOutput(s string) string {
+	body := strings.TrimSuffix(s, truncationMarker)
+	if len(body) <= maxOutputBytes {
+		return s
+	}
+	cut := maxOutputBytes
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return body[:cut] + truncationMarker
 }
 
 // redact replaces every non-empty secret value in s with "***". This is a

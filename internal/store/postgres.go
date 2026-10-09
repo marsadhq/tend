@@ -349,11 +349,17 @@ func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.Run
 }
 
 // pgText makes captured job output storable in a Postgres TEXT column, which
-// accepts neither invalid UTF-8 nor NUL bytes. A job may print anything (binary
-// data, text in another encoding), and a rejected value would fail the finish
-// and leave the run 'running' with its real result lost. Each invalid sequence
-// becomes U+FFFD and NUL bytes are dropped; valid text is returned unchanged.
-// SQLite stores arbitrary bytes and needs no such step.
+// accepts neither invalid UTF-8 nor NUL bytes. A rejected value would fail the
+// finish and leave the run 'running' with its real result lost. NUL bytes are
+// dropped and each invalid sequence becomes U+FFFD; valid text is returned
+// unchanged.
+//
+// This is a second line of defence, not where output is cleaned. The runner
+// cleans what a job printed in exactly this way before it redacts secrets and
+// hands the same clean text to every backend (jobs.storedOutput), so for a
+// run's output this changes nothing. It must never be the only clean-up: it
+// runs after redaction, and dropping NULs from text that was redacted with
+// them still in place can put a secret back together.
 func pgText(s string) string {
 	if utf8.ValidString(s) && !strings.Contains(s, "\x00") {
 		return s
