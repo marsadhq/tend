@@ -164,6 +164,17 @@ path (`FinishRun`, `FinishRunAndEmit`) each update only a run that is still
 a no-op, and a worker that finishes a run the reaper already failed gets
 `jobs.ErrRunNotRunning`, writes nothing, and emits no second terminal event.
 
+None of this happens in silence. The runner logs through `Runner.Logger`, which
+`serve` sets to its own logger and `tend run` points at stderr: a store error on
+the scheduler tick, in the reaper, or on the claim/finish path at ERROR (a lost
+`run.started`, being advisory, at WARN), each reaped run and each discarded
+late result at WARN, and the number of runs requeued at startup at INFO. Errors
+caused by shutdown cancelling the context are not logged. One error is not
+logged every time it happens: idle workers poll for work about once a second,
+so a claim that keeps failing is logged when it first fails, then at most once
+a minute with the number of failed claims so far, and once more at INFO when a
+claim works again.
+
 Captured output is arbitrary bytes. SQLite stores it as is; the Postgres finish
 path replaces invalid UTF-8 with U+FFFD and drops NUL bytes first, because a
 `TEXT` column accepts neither and a rejected value would leave the run

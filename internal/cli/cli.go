@@ -364,6 +364,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	// channel never blocks a runner worker or shutdown.
 	runner := jobs.NewRunner(st, jobs.NewExecutor(), box, clk)
 	runner.EventSink = dispatch
+	runner.Logger = logger
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -802,8 +803,13 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 		return fmt.Errorf("run: enqueue: %w", err)
 	}
 
-	// Execute all pending runs inline (no-overlap: ClaimRun is exclusive).
+	// Execute all pending runs inline (no-overlap: ClaimRun is exclusive). The
+	// runner logs to stderr, like the delivery worker below: a result that could
+	// not be recorded, or was dropped because the run had already been failed,
+	// would otherwise show up only as a run status that contradicts the job.
+	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	runner := jobs.NewRunner(st, jobs.NewExecutor(), box, clock.RealClock{})
+	runner.Logger = logger
 	if err := runner.DrainOnce(ctx); err != nil {
 		return fmt.Errorf("run: drain: %w", err)
 	}
@@ -816,8 +822,7 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// makes the overlap safe. Without a master key the channel configs cannot
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
-		w := notify.NewWorker(st, box, notify.BuildProvider,
-			slog.New(slog.NewTextHandler(stderr, nil)))
+		w := notify.NewWorker(st, box, notify.BuildProvider, logger)
 		if _, err := w.DrainOnce(ctx); err != nil {
 			fmt.Fprintf(stderr, "run: warning: notification delivery: %v\n", err)
 		}

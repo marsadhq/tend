@@ -2,7 +2,8 @@
 // enqueues due jobs, worker goroutines claim pending runs, the executor runs
 // them with injected secrets, output is redacted, the terminal state is
 // recorded, and lifecycle events are emitted. Startup reconciliation re-queues
-// runs orphaned by a crash.
+// runs orphaned by a crash. What goes wrong along the way is logged through
+// Runner.Logger.
 //
 // IMPORT-CYCLE NOTE: the store package imports this (jobs) package, so this
 // package MUST NOT import store. The runner depends on persistence through the
@@ -15,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -115,6 +117,96 @@ type Runner struct {
 	// jobs deliberately keeps this a plain func over core.Event (not a notify
 	// type) so package jobs never imports notify - avoiding an import cycle.
 	EventSink func(context.Context, core.Event)
+
+	// Logger, when non-nil, receives the runner's log lines: every store error
+	// from the scheduler tick, the reaper and the claim/finish path at ERROR
+	// (a lost run.started event, which is only advisory, at WARN), each reaped
+	// run and each discarded late result at WARN, and the number of runs
+	// requeued at startup at INFO. Left nil, the runner logs nothing. Like the
+	// fields above it is set before Start and not changed afterwards.
+	Logger *slog.Logger
+
+	// claimErrs tracks a claim that keeps failing. That is the one error not
+	// logged every time it happens; see claimErrors.
+	claimErrs claimErrors
+}
+
+// discardLogger backs a Runner whose Logger was left nil.
+var discardLogger = slog.New(slog.DiscardHandler)
+
+// log returns the configured logger, or one that discards everything, so call
+// sites need no nil check.
+func (r *Runner) log() *slog.Logger {
+	if r.Logger != nil {
+		return r.Logger
+	}
+	return discardLogger
+}
+
+// logError logs a failed step at ERROR with err and attrs. A step that failed
+// while ctx was already cancelled is not logged: shutdown interrupts whatever
+// store call is in flight, and that is expected, not an error to act on.
+func (r *Runner) logError(ctx context.Context, msg string, err error, attrs ...any) {
+	if ctx.Err() != nil {
+		return
+	}
+	r.log().Error(msg, append(attrs, "err", err)...)
+}
+
+// claimErrorRepeat is how often a claim that keeps failing is logged again
+// after its first failure; see claimErrors.
+const claimErrorRepeat = time.Minute
+
+// claimErrors limits how often a claim that keeps failing is logged. Each idle
+// worker tries to claim a run about once a second, so a store that fails at
+// once (a full disk, a database that refuses connections) would otherwise
+// write an ERROR line per worker per second for as long as that lasts. The
+// first failure is logged as it happens, the ones that follow at most once per
+// claimErrorRepeat with the number of failed claims so far, and the first
+// claim that works again ends the streak with a line of its own. The zero
+// value is ready to use.
+type claimErrors struct {
+	mu      sync.Mutex
+	failed  int       // failed claims in a row, over all workers
+	lastLog time.Time // when a failure of this streak was last logged
+}
+
+// logClaimError logs a failed ClaimRun at ERROR, subject to claimErrors. Like
+// logError it stays quiet about a claim that shutdown interrupted.
+func (r *Runner) logClaimError(ctx context.Context, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	now := r.clk.Now()
+	c := &r.claimErrs
+	c.mu.Lock()
+	c.failed++
+	failed := c.failed
+	due := failed == 1 || now.Sub(c.lastLog) >= claimErrorRepeat
+	if due {
+		c.lastLog = now
+	}
+	c.mu.Unlock()
+
+	switch {
+	case failed == 1:
+		r.log().Error("runner: claim run", "err", err)
+	case due:
+		r.log().Error("runner: claim run is still failing", "failed_claims", failed, "err", err)
+	}
+}
+
+// claimWorked ends a streak of failed claims, if there was one, and logs that
+// it is over.
+func (r *Runner) claimWorked() {
+	c := &r.claimErrs
+	c.mu.Lock()
+	failed := c.failed
+	c.failed = 0
+	c.mu.Unlock()
+	if failed > 0 {
+		r.log().Info("runner: claim run works again", "failed_claims", failed)
+	}
 }
 
 // fire invokes EventSink with ev when a sink is configured. It is nil-safe so
@@ -144,25 +236,28 @@ var secretRefRe = regexp.MustCompile(`^\{\{\s*secret\.([A-Za-z0-9_.-]+)\s*\}\}$`
 // (the CLI/config sync in Task 9), NOT the runner's. The runner only ADVANCES
 // NextRunAt after a fire.
 //
-// Per-job errors do not abort the pass: every due job is attempted and the
-// first error encountered is returned afterward.
+// Per-job errors do not abort the pass: every due job is attempted, each error
+// is logged with the job it belongs to, and the first one encountered is
+// returned afterward.
 func (r *Runner) Tick(ctx context.Context) error {
 	now := r.clk.Now()
 	due, err := r.store.DueJobs(ctx, now)
 	if err != nil {
+		r.logError(ctx, "runner: scheduler tick: list due jobs", err)
 		return err
 	}
 
 	var firstErr error
-	record := func(e error) {
-		if e != nil && firstErr == nil {
+	record := func(job Job, step string, e error) {
+		r.logError(ctx, "runner: scheduler tick: "+step, e, "job", job.Name)
+		if firstErr == nil {
 			firstErr = e
 		}
 	}
 
 	for _, job := range due {
 		if _, err := r.store.EnqueueRun(ctx, job.OrgID, job.ID); err != nil {
-			record(err)
+			record(job, "enqueue run", err)
 			continue
 		}
 		// Advance the schedule. A zero next time (elapsed one-off) is correct:
@@ -173,16 +268,16 @@ func (r *Runner) Tick(ctx context.Context) error {
 			// corrupted or missing schedule expression. Clear NextRunAt and persist
 			// it so DueJobs stops returning this job every tick (spin guard),
 			// and surface the error so it shows up in Tick's return value.
-			record(err)
+			record(job, "compute next run", err)
 			job.NextRunAt = time.Time{}
 			if uerr := r.store.UpdateJob(ctx, job); uerr != nil {
-				record(uerr)
+				record(job, "clear schedule", uerr)
 			}
 			continue
 		}
 		job.NextRunAt = next
 		if err := r.store.UpdateJob(ctx, job); err != nil {
-			record(err)
+			record(job, "advance schedule", err)
 		}
 	}
 	return firstErr
@@ -211,11 +306,17 @@ func (r *Runner) DrainOnce(ctx context.Context) error {
 // run is left in 'running'. It is recovered either at the next restart via
 // RequeueOrphanedRuns (called by Start) or by the periodic reaper (ReapOnce),
 // which fails it once the run's time limit plus reapSlack has passed.
+//
+// Every error claimAndRun returns has already been logged here, where the run
+// and the job are known, so callers must not log it a second time. (A claim
+// that keeps failing is logged only every so often; see claimErrors.)
 func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	run, ok, err := r.store.ClaimRun(ctx, workerID)
 	if err != nil {
+		r.logClaimError(ctx, err)
 		return false, err
 	}
+	r.claimWorked()
 	if !ok {
 		return false, nil
 	}
@@ -223,6 +324,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	job, err := r.store.GetJob(ctx, run.OrgID, run.JobID)
 	if err != nil {
 		// Run is left in 'running'; recovered at next restart via RequeueOrphanedRuns.
+		r.logError(ctx, "runner: load job of claimed run", err, "run", run.ID, "job_id", run.JobID)
 		return true, err
 	}
 
@@ -230,11 +332,12 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	// terminal event (run.succeeded / run.failed) is guaranteed atomic via
 	// FinishRunAndEmit. Consumers that need to detect a missing start event can
 	// infer it from the terminal event's run_id.
-	if err := r.emit(ctx, run, job, "run.started", StatusRunning, 0); err != nil {
+	if err := r.emit(ctx, run, job, "run.started", StatusRunning, 0); err != nil && ctx.Err() == nil {
 		// Non-fatal: continue to execution. The started event is advisory; the
 		// terminal event written by FinishRunAndEmit is what pipeline consumers
-		// rely on.
-		_ = err
+		// rely on. Worth a line all the same: it is the first sign of a store
+		// that is refusing writes.
+		r.log().Warn("runner: record run.started", "run", run.ID, "job", job.Name, "err", err)
 	}
 
 	env, secretValues, err := r.resolveEnv(ctx, job)
@@ -246,18 +349,10 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		termEv, evErr := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
 		if evErr != nil {
 			// Run is left in 'running'; recovered at next restart.
+			r.logError(ctx, "runner: build terminal event", evErr, "run", run.ID, "job", job.Name)
 			return true, evErr
 		}
-		if _, ferr := r.store.FinishRunAndEmit(ctx, run.ID, StatusFailed, -1, run.Attempt, out, termEv); ferr != nil {
-			if errors.Is(ferr, ErrRunNotRunning) {
-				return true, nil // already failed by the reaper; see below
-			}
-			// Run may be left in 'running'; recovered at next restart.
-			return true, ferr
-		}
-		// Terminal event durably recorded - fire the sink (nil-safe).
-		r.fire(ctx, termEv)
-		return true, nil
+		return true, r.finish(ctx, run, job, StatusFailed, -1, run.Attempt, out, termEv)
 	}
 
 	res := r.exec.Run(ctx, job, env)
@@ -277,25 +372,42 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	termEv, err := r.buildEvent(run, job, termType, res.Status, res.ExitCode)
 	if err != nil {
 		// Run is left in 'running'; recovered at next restart.
+		r.logError(ctx, "runner: build terminal event", err, "run", run.ID, "job", job.Name)
 		return true, err
 	}
+	return true, r.finish(ctx, run, job, res.Status, res.ExitCode, res.Attempt, out, termEv)
+}
 
-	// I2: finish + terminal event in one atomic transaction - no lost terminal event.
-	if _, err := r.store.FinishRunAndEmit(ctx, run.ID, res.Status, res.ExitCode, res.Attempt, out, termEv); err != nil {
-		if errors.Is(err, ErrRunNotRunning) {
-			// The reaper failed this run while it was still executing and has
-			// already emitted its run.failed. A terminal state is final: the
-			// late result is dropped, with no second event and no sink call.
-			return true, nil
-		}
-		// Run is left in 'running'; recovered at next restart.
-		return true, err
+// finish records the terminal state of a claimed run together with its
+// terminal event (I2: one atomic transaction, so the event is never lost) and
+// then fires the sink. Both ways a run ends go through here: a result from the
+// executor, and a secret that could not be resolved.
+//
+// A run that is no longer 'running' was failed by the reaper while its worker
+// was still busy, and the reaper has already emitted its run.failed. A terminal
+// state is final: the late result is dropped, with no second event and no sink
+// call, and that is logged so the lost result is not silent. finish returns nil
+// for it, since the worker has nothing left to do.
+//
+// Any other error leaves the run in 'running' (recovered at the next restart
+// or by the reaper); it is logged with the run and its job and returned.
+func (r *Runner) finish(ctx context.Context, run Run, job Job, status RunStatus, exitCode, attempt int, output string, termEv core.Event) error {
+	_, err := r.store.FinishRunAndEmit(ctx, run.ID, status, exitCode, attempt, output, termEv)
+	if errors.Is(err, ErrRunNotRunning) {
+		r.log().Warn("runner: discarded late result of a run that is no longer running",
+			"run", run.ID, "job", job.Name, "status", string(status), "exit_code", exitCode)
+		return nil
+	}
+	if err != nil {
+		r.logError(ctx, "runner: finish run", err,
+			"run", run.ID, "job", job.Name, "status", string(status))
+		return err
 	}
 	// Terminal event durably recorded - fire the sink (nil-safe). The store's
 	// Alertable filter already kept run.succeeded out of the delivery queue, so
 	// firing unconditionally is correct.
 	r.fire(ctx, termEv)
-	return true, nil
+	return nil
 }
 
 // ReapOnce fails every 'running' run whose deadline has passed, emitting
@@ -307,17 +419,20 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 // between, so the limit covers all of them: a run that is still retrying is
 // not an orphan. The store-side status guard in ReapStaleRun makes the sweep
 // safe against a worker finishing the run concurrently. Per-run errors do not
-// abort the sweep; the first error encountered is returned afterward.
+// abort the sweep; each is logged with its run and the first one encountered is
+// returned afterward. Every run that is reaped is logged too.
 func (r *Runner) ReapOnce(ctx context.Context) error {
 	runs, err := r.store.ListRunningRuns(ctx)
 	if err != nil {
+		r.logError(ctx, "runner: reaper: list running runs", err)
 		return err
 	}
 	now := r.clk.Now()
 
 	var firstErr error
-	record := func(e error) {
-		if e != nil && firstErr == nil {
+	record := func(run Run, step string, e error) {
+		r.logError(ctx, "runner: reaper: "+step, e, "run", run.ID)
+		if firstErr == nil {
 			firstErr = e
 		}
 	}
@@ -328,7 +443,7 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 		}
 		job, err := r.store.GetJob(ctx, run.OrgID, run.JobID)
 		if err != nil {
-			record(err)
+			record(run, "load job", err)
 			continue
 		}
 		limit := r.exec.maxRunDuration(job)
@@ -338,17 +453,18 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 		}
 		termEv, err := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
 		if err != nil {
-			record(err)
+			record(run, "build event", err)
 			continue
 		}
-		out := fmt.Sprintf("reaped: run still 'running' %s past its %s time limit (worker lost)",
+		reason := fmt.Sprintf("run still 'running' %s past its %s time limit (worker lost)",
 			reapSlack, limit)
-		reaped, err := r.store.ReapStaleRun(ctx, run.ID, out, termEv)
+		reaped, err := r.store.ReapStaleRun(ctx, run.ID, "reaped: "+reason, termEv)
 		if err != nil {
-			record(err)
+			record(run, "fail stale run", err)
 			continue
 		}
 		if reaped {
+			r.log().Warn("runner: reaped stale run", "run", run.ID, "job", job.Name, "reason", reason)
 			r.fire(ctx, termEv)
 		}
 	}
@@ -458,8 +574,12 @@ func (r *Runner) emit(ctx context.Context, run Run, job Job, typ string, status 
 // never blocks its job's no-overlap guard until the next restart.
 func (r *Runner) Start(ctx context.Context) error {
 	// 1. Reconcile crash-orphaned 'running' runs back to 'pending'.
-	if _, err := r.store.RequeueOrphanedRuns(ctx); err != nil {
+	requeued, err := r.store.RequeueOrphanedRuns(ctx)
+	if err != nil {
 		return err
+	}
+	if requeued > 0 {
+		r.log().Info("runner: requeued runs left running by an earlier process", "runs", requeued)
 	}
 
 	tick := r.TickInterval
@@ -490,6 +610,7 @@ func (r *Runner) Start(ctx context.Context) error {
 				return
 			case <-t.C:
 				// Tick errors are transient (DB hiccups); the next tick retries.
+				// Tick has logged them.
 				_ = r.Tick(ctx)
 			}
 		}
@@ -508,6 +629,7 @@ func (r *Runner) Start(ctx context.Context) error {
 				return
 			case <-t.C:
 				// Reap errors are transient (DB hiccups); the next sweep retries.
+				// ReapOnce has logged them.
 				_ = r.ReapOnce(ctx)
 			}
 		}
@@ -524,8 +646,8 @@ func (r *Runner) Start(ctx context.Context) error {
 				}
 				claimed, err := r.claimAndRun(ctx)
 				if err != nil {
-					// Transient store/exec error: back off one poll interval
-					// rather than spin.
+					// Transient store/exec error, already logged by
+					// claimAndRun: back off one poll interval rather than spin.
 					if sleep(ctx, poll) {
 						return
 					}
