@@ -122,22 +122,44 @@ func (e *Executor) backoff(attempt int) time.Duration {
 	return time.Duration(attempt*attempt) * time.Second
 }
 
+// forever is the longest Duration there is. Time-limit arithmetic saturates at
+// it instead of overflowing.
+const forever = time.Duration(math.MaxInt64)
+
+// seconds converts a number of seconds to a Duration, saturating at forever
+// (or its negative) instead of wrapping around. A Duration counts nanoseconds,
+// so a timeout_seconds past roughly 292 years overflows a plain multiplication
+// and comes out as an arbitrary value, negative as often as not.
+func seconds(n int) time.Duration {
+	const limit = int64(forever / time.Second)
+	switch {
+	case int64(n) > limit:
+		return forever
+	case int64(n) < -limit:
+		return -forever
+	}
+	return time.Duration(n) * time.Second
+}
+
 // maxRunDuration returns the longest one complete Run of j can legitimately
 // take: every attempt running into its timeout, the grace period each kill is
 // given, and every backoff pause in between. The runner's stale-run reaper
 // uses it, so the reaper and the retry loop in Run agree on when a run is
-// overdue. The result saturates rather than overflowing for an absurd retry
-// count.
+// overdue. The result saturates rather than overflowing, for an enormous
+// timeout as much as for an absurd retry count: a limit that wrapped around to
+// a negative value would have the reaper fail the run as soon as reapSlack had
+// passed.
 func (e *Executor) maxRunDuration(j Job) time.Duration {
-	const forever = time.Duration(math.MaxInt64)
-
 	attempts := j.MaxRetries + 1
 	if attempts < 1 {
 		attempts = 1
 	}
-	timeout := time.Duration(j.TimeoutSeconds) * time.Second
+	timeout := seconds(j.TimeoutSeconds)
 	if timeout <= 0 {
 		timeout = DefaultTimeout
+	}
+	if timeout > forever-killGraceDelay {
+		return forever
 	}
 	perAttempt := timeout + killGraceDelay
 
@@ -198,9 +220,12 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 	return last
 }
 
-// runOnce executes j exactly once with a per-attempt timeout.
+// runOnce executes j exactly once with a per-attempt timeout. The timeout
+// saturates like the limit in maxRunDuration, so an enormous timeout_seconds
+// means "no timeout to speak of" to both, not an attempt that is cut short the
+// moment it starts.
 func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, attempt int) RunResult {
-	timeout := time.Duration(j.TimeoutSeconds) * time.Second
+	timeout := seconds(j.TimeoutSeconds)
 	if timeout == 0 {
 		timeout = DefaultTimeout
 	}

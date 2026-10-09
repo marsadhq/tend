@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -487,7 +488,6 @@ func TestRun_HTTP_BodyUnderCap(t *testing.T) {
 // every backoff pause, so the stale-run reaper never mistakes a run that is
 // still retrying for an orphan.
 func TestMaxRunDuration(t *testing.T) {
-	const forever = time.Duration(math.MaxInt64)
 	attempt := func(timeout time.Duration) time.Duration { return timeout + killGraceDelay }
 
 	cases := []struct {
@@ -498,6 +498,7 @@ func TestMaxRunDuration(t *testing.T) {
 	}{
 		{"no retries", NewExecutor(), Job{TimeoutSeconds: 600}, attempt(10 * time.Minute)},
 		{"unset timeout uses the default", NewExecutor(), Job{}, attempt(DefaultTimeout)},
+		{"negative timeout uses the default", NewExecutor(), Job{TimeoutSeconds: -5}, attempt(DefaultTimeout)},
 		{"negative retries count as none", NewExecutor(), Job{TimeoutSeconds: 600, MaxRetries: -3}, attempt(10 * time.Minute)},
 		{"one retry adds an attempt and a 1s pause", NewExecutor(), Job{TimeoutSeconds: 600, MaxRetries: 1},
 			2*attempt(10*time.Minute) + 1*time.Second},
@@ -513,6 +514,93 @@ func TestMaxRunDuration(t *testing.T) {
 				t.Errorf("maxRunDuration = %s, want %s", got, c.want)
 			}
 		})
+	}
+}
+
+// maxDurationSeconds is the most seconds a Duration can hold, a little over
+// 292 years. It is an int64 because an int cannot hold it where int is 32 bits.
+const maxDurationSeconds = math.MaxInt64 / int64(time.Second)
+
+// asTimeout turns a number of seconds into a Job.TimeoutSeconds value. It skips
+// the calling test where int is 32 bits: a timeout that large cannot be
+// expressed there, so there is nothing to overflow.
+func asTimeout(t *testing.T, secs int64) int {
+	t.Helper()
+	if strconv.IntSize < 64 {
+		t.Skip("timeout_seconds cannot overflow a Duration where int is 32 bits")
+	}
+	return int(secs)
+}
+
+// Test 20b: maxRunDuration saturates for an enormous timeout as well. The
+// first and the last case are boundaries that already worked. The others used
+// to overflow: a timeout that only just fits wrapped into a negative limit once
+// the kill grace was added, which the reaper read as "overdue as soon as the
+// slack has passed", and the larger ones here wrapped into a negative timeout
+// that was then mistaken for "unset".
+func TestMaxRunDuration_EnormousTimeoutSaturates(t *testing.T) {
+	cases := []struct {
+		name    string
+		seconds int64
+		retries int
+		want    time.Duration
+	}{
+		{"largest timeout that needs no saturating", maxDurationSeconds - 5, 0,
+			time.Duration(maxDurationSeconds-5)*time.Second + killGraceDelay},
+		{"timeout that fits until the kill grace is added", maxDurationSeconds, 0, forever},
+		{"timeout one second past what a Duration holds", maxDurationSeconds + 1, 0, forever},
+		{"ten digit timeout", 9999999999, 0, forever},
+		{"largest possible timeout", math.MaxInt64, 0, forever},
+		{"enormous timeout with retries", math.MaxInt64, 3, forever},
+		{"large timeout that overflows across its retries", maxDurationSeconds / 2, 2, forever},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			job := Job{TimeoutSeconds: asTimeout(t, c.seconds), MaxRetries: c.retries}
+			got := NewExecutor().maxRunDuration(job)
+			if got != c.want {
+				t.Errorf("maxRunDuration = %s, want %s", got, c.want)
+			}
+			if got <= 0 {
+				t.Errorf("maxRunDuration = %d, a limit must be positive", got)
+			}
+		})
+	}
+}
+
+// Test 20c: seconds is exact for ordinary values and saturates at both ends.
+func TestSecondsSaturates(t *testing.T) {
+	for in, want := range map[int]time.Duration{
+		0: 0, 1: time.Second, -1: -time.Second, 7200: 2 * time.Hour, math.MaxInt32: math.MaxInt32 * time.Second,
+	} {
+		if got := seconds(in); got != want {
+			t.Errorf("seconds(%d) = %d, want %d", in, got, want)
+		}
+	}
+	for in, want := range map[int64]time.Duration{
+		maxDurationSeconds:      time.Duration(maxDurationSeconds) * time.Second,
+		maxDurationSeconds + 1:  forever,
+		math.MaxInt64:           forever,
+		-maxDurationSeconds:     -time.Duration(maxDurationSeconds) * time.Second,
+		-maxDurationSeconds - 1: -forever,
+		math.MinInt64:           -forever,
+	} {
+		if got := seconds(asTimeout(t, in)); got != want {
+			t.Errorf("seconds(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// Test 20d: a job with an enormous timeout runs like any other. The timeout
+// used to overflow into a negative one, which ended every attempt as timed out
+// before it had started.
+func TestExecutor_EnormousTimeoutStillRuns(t *testing.T) {
+	for _, secs := range []int64{maxDurationSeconds, maxDurationSeconds + 1, 9999999999, math.MaxInt64} {
+		job := Job{Type: Shell, Command: "echo ok", TimeoutSeconds: asTimeout(t, secs)}
+		res := NewExecutor().Run(context.Background(), job, nil)
+		if res.Status != StatusSucceeded || res.Output != "ok\n" {
+			t.Errorf("timeout_seconds=%d: status %s, output %q; want succeeded with the job's output", secs, res.Status, res.Output)
+		}
 	}
 }
 
