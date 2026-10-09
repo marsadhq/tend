@@ -135,6 +135,7 @@ type faultStore struct {
 	onEnqueueRun      func() error
 	onEmitEvent       func() error
 	onClaimRun        func() error
+	onGetJob          func() error
 	onListRunningRuns func() error
 	onReapStaleRun    func(runID int64) error
 	onFinish          func(runID int64) error
@@ -174,6 +175,15 @@ func (f *faultStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, boo
 		}
 	}
 	return f.Store.ClaimRun(ctx, worker)
+}
+
+func (f *faultStore) GetJob(ctx context.Context, orgID, id int64) (jobs.Job, error) {
+	if f.onGetJob != nil {
+		if err := f.onGetJob(); err != nil {
+			return jobs.Job{}, err
+		}
+	}
+	return f.Store.GetJob(ctx, orgID, id)
 }
 
 func (f *faultStore) ListRunningRuns(ctx context.Context) ([]jobs.Run, error) {

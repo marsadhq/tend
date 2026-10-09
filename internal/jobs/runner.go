@@ -106,12 +106,57 @@ type RunnerStore interface {
 	ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error)
 }
 
+// inFlight is the set of runs this process is executing right now, each with
+// the longest it may take (Executor.maxRunDuration) as computed from the job
+// definition the worker loaded when it claimed the run. That definition is the
+// one the executor enforces for the whole run, so it is also the one the reaper
+// must judge the run by: the job row may be edited while the run is in flight
+// (tend sync, a job edit), and a limit taken from the edited row would have
+// the reaper fail a healthy run whose real result is then discarded.
+//
+// It lives in memory only. A run claimed by another process (tend run), or one
+// whose worker in this process is gone, is not in it, and the reaper falls back
+// to the job's current definition for those. The zero value is ready to use.
+type inFlight struct {
+	mu     sync.Mutex
+	limits map[int64]time.Duration // run ID -> its claim-time limit
+}
+
+// add registers runID as executing in this process with its claim-time limit.
+func (f *inFlight) add(runID int64, limit time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.limits == nil {
+		f.limits = make(map[int64]time.Duration)
+	}
+	f.limits[runID] = limit
+}
+
+// remove forgets runID. It is a no-op for a run that is not registered.
+func (f *inFlight) remove(runID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.limits, runID)
+}
+
+// limit returns the claim-time limit of runID and whether this process is
+// executing it.
+func (f *inFlight) limit(runID int64) (time.Duration, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	limit, ok := f.limits[runID]
+	return limit, ok
+}
+
 // Runner ties the scheduler, run queue, executor, and event pipeline together.
 type Runner struct {
 	store RunnerStore
 	exec  *Executor
 	box   *secrets.Box // may be nil when no master key is configured
 	clk   clock.Clock
+
+	// inFlight holds the runs this runner's workers are executing; see inFlight.
+	inFlight inFlight
 
 	// TickInterval is the scheduler poll cadence; defaults to 10s when zero.
 	TickInterval time.Duration
@@ -355,6 +400,15 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		return true, err
 	}
 
+	// From here until claimAndRun returns, this process is executing the run
+	// under the definition just loaded, so the reaper judges it by that
+	// definition and not by whatever the job row says later. The deferred
+	// remove runs however the run ends, a panic included, so an entry never
+	// outlives its worker. Until this point the run is 'running' but not
+	// registered; it was claimed an instant ago, far inside reapSlack.
+	r.inFlight.add(run.ID, r.exec.maxRunDuration(job))
+	defer r.inFlight.remove(run.ID)
+
 	// run.started is best-effort: a lost start event is non-critical because the
 	// terminal event (run.succeeded / run.failed) is guaranteed atomic via
 	// FinishRunAndEmit. Consumers that need to detect a missing start event can
@@ -507,10 +561,21 @@ func (r *Runner) finishBackoff(attempt int) time.Duration {
 // once, when the run is claimed, while the executor may spend up to
 // MaxRetries+1 attempts of the job's timeout each, with a backoff pause in
 // between, so the limit covers all of them: a run that is still retrying is
-// not an orphan. The store-side status guard in ReapStaleRun makes the sweep
-// safe against a worker finishing the run concurrently. Per-run errors do not
-// abort the sweep; each is logged with its run and the first one encountered is
-// returned afterward. Every run that is reaped is logged too.
+// not an orphan.
+//
+// Which definition of the job that limit comes from depends on who is
+// executing the run. For a run one of this runner's own workers is executing
+// it is the definition loaded at claim, kept in r.inFlight: the executor runs
+// the job under that definition to the end, so a timeout or retry count
+// lowered while the run is in flight must not shorten its deadline. Such a run
+// is reaped only once that claim-time deadline has passed, which takes a
+// worker that is stuck. Every other 'running' run belongs to another process
+// or lost its worker, and all there is to go by is the job as it is now.
+//
+// The store-side status guard in ReapStaleRun makes the sweep safe against a
+// worker finishing the run concurrently. Per-run errors do not abort the
+// sweep; each is logged with its run and the first one encountered is returned
+// afterward. Every run that is reaped is logged too.
 func (r *Runner) ReapOnce(ctx context.Context) error {
 	runs, err := r.store.ListRunningRuns(ctx)
 	if err != nil {
@@ -531,23 +596,35 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 		if run.StartedAt.IsZero() {
 			continue // not actually started; RequeueOrphanedRuns territory
 		}
+		elapsed := now.Sub(run.StartedAt)
+		// Written as two comparisons so a saturated limit cannot overflow.
+		withinWindow := func(limit time.Duration) bool {
+			return elapsed < reapSlack || elapsed-reapSlack < limit
+		}
+
+		limit, ours := r.inFlight.limit(run.ID)
+		if ours && withinWindow(limit) {
+			continue // one of our workers is on it, inside its claim-time limit
+		}
 		job, err := r.store.GetJob(ctx, run.OrgID, run.JobID)
 		if err != nil {
 			record(run, "load job", err)
 			continue
 		}
-		limit := r.exec.maxRunDuration(job)
-		// Written as two comparisons so a saturated limit cannot overflow.
-		if elapsed := now.Sub(run.StartedAt); elapsed < reapSlack || elapsed-reapSlack < limit {
-			continue // still within its window; the executor will finish it
+		cause := "worker has not returned"
+		if !ours {
+			limit, cause = r.exec.maxRunDuration(job), "worker lost"
+			if withinWindow(limit) {
+				continue // still within its window; the executor will finish it
+			}
 		}
 		termEv, err := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
 		if err != nil {
 			record(run, "build event", err)
 			continue
 		}
-		reason := fmt.Sprintf("run still 'running' %s past its %s time limit (worker lost)",
-			reapSlack, limit)
+		reason := fmt.Sprintf("run still 'running' %s past its %s time limit (%s)",
+			reapSlack, limit, cause)
 		reaped, err := r.store.ReapStaleRun(ctx, run.ID, "reaped: "+reason, termEv)
 		if err != nil {
 			record(run, "fail stale run", err)

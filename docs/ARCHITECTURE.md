@@ -158,6 +158,16 @@ and failed through `ReapStaleRun`. Like `FinishRunAndEmit`, that writes the
 terminal state and the `run.failed` event in one transaction. Without it the
 orphan would hold the job's no-overlap guard until the next restart.
 
+Which definition of the job that limit is computed from depends on who is
+executing the run. The runner keeps an in-memory registry of the runs its own
+workers are executing, each with the limit taken from the definition the worker
+loaded at claim, which is the one the executor enforces to the end. The reaper
+judges those runs by that claim-time limit, so lowering `timeout_seconds` or
+`max_retries` (`tend sync`, a job edit) while a run is in flight cannot get a
+healthy run failed; a registered run is reaped only once its claim-time
+deadline has passed. A run that is not in the registry was claimed by another
+process (`tend run`) or lost its worker, and is judged by the job as it is now.
+
 A finish that fails is retried. Until `FinishRunAndEmit` commits, the result of
 a run exists only in its worker's memory, so on an error (a locked SQLite
 database, a full disk) the runner tries again after 250 ms, 1 s and 4 s, four
