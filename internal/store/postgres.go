@@ -322,7 +322,7 @@ func (s *PostgresStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, 
 // FinishRunAndEmit go through here. Like the SQLite twin it only finishes a
 // run still in 'running': a late finish of a run the reaper already failed
 // returns jobs.ErrRunNotRunning and writes nothing; an unknown run ID returns
-// ErrNotFound.
+// ErrNotFound, which is jobs.ErrRunGone as well.
 func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE job_runs SET status = $1, exit_code = $2, output = $3, ended_at = $4 WHERE id = $5 AND status = $6`,
@@ -338,7 +338,7 @@ func pgFinishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.Run
 		var one int
 		err := tx.QueryRowContext(ctx, `SELECT 1 FROM job_runs WHERE id = $1`, runID).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return fmt.Errorf("%w: %w", ErrNotFound, jobs.ErrRunGone)
 		}
 		if err != nil {
 			return fmt.Errorf("finish run lookup: %w", err)

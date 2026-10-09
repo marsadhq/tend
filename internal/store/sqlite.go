@@ -494,7 +494,9 @@ func (s *SQLiteStore) ClaimRun(ctx context.Context, worker string) (jobs.Run, bo
 // once the reaper has failed a run, a worker that turns up late must not
 // overwrite that state or emit a second terminal event. Such a late finish
 // returns jobs.ErrRunNotRunning and writes nothing; an unknown run ID returns
-// ErrNotFound.
+// ErrNotFound, which is jobs.ErrRunGone as well, so that the runner, which
+// cannot import this package, can tell a run that was deleted under it (its
+// job was removed) from an error worth retrying.
 func finishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunStatus, exitCode int, output string) error {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE job_runs SET status = ?, exit_code = ?, output = ?, ended_at = ? WHERE id = ? AND status = ?`,
@@ -510,7 +512,7 @@ func finishRunTx(ctx context.Context, tx *sql.Tx, runID int64, status jobs.RunSt
 		var one int
 		err := tx.QueryRowContext(ctx, `SELECT 1 FROM job_runs WHERE id = ?`, runID).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return fmt.Errorf("%w: %w", ErrNotFound, jobs.ErrRunGone)
 		}
 		if err != nil {
 			return fmt.Errorf("finish run lookup: %w", err)

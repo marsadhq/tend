@@ -705,7 +705,7 @@ func TestFinishRunAndEmit(t *testing.T) {
 // the reaper has failed a run, a late FinishRun / FinishRunAndEmit from the
 // worker that was still executing it writes nothing (no status overwrite, no
 // second terminal event) and reports jobs.ErrRunNotRunning. An unknown run ID
-// is still ErrNotFound.
+// is still ErrNotFound, and jobs.ErrRunGone with it.
 func TestFinishRunLeavesTerminalRunAlone(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s store.Store) {
 		ctx := context.Background()
@@ -762,9 +762,22 @@ func TestFinishRunLeavesTerminalRunAlone(t *testing.T) {
 			t.Errorf("terminal events: %d run.failed, %d run.succeeded; want exactly one run.failed", failed, succeeded)
 		}
 
-		// A run that does not exist is still "not found", not "not running".
-		if err := s.FinishRun(ctx, runID+1000, jobs.StatusSucceeded, 0, "x"); !errors.Is(err, store.ErrNotFound) {
-			t.Errorf("FinishRun(unknown id): err = %v, want store.ErrNotFound", err)
+		// A run that does not exist is still "not found", not "not running". The
+		// runner knows that error as jobs.ErrRunGone and does not retry it.
+		gone := func(err error) bool {
+			return errors.Is(err, store.ErrNotFound) && errors.Is(err, jobs.ErrRunGone) && !errors.Is(err, jobs.ErrRunNotRunning)
+		}
+		if err := s.FinishRun(ctx, runID+1000, jobs.StatusSucceeded, 0, "x"); !gone(err) {
+			t.Errorf("FinishRun(unknown id): err = %v, want store.ErrNotFound and jobs.ErrRunGone", err)
+		}
+		_, err = s.FinishRunAndEmit(ctx, runID+1000, jobs.StatusSucceeded, 0, 1, "x", core.Event{
+			OrgID: orgID, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"status":"succeeded"}`,
+		})
+		if !gone(err) {
+			t.Errorf("FinishRunAndEmit(unknown id): err = %v, want store.ErrNotFound and jobs.ErrRunGone", err)
+		}
+		if evts, err := s.ListEvents(ctx, orgID, 10); err != nil || len(evts) != 1 {
+			t.Errorf("after finishing an unknown run: %d events (err %v), want still only the reaper's", len(evts), err)
 		}
 	})
 }
