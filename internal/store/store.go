@@ -193,6 +193,12 @@ type Store interface {
 	// (false, nil) when the guard rejected it (concurrent ping or stale state).
 	// Used by the watcher to close the watcher↔ping race.
 	SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error)
+	// SetHeartbeatStatusIfAndEmit makes the same guarded transition and, only
+	// when it fires, appends ev (enqueueing its deliveries) in the same
+	// transaction, so a heartbeat is never marked 'down' without its
+	// heartbeat.missed. (false, nil) when the guard rejected it; nothing is
+	// written then or on any error.
+	SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error)
 }
 
 // Compile-time assertion that *SQLiteStore implements Store.

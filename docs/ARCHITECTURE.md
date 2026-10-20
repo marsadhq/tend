@@ -235,10 +235,13 @@ the terminal run state and appends the terminal event in one transaction via
 `FinishRunAndEmit`. This closes the lost-event gap where `FinishRun` could commit
 but a separate `EmitEvent` then fail. (`run.started` is explicitly *not* terminal
 and is best-effort; a lost start event is non-critical because the terminal
-event is guaranteed.)
+event is guaranteed.) A heartbeat's transitions get the same treatment: the
+watcher marks a heartbeat `down` and records `heartbeat.missed` in one
+transaction (`SetHeartbeatStatusIfAndEmit`), so a failed write leaves the
+heartbeat `up` and the next check tries again instead of losing the alert.
 
 **Notifications are a durable queue.** Every event insert (`EmitEvent`,
-`FinishRunAndEmit`, `ReapStaleRun`) also inserts, in the same transaction, one
+`FinishRunAndEmit`, `ReapStaleRun`, `SetHeartbeatStatusIfAndEmit`) also inserts, in the same transaction, one
 `pending` row in the `deliveries` table for each channel that has an enabled
 rule matching the event: org-wide rules plus rules scoped to the event's job.
 Because the delivery commits atomically with the event, neither a crash nor a
