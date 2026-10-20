@@ -1373,7 +1373,9 @@ func cmdHeartbeatPingURL(ctx context.Context, st store.Store, orgID int64, args 
 	return nil
 }
 
-// cmdHeartbeatShow prints a heartbeat's details, including the recoverable ping URL.
+// cmdHeartbeatShow prints a heartbeat's details, including the recoverable
+// ping URL, the run being timed, the last ping and the last result (success or
+// failure) with the tail of what it logged.
 func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	if len(args) != 1 {
 		return fmt.Errorf("heartbeat show: usage: tend heartbeat show <name>")
@@ -1385,6 +1387,10 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 		}
 		return fmt.Errorf("heartbeat show: %w", err)
 	}
+	pings, err := st.ListHeartbeatPings(ctx, orgID, hb.ID, showPingScan)
+	if err != nil {
+		return fmt.Errorf("heartbeat show: %w", err)
+	}
 	lastSeen := "never"
 	if !hb.LastSeenAt.IsZero() {
 		lastSeen = hb.LastSeenAt.UTC().Format(time.RFC3339)
@@ -1394,25 +1400,74 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 	fmt.Fprintf(stdout, "period:    %ds\n", hb.PeriodSeconds)
 	fmt.Fprintf(stdout, "grace:     %ds\n", hb.GraceSeconds)
 	fmt.Fprintf(stdout, "last seen: %s\n", lastSeen)
+	if !hb.StartedAt.IsZero() {
+		running := "started " + hb.StartedAt.UTC().Format(time.RFC3339)
+		if hb.StartedRID != "" {
+			running += " (rid " + hb.StartedRID + ")"
+		}
+		fmt.Fprintf(stdout, "running:   %s\n", running)
+	}
+	var result *heartbeat.Ping
+	for i, p := range pings {
+		if p.Kind == heartbeat.PingSuccess || p.Kind == heartbeat.PingFail {
+			result = &pings[i]
+			break
+		}
+	}
+	if len(pings) > 0 {
+		fmt.Fprintf(stdout, "last ping: %s at %s\n", pingSummary(pings[0]), pings[0].CreatedAt.UTC().Format(time.RFC3339))
+	}
+	if result != nil {
+		line := pingSummary(*result) + " at " + result.CreatedAt.UTC().Format(time.RFC3339)
+		if result.Duration != nil {
+			line += ", took " + result.Duration.String()
+		}
+		fmt.Fprintf(stdout, "result:    %s\n", line)
+	}
 	fmt.Fprintf(stdout, "ping url:  %s/ping/%s\n", baseURL(), hb.Token)
+	if result != nil {
+		if tail := heartbeat.OutputTail(result.Body); tail != "" {
+			fmt.Fprintln(stdout, "output:")
+			for _, l := range strings.Split(tail, "\n") {
+				fmt.Fprintf(stdout, "  %s\n", l)
+			}
+		}
+	}
 	return nil
 }
 
-// cmdHeartbeatHistory prints a heartbeat's missed/recovered transitions, newest
-// first. Usage: tend heartbeat history <name> [-limit N].
+// showPingScan is how many of the newest pings `heartbeat show` looks through
+// for the last result.
+const showPingScan = 50
+
+// pingSummary is a ping's kind with its exit status, e.g. "fail (exit 3)".
+func pingSummary(p heartbeat.Ping) string {
+	if p.ExitStatus != nil {
+		return fmt.Sprintf("%s (exit %d)", p.Kind, *p.ExitStatus)
+	}
+	return p.Kind
+}
+
+// cmdHeartbeatHistory prints a heartbeat's history, newest first: its pings
+// (kind, exit status, run duration, rid, body size) interleaved with its
+// transitions (missed, recovered, removed, with their alert subject). -body
+// prints each ping's logged body under it. Usage: tend heartbeat history
+// <name> [-limit N] [-body].
 func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("heartbeat history: usage: tend heartbeat history <name> [-limit N]")
+		return fmt.Errorf("heartbeat history: usage: tend heartbeat history <name> [-limit N] [-body]")
 	}
 	name := args[0]
 	fs := flag.NewFlagSet("heartbeat history", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	limit := fs.Int("limit", 20, "maximum number of transitions to show")
+	limit := fs.Int("limit", 20, "maximum number of entries (pings and transitions) to show")
+	withBody := fs.Bool("body", false, "print each ping's logged request body")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
 	// Resolve the name first so an unknown heartbeat is a clear error.
-	if _, err := st.GetHeartbeatByName(ctx, orgID, name); err != nil {
+	hb, err := st.GetHeartbeatByName(ctx, orgID, name)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("heartbeat history: no heartbeat named %q", name)
 		}
@@ -1422,12 +1477,48 @@ func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args 
 	if err != nil {
 		return fmt.Errorf("heartbeat history: %w", err)
 	}
-	if len(evs) == 0 {
-		fmt.Fprintf(stdout, "(no transitions recorded for %q)\n", name)
+	pings, err := st.ListHeartbeatPings(ctx, orgID, hb.ID, *limit)
+	if err != nil {
+		return fmt.Errorf("heartbeat history: %w", err)
+	}
+	if len(evs) == 0 && len(pings) == 0 {
+		fmt.Fprintf(stdout, "(no pings or transitions recorded for %q)\n", name)
 		return nil
 	}
-	for _, e := range evs {
-		fmt.Fprintf(stdout, "%s  %s\n", e.CreatedAt.UTC().Format(time.RFC3339), e.Type)
+	// Merge newest first. A transition is listed above the ping that made
+	// it, which carries the same time.
+	for n := 0; n < *limit && (len(evs) > 0 || len(pings) > 0); n++ {
+		if len(evs) > 0 && (len(pings) == 0 || !evs[0].CreatedAt.Before(pings[0].CreatedAt)) {
+			e := evs[0]
+			evs = evs[1:]
+			subject, _ := notify.Render(e)
+			fmt.Fprintf(stdout, "%s  %s  %s\n", e.CreatedAt.UTC().Format(time.RFC3339), e.Type, subject)
+			continue
+		}
+		p := pings[0]
+		pings = pings[1:]
+		parts := []string{fmt.Sprintf("%-7s", p.Kind)}
+		if p.ExitStatus != nil {
+			parts = append(parts, fmt.Sprintf("exit %d", *p.ExitStatus))
+		}
+		if p.Duration != nil {
+			parts = append(parts, "took "+p.Duration.String())
+		}
+		if rid := p.RID; rid != "" {
+			if len(rid) > 8 {
+				rid = rid[:8] // a UUID's first group tells runs apart at a glance
+			}
+			parts = append(parts, "rid "+rid)
+		}
+		if p.Body != "" {
+			parts = append(parts, fmt.Sprintf("%d B", len(p.Body)))
+		}
+		fmt.Fprintf(stdout, "%s  %s\n", p.CreatedAt.UTC().Format(time.RFC3339), strings.TrimRight(strings.Join(parts, "  "), " "))
+		if *withBody && p.Body != "" {
+			for _, l := range strings.Split(strings.TrimRight(p.Body, "\n"), "\n") {
+				fmt.Fprintf(stdout, "    %s\n", l)
+			}
+		}
 	}
 	return nil
 }
@@ -1702,6 +1793,8 @@ Commands:
   rule list           list notification rules
   heartbeat add ...   create/update a heartbeat (prints the ping URL)
   heartbeat list      list heartbeats
+  heartbeat show <n>  show a heartbeat: status, run, last result and output
+  heartbeat history <n> [-body]  its pings and transitions, newest first
   doctor              diagnose config/DB/connectivity
   user add [flags]    create a user (admin) - password read from stdin
   token create [flags]  create an API token (printed once)

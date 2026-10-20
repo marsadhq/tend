@@ -194,6 +194,11 @@ func tendEvent(ev core.Event) *event.TendEvent {
 	}
 }
 
+// Render returns the subject and body a notification of ev carries, for
+// showing an event elsewhere (the CLI's heartbeat history) the way an alert
+// shows it.
+func Render(ev core.Event) (subject, body string) { return render(ev) }
+
 // render returns the subject and body for ev, tailored per event type and
 // robust to odd payloads (no panic).
 func render(ev core.Event) (string, string) {
