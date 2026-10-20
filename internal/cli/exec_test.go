@@ -102,3 +102,17 @@ func TestExecUsageErrors(t *testing.T) {
 		t.Errorf("exec -h printed no usage: %q", stdout.String()+stderr.String())
 	}
 }
+
+// TestExecUsageHidesThePingURL: the ping URL holds the token, so the one in
+// TEND_PING_URL is never echoed by the usage text a bad flag prints.
+func TestExecUsageHidesThePingURL(t *testing.T) {
+	t.Setenv("TEND_PING_URL", "https://tend.example/ping/secret-token-in-env")
+	noDB := config.Config{Driver: "sqlite"}
+	for _, args := range [][]string{{"exec", "-h"}, {"exec", "--no-such-flag", "true"}} {
+		var stdout, stderr bytes.Buffer
+		_ = cli.Run(context.Background(), noDB, args, nil, &stdout, &stderr)
+		if out := stdout.String() + stderr.String(); strings.Contains(out, "secret-token-in-env") {
+			t.Errorf("%v printed the ping URL from the environment:\n%s", args, out)
+		}
+	}
+}
