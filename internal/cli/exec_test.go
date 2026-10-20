@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marsadhq/tend/internal/cli"
 	"github.com/marsadhq/tend/internal/config"
@@ -114,5 +116,29 @@ func TestExecUsageHidesThePingURL(t *testing.T) {
 		if out := stdout.String() + stderr.String(); strings.Contains(out, "secret-token-in-env") {
 			t.Errorf("%v printed the ping URL from the environment:\n%s", args, out)
 		}
+	}
+}
+
+// TestExecBudgetsAreFlags: --start-budget and --finish-budget bound how long
+// an unreachable Tend can hold the job.
+func TestExecBudgetsAreFlags(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := "http://" + l.Addr().String() + "/ping/tok"
+	l.Close()
+	noDB := config.Config{Driver: "sqlite"}
+	var stdout, stderr bytes.Buffer
+	begin := time.Now()
+	err = cli.Run(context.Background(), noDB, []string{"exec", "--ping-url", dead, "--start-budget", "500ms", "--finish-budget", "500ms", "--", "true"}, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("exec: %v (the command succeeded; an unreachable Tend must not fail it)", err)
+	}
+	if d := time.Since(begin); d > 2*time.Second {
+		t.Fatalf("exec took %v with half-second budgets", d)
+	}
+	if !strings.Contains(stderr.String(), "budget spent") && !strings.Contains(stderr.String(), "giving up") {
+		t.Fatalf("no warning about the unreachable server:\n%s", stderr.String())
 	}
 }

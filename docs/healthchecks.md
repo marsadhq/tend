@@ -174,9 +174,14 @@ completion ping goes out either way.
 
 A ping that fails is retried on network errors, 5xx and 429 (`--retries`,
 default 5; backoff from 1 second, doubling to 30, or the server's
-`Retry-After` up to a minute; `--timeout` per attempt, default 10 seconds),
-then given up with a warning that names only the server's host. The command
-runs and exits the same way whether or not its pings got through.
+`Retry-After` up to a minute; `--timeout` per attempt, default 5 seconds;
+connections are given up after 2 seconds), within a budget: the start ping
+may hold the command back at most 5 seconds (`--start-budget`) and the
+completion ping takes at most 20 (`--finish-budget`), every attempt and wait
+included. Then it is given up with a warning that names only the server's
+host. The command runs and exits the same way whether or not its pings got
+through, so a Tend that is down or unreachable delays a job by seconds, not
+minutes.
 
 | Flag | Meaning |
 |---|---|
@@ -184,7 +189,7 @@ runs and exits the same way whether or not its pings got through.
 | `--token <token>` | Instead of `--ping-url`: `<base-url>/ping/<token>`, with `--base-url` or `$TEND_BASE_URL`. |
 | `--no-start` | Skip `/start`. |
 | `--body-limit <n>` | Bytes of output tail to send (default 10000; 0 sends none). |
-| `--retries <n>`, `--timeout <d>` | See above. |
+| `--retries <n>`, `--timeout <d>`, `--start-budget <d>`, `--finish-budget <d>` | See above. |
 
 `tend exec` needs no database and no `TEND_DB`; any host that can reach the
 ping URL can run it, against Tend or against a Healthchecks-compatible
