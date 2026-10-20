@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/marsadhq/kit/event"
 	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
+	"github.com/marsadhq/tend/internal/heartbeat"
 )
 
 // alertableTypes lists, in the order they are documented, the event types
@@ -232,7 +234,7 @@ func render(ev core.Event) (string, string) {
 		return subject, fmt.Sprintf("status=%s exit_code=%d; the previous run had not succeeded", status, p.ExitCode)
 
 	case "heartbeat.missed":
-		return "Heartbeat missed: " + ev.Payload, ev.Payload
+		return renderMissed(ev)
 
 	case "heartbeat.recovered":
 		return "Heartbeat recovered: " + ev.Payload, ev.Payload
@@ -261,5 +263,33 @@ func render(ev core.Event) (string, string) {
 
 	default:
 		return ev.Type, ev.Payload
+	}
+}
+
+// renderMissed is the subject and body of a heartbeat.missed. A plain miss
+// (no detail, or one this version does not know) reads as it always has; one
+// caused by a failure ping or an overrunning run says so, and a failure's
+// body ends with the tail of what the ping logged.
+func renderMissed(ev core.Event) (string, string) {
+	name := ev.Payload
+	d, ok := heartbeat.ParseMissDetail(ev.Detail)
+	switch {
+	case ok && d.Reason == heartbeat.ReasonFailed:
+		subject, body := "Heartbeat failed: "+name, name+" reported a failure"
+		if d.ExitStatus != nil {
+			subject += fmt.Sprintf(" (exit %d)", *d.ExitStatus)
+			body += fmt.Sprintf(" (exit status %d)", *d.ExitStatus)
+		}
+		if d.Output != "" {
+			body += "\n\nLast output:\n" + d.Output
+		}
+		return subject, body
+	case ok && d.Reason == heartbeat.ReasonOverran:
+		grace := time.Duration(d.GraceSeconds) * time.Second
+		return "Heartbeat missed: " + name + " (run did not finish)",
+			fmt.Sprintf("%s started a run at %s that did not finish within its grace of %s",
+				name, d.StartedAt.UTC().Format(time.RFC3339), grace)
+	default:
+		return "Heartbeat missed: " + name, name
 	}
 }
