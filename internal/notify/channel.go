@@ -1,9 +1,23 @@
+// Package notify is Tend's notification domain: which events are alertable and
+// how each one is rendered, the channels and rules that route them, the
+// deliveries the store queues, and the wiring of the delivery worker over
+// them. The providers that send to a destination (webhook, Slack, Discord,
+// SMTP, Telegram, ntfy, Pushover), BuildProvider and the durable Worker itself
+// are github.com/marsadhq/kit/notify; this package implements kit's Queue over
+// Tend's deliveries and hands the worker Tend's rendered messages.
+//
+// Layering: notify depends only on core and kit (+ stdlib). It MUST NOT import
+// store or jobs. The store package imports notify (for notify.Channel), and
+// the channel persistence helpers below talk to the store through the
+// consumer-side ChannelStore interface, never by importing store - so there is
+// no cycle.
 package notify
 
 import (
 	"context"
 	"time"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 )
 
@@ -15,7 +29,7 @@ type Channel struct {
 	ID        int64
 	OrgID     int64
 	Name      string
-	Kind      ChannelType
+	Kind      kitnotify.ChannelType // stored in notification_channels.kind
 	CreatedAt time.Time
 }
 

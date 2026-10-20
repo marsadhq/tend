@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/marsadhq/kit/event"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 )
 
@@ -77,10 +79,34 @@ func EventJobID(ev core.Event) int64 {
 	return p.JobID
 }
 
-// messageFor renders a Subject/Body for ev, tailored per event type and robust
-// to odd payloads (no panic). The originating event is always carried on
-// Message.Event for providers that want structured access.
-func messageFor(ev core.Event) Message {
+// messageFor renders the Message for ev: a subject and body tailored per event
+// type, and the webhook body Tend has always posted (event.TendWebhook: the
+// subject, the body and the originating event under "event").
+func messageFor(ev core.Event) kitnotify.Message {
+	subject, body := render(ev)
+	return kitnotify.Message{
+		Subject: subject,
+		Body:    body,
+		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev)},
+	}
+}
+
+// tendEvent is ev as the webhook body carries it.
+func tendEvent(ev core.Event) *event.TendEvent {
+	return &event.TendEvent{
+		ID:        ev.ID,
+		OrgID:     ev.OrgID,
+		Type:      ev.Type,
+		Source:    ev.Source,
+		Payload:   ev.Payload,
+		DedupKey:  ev.DedupKey,
+		CreatedAt: ev.CreatedAt,
+	}
+}
+
+// render returns the subject and body for ev, tailored per event type and
+// robust to odd payloads (no panic).
+func render(ev core.Event) (string, string) {
 	switch ev.Type {
 	case "run.failed":
 		var p struct {
@@ -98,11 +124,7 @@ func messageFor(ev core.Event) Message {
 		if status == "" {
 			status = "failed"
 		}
-		return Message{
-			Subject: subject,
-			Body:    fmt.Sprintf("status=%s exit_code=%d", status, p.ExitCode),
-			Event:   ev,
-		}
+		return subject, fmt.Sprintf("status=%s exit_code=%d", status, p.ExitCode)
 
 	case "run.recovered":
 		var p struct {
@@ -119,25 +141,13 @@ func messageFor(ev core.Event) Message {
 		if status == "" {
 			status = "succeeded"
 		}
-		return Message{
-			Subject: subject,
-			Body:    fmt.Sprintf("status=%s exit_code=%d; the previous run had not succeeded", status, p.ExitCode),
-			Event:   ev,
-		}
+		return subject, fmt.Sprintf("status=%s exit_code=%d; the previous run had not succeeded", status, p.ExitCode)
 
 	case "heartbeat.missed":
-		return Message{
-			Subject: "Heartbeat missed: " + ev.Payload,
-			Body:    ev.Payload,
-			Event:   ev,
-		}
+		return "Heartbeat missed: " + ev.Payload, ev.Payload
 
 	case "heartbeat.recovered":
-		return Message{
-			Subject: "Heartbeat recovered: " + ev.Payload,
-			Body:    ev.Payload,
-			Event:   ev,
-		}
+		return "Heartbeat recovered: " + ev.Payload, ev.Payload
 
 	case "job.removed":
 		var p struct {
@@ -149,31 +159,19 @@ func messageFor(ev core.Event) Message {
 		if p.JobName != "" {
 			subject = "Job removed: " + p.JobName
 		}
-		return Message{
-			Subject: subject,
-			Body:    "the job was deleted; it will not run or alert again",
-			Event:   ev,
-		}
+		return subject, "the job was deleted; it will not run or alert again"
 
 	case "heartbeat.removed":
-		return Message{
-			Subject: "Heartbeat removed: " + ev.Payload,
-			Body:    "the heartbeat was deleted; it is no longer monitored",
-			Event:   ev,
-		}
+		return "Heartbeat removed: " + ev.Payload, "the heartbeat was deleted; it is no longer monitored"
 
 	case EventNotificationFailed:
 		subject, what := "Alert delivery failed", "a notification"
 		if ev.Payload != "" {
 			subject, what = subject+": "+ev.Payload, "a "+ev.Payload+" notification"
 		}
-		return Message{
-			Subject: subject,
-			Body:    what + " could not be delivered and was given up after retrying; that alert was not received",
-			Event:   ev,
-		}
+		return subject, what + " could not be delivered and was given up after retrying; that alert was not received"
 
 	default:
-		return Message{Subject: ev.Type, Body: ev.Payload, Event: ev}
+		return ev.Type, ev.Payload
 	}
 }

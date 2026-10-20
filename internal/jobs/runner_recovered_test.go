@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"
@@ -33,7 +34,7 @@ func TestRunnerRecordsRunRecovered(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateJob: %v", err)
 		}
-		chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: "ops", Kind: notify.Webhook}, "blob")
+		chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: "ops", Kind: kitnotify.Webhook}, "blob")
 		if err != nil {
 			t.Fatalf("CreateChannel: %v", err)
 		}
@@ -101,7 +102,7 @@ func TestRunnerRecordsRunRecovered(t *testing.T) {
 			t.Errorf("payload = %+v, want run %d of job %d (flaky), succeeded, exit 0", p, recoveredRun, jobID)
 		}
 
-		ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, notify.DefaultHold, 10)
+		ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, kitnotify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/notify"
@@ -17,7 +18,7 @@ import (
 // routing evType to it, and returns the channel ID.
 func seedAlertChannel(t *testing.T, ctx context.Context, s store.Store, orgID int64, name string, evTypes ...string) int64 {
 	t.Helper()
-	chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: name, Kind: notify.Webhook}, "blob")
+	chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: name, Kind: kitnotify.Webhook}, "blob")
 	if err != nil {
 		t.Fatalf("CreateChannel %q: %v", name, err)
 	}

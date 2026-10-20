@@ -1,8 +1,10 @@
 package notify
 
-// These tests are in package notify (internal) so they can set the worker's
-// unexported fields (now, build) directly, keeping backoff/give-up tests fast
-// without touching the network or a real database.
+// The worker loop itself is kit/notify's and is tested there. These tests
+// drive it through Tend's wiring (NewWorker: the queue over WorkerStore, the
+// send step, the log attributes) with a fake clock, so the backoff, give-up,
+// loop-guard and log behaviour Tend has always had stays pinned, without
+// touching the network or a real database.
 
 import (
 	"context"
@@ -13,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsadhq/kit/clock"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
 )
@@ -79,10 +83,10 @@ func (f *fakeWorkerStore) GetChannel(_ context.Context, _, _ int64) (Channel, st
 type fakeProvider struct {
 	failN int
 	calls int
-	last  Message
+	last  kitnotify.Message
 }
 
-func (p *fakeProvider) Send(_ context.Context, m Message) error {
+func (p *fakeProvider) Send(_ context.Context, m kitnotify.Message) error {
 	p.calls++
 	p.last = m
 	if p.calls <= p.failN {
@@ -109,7 +113,7 @@ func testBox(t *testing.T) *secrets.Box {
 // newTestWorker wires a worker over the fake store with a build func that
 // always returns p. The box encrypts a dummy config so GetChannel + Decrypt
 // round-trips work.
-func newTestWorker(t *testing.T, fs *fakeWorkerStore, p Provider) *Worker {
+func newTestWorker(t *testing.T, fs *fakeWorkerStore, p kitnotify.Provider) *Worker {
 	t.Helper()
 	box := testBox(t)
 	blob, err := box.Encrypt([]byte(`{"url":"https://example/x"}`))
@@ -117,7 +121,7 @@ func newTestWorker(t *testing.T, fs *fakeWorkerStore, p Provider) *Worker {
 		t.Fatalf("encrypt blob: %v", err)
 	}
 	fs.blob = blob
-	w := NewWorker(fs, box, func(ChannelType, []byte) (Provider, error) { return p, nil }, discardLogger())
+	w := NewWorker(fs, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil }, discardLogger())
 	return w
 }
 
@@ -158,7 +162,7 @@ func TestWorkerReschedulesWithCappedBackoff(t *testing.T) {
 	fs := &fakeWorkerStore{due: []Delivery{due(1, "run.failed", `{"job_name":"x"}`, now)}}
 	p := &fakeProvider{failN: 1000}
 	w := newTestWorker(t, fs, p)
-	w.now = func() time.Time { return now }
+	w.Clock = clock.NewFake(now)
 
 	if _, err := w.DrainOnce(context.Background()); err != nil {
 		t.Fatalf("DrainOnce: %v", err)
@@ -194,7 +198,7 @@ func TestWorkerGivesUpAfterMaxAgeAndEmitsNotificationFailed(t *testing.T) {
 	fs := &fakeWorkerStore{due: []Delivery{due(1, "heartbeat.missed", "db-backup", old)}}
 	p := &fakeProvider{failN: 1000}
 	w := newTestWorker(t, fs, p)
-	w.now = func() time.Time { return now }
+	w.Clock = clock.NewFake(now)
 
 	if _, err := w.DrainOnce(context.Background()); err != nil {
 		t.Fatalf("DrainOnce: %v", err)
@@ -221,7 +225,7 @@ type cancelingProvider struct {
 	calls  int
 }
 
-func (p *cancelingProvider) Send(ctx context.Context, _ Message) error {
+func (p *cancelingProvider) Send(ctx context.Context, _ kitnotify.Message) error {
 	p.calls++
 	p.cancel()
 	return ctx.Err()
@@ -253,7 +257,7 @@ func TestWorkerShutdownIsNotAFailure(t *testing.T) {
 		}}
 		p := &cancelingProvider{cancel: cancel}
 		w := newTestWorker(t, fs, p)
-		w.now = func() time.Time { return now }
+		w.Clock = clock.NewFake(now)
 
 		n, err := w.DrainOnce(ctx)
 		if err != nil || n != 0 {
@@ -272,7 +276,7 @@ func TestWorkerShutdownIsNotAFailure(t *testing.T) {
 		fs := &fakeWorkerStore{due: []Delivery{due(1, "heartbeat.missed", "db-backup", old)}}
 		p := &fakeProvider{failN: 1000}
 		w := newTestWorker(t, fs, p)
-		w.now = func() time.Time { return now }
+		w.Clock = clock.NewFake(now)
 
 		n, err := w.DrainOnce(ctx)
 		if err != nil || n != 0 {
@@ -316,7 +320,7 @@ func TestWorkerNeverReportsAFailedFailureReport(t *testing.T) {
 	old := now.Add(-25 * time.Hour)
 	fs := &fakeWorkerStore{due: []Delivery{due(1, "notification.failed", "run.failed", old)}}
 	w := newTestWorker(t, fs, &fakeProvider{failN: 1000})
-	w.now = func() time.Time { return now }
+	w.Clock = clock.NewFake(now)
 
 	if _, err := w.DrainOnce(context.Background()); err != nil {
 		t.Fatalf("DrainOnce: %v", err)
@@ -338,5 +342,60 @@ func TestEventJobID(t *testing.T) {
 	}
 	if got := EventJobID(core.Event{}); got != 0 {
 		t.Errorf("empty payload: got %d want 0", got)
+	}
+}
+
+// rejectingProvider refuses every send for good, the way a receiver that
+// answers 400 to this notification does.
+type rejectingProvider struct{ calls int }
+
+func (p *rejectingProvider) Send(context.Context, kitnotify.Message) error {
+	p.calls++
+	return kitnotify.Permanent(errors.New("webhook POST ward.example: status 400"))
+}
+
+// TestWorkerGivesUpARejectedDeliveryAtOnce: a delivery refused for good is
+// finalized on its first attempt, long before MaxAge, with notification.failed
+// recorded; it is not rescheduled.
+func TestWorkerGivesUpARejectedDeliveryAtOnce(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	fs := &fakeWorkerStore{due: []Delivery{due(1, "run.failed", `{"job_id":1}`, now)}}
+	p := &rejectingProvider{}
+	w := newTestWorker(t, fs, p)
+	w.Clock = clock.NewFake(now)
+
+	if _, err := w.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if p.calls != 1 {
+		t.Errorf("sends = %d, want 1", p.calls)
+	}
+	if len(fs.failed) != 1 || fs.failed[0] != 1 {
+		t.Fatalf("failed deliveries = %v, want [1]", fs.failed)
+	}
+	if len(fs.emitted) != 1 || fs.emitted[0].Type != "notification.failed" || fs.emitted[0].Payload != "run.failed" {
+		t.Fatalf("emitted = %+v, want one notification.failed for run.failed", fs.emitted)
+	}
+	if fs.emitted[0].Source != "notify" || fs.emitted[0].OrgID != 1 {
+		t.Errorf("notification.failed = %+v, want source notify in org 1", fs.emitted[0])
+	}
+	if len(fs.rescheduled) != 0 {
+		t.Errorf("a rejected delivery was rescheduled: %v", fs.rescheduled)
+	}
+}
+
+// TestWorkerRejectedFailureReportIsNotReported keeps the loop guard for the
+// immediate give-up too.
+func TestWorkerRejectedFailureReportIsNotReported(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	fs := &fakeWorkerStore{due: []Delivery{due(1, "notification.failed", "run.failed", now)}}
+	w := newTestWorker(t, fs, &rejectingProvider{})
+	w.Clock = clock.NewFake(now)
+
+	if _, err := w.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(fs.failed) != 1 || len(fs.emitted) != 0 {
+		t.Fatalf("failed=%v emitted=%+v, want the delivery failed and nothing recorded", fs.failed, fs.emitted)
 	}
 }

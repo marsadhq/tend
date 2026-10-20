@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/store"
@@ -21,7 +22,7 @@ func TestDeleteJobRecordsJobRemoved(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s store.Store) {
 		orgID, jobID := seedJob(t, ctx, s)
 		orgWide := seedAlertChannel(t, ctx, s, orgID, "org-wide", "job.removed")
-		scoped, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: "scoped", Kind: notify.Webhook}, "blob")
+		scoped, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: "scoped", Kind: kitnotify.Webhook}, "blob")
 		if err != nil {
 			t.Fatalf("CreateChannel: %v", err)
 		}

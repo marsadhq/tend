@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/notify"
@@ -24,17 +25,17 @@ type poisonProvider struct {
 	delivered []string
 }
 
-func (p *poisonProvider) Send(_ context.Context, m notify.Message) error {
+func (p *poisonProvider) Send(_ context.Context, m kitnotify.Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if m.Event.Type == p.poison {
+	if sentEventType(m) == p.poison {
 		err := errors.New("webhook POST ward.example: refused")
 		if p.permanent {
-			return notify.Permanent(err)
+			return kitnotify.Permanent(err)
 		}
 		return err
 	}
-	p.delivered = append(p.delivered, m.Event.Type)
+	p.delivered = append(p.delivered, sentEventType(m))
 	return nil
 }
 
@@ -46,14 +47,14 @@ func (p *poisonProvider) sent() []string {
 
 // poisonedChannel sets up one channel with a run.failed queued ahead of a
 // heartbeat.missed, and a worker whose provider is p.
-func poisonedChannel(t *testing.T, ctx context.Context, s store.Store, p notify.Provider) (orgID int64, w *notify.Worker) {
+func poisonedChannel(t *testing.T, ctx context.Context, s store.Store, p kitnotify.Provider) (orgID int64, w *notify.Worker) {
 	t.Helper()
 	org, err := s.BootstrapDefaultOrg(ctx)
 	if err != nil {
 		t.Fatalf("BootstrapDefaultOrg: %v", err)
 	}
 	box := testBox(t)
-	chID, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: "ward", Kind: notify.Webhook}, []byte(`{"url":"https://ward.example/x"}`))
+	chID, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: "ward", Kind: kitnotify.Webhook}, []byte(`{"url":"https://ward.example/x"}`))
 	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
@@ -70,7 +71,7 @@ func poisonedChannel(t *testing.T, ctx context.Context, s store.Store, p notify.
 			t.Fatalf("EmitEvent: %v", err)
 		}
 	}
-	w = notify.NewWorker(s, box, func(notify.ChannelType, []byte) (notify.Provider, error) { return p, nil },
+	w = notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil },
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return org.ID, w
 }

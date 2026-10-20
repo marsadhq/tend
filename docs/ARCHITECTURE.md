@@ -63,7 +63,7 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/auth` | The identity types `Principal`, `User`, `APIToken`, `Membership`, and the `tend_` prefix of the API tokens Tend issues. |
-| `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP/Telegram), rules, the `Alertable` filter, and the `Worker` that drains the durable delivery queue. |
+| `internal/notify` | The notification domain: channels, rules, the `Alertable` filter, how each event is rendered, and the wiring of kit's delivery worker over the store's deliveries queue (`NewWorker`: the queue, the send step, the give-up that records `notification.failed`). |
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
 | `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, and how the security headers and the `/login` and `/ping` rate limits from `kit/httpx` are applied. |
@@ -80,6 +80,8 @@ Code the Marsad tools share comes from the
 | `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 | `kit/auth` | Cryptographic identity primitives: argon2id passwords, API token generation and hashing, signed session cookies, CSRF tokens. |
 | `kit/httpx` | The security-headers middleware (the CSP), the HTTP server with every connection phase bounded, and the keyed token-bucket rate limiter with its client-address keying. |
+| `kit/notify` | The `Provider` contract and `Message`, the providers (webhook, Slack, Discord, SMTP, Telegram), `BuildProvider` from a channel's config, permanent-error classification, and the durable delivery `Worker` with its leases, backoff and give-up. |
+| `kit/event` | `TendWebhook`, the body Tend's webhook channel posts, with the golden fixtures that pin it byte for byte. |
 | `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
 ---
@@ -288,20 +290,21 @@ same channel produce a single delivery.
 `heartbeat.removed`, `notification.failed`; see `notify.Alertable`) ever
 enqueues deliveries, so emitters can record `run.started` and `run.succeeded`
 freely. `notification.failed` is alertable so that a channel that stopped
-working can be reported through another one. The loop guard is in the worker:
-when the delivery it gives up on is itself a `notification.failed`, it marks it
+working can be reported through another one. The loop guard is in the worker's
+give-up (`GiveUp` on Tend's queue): when the delivery it gives up on is itself a `notification.failed`, it marks it
 failed and records nothing further, so a broken channel cannot start a chain of
 failure reports. A given-up delivery and its `notification.failed` are written
 in one transaction (`FailDeliveryAndEmit`).
 
-**`notify.Worker` drains the queue.** It claims due rows (`ClaimDueDeliveries`
+**`notify.Worker` drains the queue.** It is kit's `notify.Worker`, driving
+Tend's deliveries through the `kit/notify` `Queue` interface. It claims due rows (`ClaimDueDeliveries`
 increments the attempt count and pushes `next_attempt_at` out by a one-minute
 lease, so a claim held by a crashed worker simply becomes due again), decrypts
 the channel config, builds the provider, and sends. Success marks the row
 `delivered`. Failure reschedules it with exponential backoff (1 second,
 doubling, capped at 5 minutes). Once a delivery has been failing for 24 hours it
 is marked `failed` and `notification.failed` is recorded, so a dropped alert is
-never silent. A failure the provider marks permanent (`notify.Permanent`: an
+never silent. A failure the provider marks permanent (`kitnotify.Permanent`: an
 HTTP 4xx other than 408 and 429, an SMTP 5xx reply) is given up the same way on
 the spot, since retrying cannot change the answer. Delivery is at-least-once: a send that succeeded but could not be
 marked delivered is repeated after the lease.
@@ -543,7 +546,8 @@ These limits are constants in the code, not configuration.
 - The persistence seam and parity conventions: `internal/store/store.go`, then
   `internal/store/sqlite.go` and `internal/store/postgres.go`.
 - The execution engine: `internal/jobs/runner.go` and `internal/jobs/executor.go`.
-- The notification path: `internal/notify/worker.go` (delivery and retries),
+- The notification path: `internal/notify/worker.go` (the queue and send step
+  kit's worker drives; its retries are in `kit/notify`),
   `internal/notify/message.go` (what is alertable, how messages are rendered),
   and `enqueueDeliveriesTx` in `internal/store/sqlite.go` (the enqueue side).
 - The auth/security surface: `internal/httpserver/auth.go` (over the primitives

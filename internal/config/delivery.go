@@ -14,7 +14,7 @@ import (
 const EnvDeliveryHoldMinutes = "TEND_DELIVERY_HOLD_MINUTES"
 
 // DefaultDeliveryHoldMinutes is the hold when the variable is unset. It
-// matches notify.DefaultHold.
+// matches kit/notify.DefaultHold.
 const DefaultDeliveryHoldMinutes = 15
 
 // maxDeliveryHoldMinutes is a day: a delivery is given up after that anyway.

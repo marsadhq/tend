@@ -11,6 +11,7 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
@@ -891,7 +892,7 @@ func scanChannel(sc interface{ Scan(...any) error }) (notify.Channel, string, er
 	if err := sc.Scan(&ch.ID, &ch.OrgID, &ch.Name, &kind, &config, &created); err != nil {
 		return notify.Channel{}, "", err
 	}
-	ch.Kind = notify.ChannelType(kind)
+	ch.Kind = kitnotify.ChannelType(kind)
 	var err error
 	if ch.CreatedAt, err = parseTime(created); err != nil {
 		return notify.Channel{}, "", err

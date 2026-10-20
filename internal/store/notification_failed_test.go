@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"testing"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/notify"
@@ -17,7 +18,7 @@ import (
 // failingProvider fails every send.
 type failingProvider struct{}
 
-func (failingProvider) Send(context.Context, notify.Message) error {
+func (failingProvider) Send(context.Context, kitnotify.Message) error {
 	return errors.New("destination down")
 }
 
@@ -46,7 +47,7 @@ func TestGivenUpDeliveryIsReportedOnce(t *testing.T) {
 		box := testBox(t)
 		mkChannel := func(name string, events ...string) int64 {
 			t.Helper()
-			id, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: name, Kind: notify.Webhook}, []byte(`{"url":"https://example.invalid/x"}`))
+			id, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: name, Kind: kitnotify.Webhook}, []byte(`{"url":"https://example.invalid/x"}`))
 			if err != nil {
 				t.Fatalf("CreateChannel %s: %v", name, err)
 			}
@@ -64,7 +65,7 @@ func TestGivenUpDeliveryIsReportedOnce(t *testing.T) {
 			t.Fatalf("EmitEvent: %v", err)
 		}
 
-		w := notify.NewWorker(s, box, func(notify.ChannelType, []byte) (notify.Provider, error) { return failingProvider{}, nil },
+		w := notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return failingProvider{}, nil },
 			slog.New(slog.NewTextHandler(io.Discard, nil)))
 		w.MaxAge = 0 // every failed attempt is final
 		if _, err := w.DrainOnce(ctx); err != nil {

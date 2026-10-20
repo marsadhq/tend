@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsadhq/kit/event"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/notify"
@@ -43,7 +45,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		emit(heartbeat.RecoveredEvent(org.ID, "nightly"))                                            // x, second
 
 		now := time.Now().Add(time.Second)
-		first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, notify.DefaultHold, 10)
+		first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, kitnotify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -58,12 +60,12 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		if err := s.MarkDeliveryDelivered(ctx, first[1].ID); err != nil {
 			t.Fatalf("MarkDeliveryDelivered: %v", err)
 		}
-		if got, err := s.ClaimDueDeliveries(ctx, now, time.Minute, notify.DefaultHold, 10); err != nil || len(got) != 0 {
+		if got, err := s.ClaimDueDeliveries(ctx, now, time.Minute, kitnotify.DefaultHold, 10); err != nil || len(got) != 0 {
 			t.Fatalf("claim while x's head backs off = %v (err %v), want nothing: recovered must wait for missed", claimed(got), err)
 		}
 
 		// Its retry comes due: the missed delivery goes again, still alone.
-		retry, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
+		retry, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, kitnotify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -75,7 +77,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		}
 
 		// Only now may the recovered delivery go.
-		next, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
+		next, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, kitnotify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -88,7 +90,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		if err := s.FailDelivery(ctx, next[0].ID); err != nil {
 			t.Fatalf("FailDelivery: %v", err)
 		}
-		after, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
+		after, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, kitnotify.DefaultHold, 10)
 		if err != nil || len(after) != 1 || after[0].Event.Payload != "weekly" {
 			t.Fatalf("claim after a give-up = %v (err %v), want the weekly miss", claimed(after), err)
 		}
@@ -104,6 +106,15 @@ func claimed(ds []notify.Delivery) []string {
 	return out
 }
 
+// sentEventType is the type of the Tend event m reports, as its webhook body
+// carries it.
+func sentEventType(m kitnotify.Message) string {
+	if w, ok := m.Webhook.(event.TendWebhook); ok && w.Event != nil {
+		return w.Event.Type
+	}
+	return ""
+}
+
 // orderedProvider fails its first send and records the type of every event it
 // is asked to send, successful or not.
 type orderedProvider struct {
@@ -112,10 +123,10 @@ type orderedProvider struct {
 	fails int
 }
 
-func (p *orderedProvider) Send(_ context.Context, m notify.Message) error {
+func (p *orderedProvider) Send(_ context.Context, m kitnotify.Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.sends = append(p.sends, m.Event.Type)
+	p.sends = append(p.sends, sentEventType(m))
 	if p.fails > 0 {
 		p.fails--
 		return errDestinationDown
@@ -138,7 +149,7 @@ func TestWorkerDeliversAMissBeforeItsRecovery(t *testing.T) {
 			t.Fatalf("BootstrapDefaultOrg: %v", err)
 		}
 		box := testBox(t)
-		chID, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: "ops", Kind: notify.Webhook}, []byte(`{"url":"https://example.invalid/x"}`))
+		chID, err := notify.CreateChannel(ctx, s, box, notify.Channel{OrgID: org.ID, Name: "ops", Kind: kitnotify.Webhook}, []byte(`{"url":"https://example.invalid/x"}`))
 		if err != nil {
 			t.Fatalf("CreateChannel: %v", err)
 		}
@@ -154,7 +165,7 @@ func TestWorkerDeliversAMissBeforeItsRecovery(t *testing.T) {
 		}
 
 		p := &orderedProvider{fails: 1}
-		w := notify.NewWorker(s, box, func(notify.ChannelType, []byte) (notify.Provider, error) { return p, nil },
+		w := notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil },
 			slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, err := w.DrainOnce(ctx); err != nil {
 			t.Fatalf("DrainOnce: %v", err)
