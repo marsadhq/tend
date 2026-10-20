@@ -13,7 +13,7 @@
   <a href="https://goreportcard.com/report/github.com/marsadhq/tend"><img src="https://goreportcard.com/badge/github.com/marsadhq/tend" alt="Go Report Card"></a>
 </p>
 
-Tend is a self-hosted job runner with a web dashboard. It runs shell commands and HTTP calls on cron or interval schedules, records every run (history, captured output, exit codes), watches for missed heartbeats, and fires alerts to webhooks, Slack, Discord, email, Telegram, ntfy, and Pushover.
+Tend is a self-hosted job runner with a web dashboard. It runs shell commands and HTTP calls on cron or interval schedules, records every run (history, captured output, exit codes), watches for missed heartbeats, TLS certificates, domain registrations and dated secrets that are about to expire, rehearses restores of your backups, and fires alerts to webhooks, Slack, Discord, email, Telegram, ntfy, and Pushover.
 
 ![Tend jobs dashboard](docs/assets/dashboard-jobs.png)
 
@@ -23,9 +23,11 @@ Tend is a self-hosted job runner with a web dashboard. It runs shell commands an
 
 Most teams stitch this together from three or four moving parts: system cron to schedule, a hosted service like Healthchecks or Cronitor to watch for misses, and a separate notifier to page someone. Tend folds those concerns into a single program you run yourself:
 
-- **Scheduling**: shell or HTTP jobs on cron expressions, fixed intervals, or a one-off `run_at` time.
+- **Scheduling**: shell or HTTP jobs, probes and restore drills on cron expressions, fixed intervals, or a one-off `run_at` time.
 - **Run monitoring**: every execution is recorded with its status, exit code, timing, and captured output (up to 1 MiB per attempt), browsable in the dashboard or over the HTTP API.
 - **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, SMTP, Telegram, ntfy, or Pushover channels, globally or scoped to a single job.
+- **Expiry probes**: `tls` jobs check a certificate's days left, its chain and host name, and whether it is past the point its ACME client should have renewed it, which catches a renewal that stopped weeks before the certificate expires; `domain` jobs read a registration's expiry over RDAP; `expiry` jobs watch the date of an API token, a node key or a licence, given in the config or printed by a command. See [probes](docs/probes.md).
+- **Restore drills**: `drill` jobs restore a backup into a scratch directory on a schedule, run your checks on the result, time the restore against a target and always clean up, with recipes for SQLite, Postgres, restic and Borg. See [drills](docs/drills.md).
 - **Dead-man's-switch heartbeats**: give Tend a ping URL for any external job; if a ping doesn't arrive within its period plus grace, Tend alerts. The ping API is [Healthchecks'](#coming-from-healthchecksio) (`/start`, `/fail`, exit statuses, logged output), so existing scripts, borgmatic and runitor switch by changing one base URL, `tend exec` wraps any cron job, and `tend import healthchecks` brings a project's checks over with their UUIDs.
 
 It's a **single static, CGO-free binary**. SQLite is the default store (no database to stand up), with an optional Postgres backend for a managed or external database. **No Redis, no external dependencies.** Configure it imperatively with the CLI or declaratively with a YAML file you keep in version control.
@@ -201,14 +203,14 @@ tend sync jobs.yaml              # default: jobs absent from the file are DISABL
 tend sync -prune=false jobs.yaml # leave absent jobs untouched
 ```
 
-`sync` is idempotent: the file is the source of truth, so re-running it converges the store to match. The file is parsed and validated in full before anything is written, so a bad entry, such as an invalid cron expression, aborts the sync and names the offending job. For the full set of options (http jobs, every schedule type, secrets, notification channels, and heartbeats), see the commented [`jobs.example.yaml`](jobs.example.yaml).
+`sync` is idempotent: the file is the source of truth, so re-running it converges the store to match. The file is parsed and validated in full before anything is written, so a bad entry, such as an invalid cron expression, aborts the sync and names the offending job. For the full set of options (http jobs, probes and restore drills, every schedule type, secrets, notification channels, and heartbeats), see the commented [`jobs.example.yaml`](jobs.example.yaml).
 
 It prints a summary: `jobs(created=N updated=N disabled=N) channels=N rules=N heartbeats=N`.
 
 ```yaml
 jobs:
   - name: nightly-backup          # required; unique name
-    type: shell                   # shell | http
+    type: shell                   # shell | http | tls | domain | expiry | drill
     command: "restic backup /data" # required for shell jobs
     cron: "0 3 * * *"             # one of: cron, interval_seconds, run_at
     timeout_seconds: 1800
@@ -245,6 +247,25 @@ heartbeats:
     period_seconds: 86400         # expected ping interval
     grace_seconds: 3600           # alert after period + grace
 ```
+
+**Probes and drills.** Jobs of type `tls`, `domain`, `expiry` and `drill` take their settings as fields of the job entry, next to the schedule, timeout and retries every job has:
+
+```yaml
+  - name: web-cert
+    type: tls
+    host: example.com             # port 443; warn_days 14; renew_after_fraction 2/3
+    interval_seconds: 21600
+
+  - name: app-db-restore-drill
+    type: drill
+    restore: 'cp "$(ls -1t /backups/app-*.db | head -n 1)" "$TEND_SCRATCH/app.db"'
+    checks:
+      - test "$(sqlite3 "$TEND_SCRATCH/app.db" 'PRAGMA integrity_check')" = ok
+    max_duration_seconds: 300
+    cron: "30 4 * * 0"
+```
+
+Their settings and what makes them fail are in [docs/probes.md](docs/probes.md) and [docs/drills.md](docs/drills.md). A failing probe or drill records `run.failed` like any job, and the next good run `run.recovered`.
 
 **Prune behaviour.** By default (`-prune=true`) any job present in the store but **absent from the YAML** is **disabled** (not deleted); its history is preserved. To hard-delete a job use `tend job rm <name>`. Pass `-prune=false` to leave absent jobs untouched, useful when the file covers only a subset of jobs.
 
@@ -384,7 +405,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend sync [-prune] <file>` | Reconcile jobs/channels/rules/heartbeats from YAML. |
 | `tend version` | Print the binary version. |
 | `tend help` (or `-h`, `--help`) | Print the command list. Like `version`, it works without `TEND_DB`. |
-| `tend doctor` | Print the resolved driver, database, org, base URL, and resource counts (diagnose a CLI/server DB mismatch). |
+| `tend doctor` | Print the resolved driver, database, org, base URL, and resource counts (diagnose a CLI/server DB mismatch), the jobs by type, and a warning for a tls job whose `ca_file` cannot be read or a drill whose scratch directory cannot be made. |
 | `tend job list` | List all jobs. |
 | `tend job add [flags]` | Create a job (flags below). |
 | `tend job enable <name>` | Enable a job. |
@@ -411,7 +432,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend token list` | List API tokens (names and IDs; hash never shown). |
 | `tend token revoke -id <n>` | Revoke an API token by ID. |
 
-`tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive; a cron expression that does not parse is rejected and no job is created); `-timeout <seconds>` per attempt (default `0` = 30 minutes); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
+`tend job add` flags: `-name` (required); `-type shell|http|tls|domain|expiry|drill` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive; a cron expression that does not parse is rejected and no job is created); `-timeout <seconds>` per attempt (default `0` = 30 minutes); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; in effect for shell jobs, expiry commands and drill steps). For probes: `-warn-days <n>` (default 14, 30 for domain); tls: `-host` (required), `-port`, `-server-name`, `-starttls smtp|imap`, `-ca-file`, `-insecure-skip-verify`, `-renew-after-fraction` (default 2/3, `0` = off); domain: `-domain` (required), `-rdap-url`; expiry: `-expires-at <RFC3339 or YYYY-MM-DD>` or `-expiry-command`. For drills: `-restore` (required), `-check` (repeatable), `-cleanup`, `-scratch-dir`, `-max-duration <seconds>`. Settings that do not make sense are refused and no job is created, as by `tend sync`.
 
 `tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, `telegram`, `ntfy`, or `pushover`, with the config JSON shown in [Alerting](#alerting) on stdin. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a HEAD, GET or POST to it from any external job, with the [Healthchecks suffixes](#coming-from-healthchecksio) when the job has more to say. There is no `user list` or `user rm` in this release.
 
@@ -422,7 +443,7 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/jobs` | List jobs (`?limit=`, max 200). |
-| `GET` | `/api/jobs/{id}` | Get a job. |
+| `GET` | `/api/jobs/{id}` | Get a job; a probe or drill carries its settings as `spec`. |
 | `GET` | `/api/jobs/{id}/runs` | List runs for a job (`?limit=`, max 200). |
 | `GET` | `/api/runs/{id}` | Get a run (includes full output). |
 | `GET` | `/api/channels` | List channels (metadata only; no config/credentials). |
@@ -449,6 +470,7 @@ These are built in; only the retention windows are configurable.
 |------|----------|
 | Captured output | At most 1 MiB per attempt (stdout and stderr combined for shell jobs, the response body for HTTP jobs). The rest is discarded and the output ends with `... [output truncated at 1MiB]`; the cut never splits a UTF-8 character. The run's status and exit code are not affected. When a job retries, the run stores the output of its last attempt. Output is stored as text on either database: NUL bytes are dropped and bytes that are not valid UTF-8 are replaced with U+FFFD, before secret values are redacted. What is stored, the `HTTP <status>` line of an HTTP job included, never exceeds 1 MiB plus that marker. |
 | Ping bodies | The body of a POST to `/ping/...` is logged with the ping: at most its first 10 kB (`TEND_PING_BODY_KB`, 0 to 100; announced in the `Ping-Body-Limit` reply header), cleaned to text the same way as job output, with the ping's token or ping key replaced by `***`, and ending with `... [ping body truncated]` when cut. |
+| Probes and drills | An `expiry_command` must print one date, of at most 4 KiB, on stdout; its stderr is kept (16 KiB). An RDAP answer may be 1 MiB and the bootstrap file 4 MiB; the bootstrap file is fetched once a day. Each drill step keeps the first and the last 32 KiB of its output. A drill's cleanup runs however the restore ended and has one minute of its own, and its scratch directory is always removed. |
 | Job timeout | A job without a timeout (`timeout_seconds` / `-timeout` of 0) gets 30 minutes per attempt. A negative timeout is refused by `tend job add` and `tend sync`. |
 | Stale runs | On startup, runs a crashed `tend serve` left `running` are put back in the queue. A run that a `tend run` command is executing is left to it, so starting the server meanwhile never runs that job twice; if the command died, the sweep below fails the run. While `serve` is up, a sweep every minute looks for runs still `running` more than 2 minutes past the longest they could legitimately take, counted from the start of the run: every attempt (`max_retries` + 1 of them) reaching its timeout, plus the pauses between retries. For a run the server itself is executing, the timeout and retry count are the ones the job had when the run started, so editing a job cannot get its run in flight failed; for any other run they are the job's current ones. Such a run is presumed to have lost its worker: it is marked failed and `run.failed` is emitted, so the job is not blocked until the next restart. That result is final; if the worker turns up after all, its late result is discarded, which the server logs. |
 | Retention | `serve` prunes at startup and then every 24 hours: events older than 30 days, finished job runs older than 90 days (**up from 30 days before v0.3.0**; the banner says so while that default is in effect), finished (delivered or failed) notification deliveries older than 7 days, and heartbeat ping log entries older than 30 days. Set `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS`, `TEND_RETENTION_DELIVERIES_DAYS` and `TEND_RETENTION_PINGS_DAYS` to a whole number of days to change a window, or to `0` to keep that history forever; `serve` refuses to start on any other value, and its banner and `tend doctor` print the windows in effect. Pending and running runs, pending deliveries, and the events they refer to are never pruned. Whatever the window, each heartbeat keeps only its newest 1000 pings, and of those only as many as fit in 10 MB of bodies, trimmed as pings arrive. |
@@ -483,6 +505,8 @@ docker run --rm -v tenddata:/data -v /backup:/backup \
 pg_dump -h localhost -U tend -d tend -F c -f tend-$(date +%Y%m%d).pgdump
 ```
 
+**Rehearse the restore.** A `drill` job can restore Tend's backups (or any other) into a scratch directory on a schedule and check what came back, `SELECT count(*) FROM jobs` for instance; see [restore drills](docs/drills.md) for recipes for SQLite, Postgres, restic and Borg.
+
 ## Consuming Tend from another service
 
 The HTTP API is designed to be driven by other services in the same stack. Create a dedicated token, then use the action endpoints to trigger jobs or toggle state:
@@ -507,6 +531,8 @@ Only run-now, enable, and disable are available as API mutations; creating, edit
 
 - [Architecture](docs/ARCHITECTURE.md): package layout, store parity, event pipeline, security model, and intentional capability asymmetries.
 - [Coming from Healthchecks.io](docs/healthchecks.md): the ping API, `tend exec`, the importer, and what differs.
+- [Probes](docs/probes.md): watching TLS certificates, domain registrations and dated secrets.
+- [Restore drills](docs/drills.md): scheduled restores with checks, and recipes for SQLite, Postgres, restic and Borg.
 - [Contributing](CONTRIBUTING.md): how to build, test, and submit changes.
 - [Security policy](SECURITY.md): how to report vulnerabilities.
 - [License](LICENSE): AGPL-3.0.

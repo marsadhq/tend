@@ -63,7 +63,7 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | --- | --- |
 | `internal/core` | Cross-cutting domain types shared by everything: `Org` (tenant) and the generic `Event` record (the event-pipeline spine). |
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
-| `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
+| `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, the `tls`, `domain` and `expiry` probes and the restore `drill`, with capped output), the type-specific settings (`Spec`, `ValidateSpec`), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/auth` | The identity types `Principal`, `User`, `APIToken`, `Membership`, and the `tend_` prefix of the API tokens Tend issues. |
 | `internal/notify` | The notification domain: channels, rules, the `Alertable` filter, how each event is rendered, and the wiring of kit's delivery worker over the store's deliveries queue (`NewWorker`: the queue, the send step, the give-up that records `notification.failed`). |
 | `internal/heartbeat` | The `Heartbeat` domain type with its `Deadline` (a started run brings it forward), the ping kinds and ping log types, the detail a `heartbeat.missed` carries when it is a failure or an overrun, and the `Watcher` that marks missed heartbeats down. |
@@ -138,6 +138,10 @@ dialects force it:
   matches chronological order, which `DueJobs` relies on when it compares the
   TEXT `next_run` column with `<= ?`. (`time.RFC3339Nano` omits trailing
   fractional zeros and would break ordering at sub-second boundaries.)
+- **Type-specific settings as JSON.** A probe's or a drill's settings
+  (`jobs.Spec`) are stored as JSON in `jobs.spec` (migration 0012), written and
+  read by the same `encodeSpec` / `decodeSpec` on both backends, like `env`.
+  Shell and http jobs keep it NULL, so their rows are exactly what they were.
 - **`ErrNotFound`.** `Get*` methods return the sentinel `store.ErrNotFound` when
   no row matches; callers use `errors.Is`.
 - **Explicit transactional deletes.** Cascading deletes are done in an explicit
@@ -250,7 +254,9 @@ but left out of the webhook's legacy `event` object, whose bytes never change.
 Event types currently emitted:
 
 - **Runs:** `run.started` (best-effort), `run.succeeded`, `run.failed`,
-  `run.recovered`. Timeouts surface as `run.failed` with the precise status in
+  `run.recovered`, for every job type: a probe that finds a certificate about
+  to expire, or a drill whose check fails, is a failed run like a shell job
+  that exits 1, and nothing downstream of the run knows the difference. Timeouts surface as `run.failed` with the precise status in
   the payload, so the `run.*` type vocabulary stays small. `run.recovered` is
   recorded next to `run.succeeded` (same payload, dedup key
   `run:<run_id>:run.recovered`) when the job's previous finished run had not
@@ -499,9 +505,15 @@ declared config and runtime state, and to keep secret-write paths off the networ
   **no** secret-write path through the API. YAML and jobs only *reference*
   secrets by name (`{{ secret.NAME }}`).
 - **Type-specific fields are inert on the wrong type.** A job's `env` takes effect
-  for **shell** jobs only; `http_body` applies to **http** jobs only. Both fields
-  are accepted on any job type but are simply ignored on the type they don't
-  apply to.
+  for the commands Tend runs (a **shell** job's command, an **expiry** job's
+  `expiry_command`, a **drill**'s steps); `http_body` applies to **http** jobs
+  only. Both fields are accepted on any job type but are simply ignored on the
+  type they don't apply to. A probe's or drill's settings (`jobs.Spec`) are
+  narrower still: `tend job add` and `tend sync` keep only the fields of the
+  job's own type, apply its defaults, and refuse settings `ValidateSpec`
+  rejects before anything is written; the executor validates them again
+  before each run, so a row written by other means fails its run with the
+  same message instead of misbehaving.
 
 ---
 
@@ -555,6 +567,26 @@ These limits are constants in the code, not configuration.
   its body limit, at most 100 kB, the rest discarded), so a
   client that stalls while sending its headers or body, while reading the
   response, or between requests cannot hold a connection open.
+- **Probes and drills.** Every command a probe or a drill runs goes through
+  `shellCommand`, the shell job's own mechanics (`sh -c`, the job's env, its
+  own process group killed at the timeout); nothing is ever spliced into a
+  command, and what a drill's steps need (`TEND_SCRATCH`, `TEND_DRILL_ID`)
+  reaches them through the environment. An `expiry_command`'s stdout is read
+  as one date and nothing else (at most 4 KiB); its stderr is kept (16 KiB).
+  A `tls` probe completes the handshake without verifying and then verifies
+  the chain itself (`checkCertificate`), against the system roots plus
+  `ca_file`, so that every problem is reported, not the first; it sends
+  nothing over the encrypted connection, and refuses a STARTTLS server that
+  sends data before the handshake. A `domain` probe reads at most 1 MiB of
+  RDAP answer and 4 MiB of IANA bootstrap file, which is cached in memory for
+  a day per process (`rdapBootstraps`) and used past that when IANA cannot be
+  reached. A drill keeps the first and last 32 KiB of each step's output
+  (`headTail`); its cleanup runs however the restore ended, detached from the
+  attempt's context and bounded by `drillCleanupTimeout` (one minute), and its
+  scratch directory is removed after it, made writable first when a restore
+  left read-only directories. Because that cleanup can run past the attempt's
+  timeout, `maxRunDuration` allows a drill's attempts that much more, so the
+  reaper does not fail a drill that is cleaning up.
 - **Cron validation at the edges.** `jobs.ValidateCron` uses the same parser as
   `Job.NextRun`. `tend job add` and `configfile.Parse` call it before anything is
   written, so an expression that would never fire is rejected instead of stored.
@@ -571,7 +603,9 @@ These limits are constants in the code, not configuration.
 
 - The persistence seam and parity conventions: `internal/store/store.go`, then
   `internal/store/sqlite.go` and `internal/store/postgres.go`.
-- The execution engine: `internal/jobs/runner.go` and `internal/jobs/executor.go`.
+- The execution engine: `internal/jobs/runner.go` and `internal/jobs/executor.go`;
+  the probes and drills in `internal/jobs/probe_*.go` and `internal/jobs/drill.go`,
+  their settings in `internal/jobs/spec.go`.
 - The notification path: `internal/notify/worker.go` (the queue and send step
   kit's worker drives; its retries are in `kit/notify`),
   `internal/notify/message.go` (what is alertable, how messages are rendered),

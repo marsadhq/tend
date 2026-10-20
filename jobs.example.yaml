@@ -70,6 +70,70 @@ jobs:
     cron: "0 8 * * 1"             # Mondays at 08:00
     enabled: false
 
+  # --- Probes: things that expire (see docs/probes.md) ---------------------
+  # A probe fails its run (run.failed) when what it watches is within
+  # warn_days of its expiry, and the next good run records run.recovered.
+  # Every failing run alerts, so run probes every few hours or daily.
+
+  # A TLS certificate: days left, host name, chain, and whether it is past the
+  # point its ACME client should have renewed it (renew_after_fraction).
+  - name: web-cert
+    type: tls
+    host: example.com
+    # port: 443                   # default 443
+    # warn_days: 14               # default 14
+    # renew_after_fraction: 0.667 # default 2/3; 0 for a certificate renewed by hand
+    interval_seconds: 21600       # every 6 hours
+    timeout_seconds: 30
+
+  # A mail server's certificate, upgraded with STARTTLS on the submission port.
+  - name: mail-cert
+    type: tls
+    host: mail.example.com
+    port: 587
+    starttls: smtp                # smtp or imap
+    interval_seconds: 21600
+    timeout_seconds: 30
+
+  # A domain's registration expiry, over RDAP (IANA's bootstrap file finds the
+  # registry). Some TLDs have no RDAP server: use an expiry job for those.
+  - name: example-com-registration
+    type: domain
+    domain: example.com
+    warn_days: 30                 # default 30
+    cron: "0 6 * * *"
+    timeout_seconds: 30
+
+  # A date nothing can be asked about: a licence, a token, a contract.
+  - name: vendor-licence
+    type: expiry
+    expires_at: "2027-01-31"      # RFC 3339 or a bare date (midnight UTC)
+    cron: "0 9 * * *"
+
+  # A date a command prints (one RFC 3339 date on stdout). It runs like a
+  # shell job's command, with the job's env; its output is only parsed.
+  - name: tailscale-node-key
+    type: expiry
+    expiry_command: "tailscale status --json | jq -er .Self.KeyExpiry"
+    warn_days: 7
+    cron: "0 9 * * *"
+    timeout_seconds: 30
+
+  # --- Restore drills (see docs/drills.md) ---------------------------------
+  # Restore the latest backup into a scratch directory ($TEND_SCRATCH), check
+  # it, time the restore, and always clean up. Fails on a failed restore or
+  # check, or a restore slower than max_duration_seconds.
+  - name: app-db-restore-drill
+    type: drill
+    scratch_dir: /var/tmp         # default: the system's temp dir
+    restore: 'cp "$(ls -1t /backups/app-*.db | head -n 1)" "$TEND_SCRATCH/app.db"'
+    checks:
+      - test "$(sqlite3 "$TEND_SCRATCH/app.db" 'PRAGMA integrity_check')" = ok
+      - test "$(sqlite3 "$TEND_SCRATCH/app.db" 'SELECT count(*) FROM users')" -ge 100
+    max_duration_seconds: 300     # the restore-time target
+    timeout_seconds: 1800         # the hard limit
+    cron: "30 4 * * 0"            # Sundays
+
 # Notification channels and the rules that route events to them. Channels need
 # TEND_MASTER_KEY set. Rules may name the alertable events only (sync refuses
 # anything else): run.failed, run.recovered, heartbeat.missed,
