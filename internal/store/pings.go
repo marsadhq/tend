@@ -172,6 +172,8 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 		return heartbeat.PingResult{}, fmt.Errorf("record ping: trim the ping log: %w", err)
 	}
 	if event != nil {
+		// The transition happened when the ping that made it did.
+		event.CreatedAt = now
 		if _, err := t.emit(ctx, *event); err != nil {
 			return heartbeat.PingResult{}, err
 		}
