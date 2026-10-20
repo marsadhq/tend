@@ -190,9 +190,9 @@ type Store interface {
 	// / heartbeat.recovered, keyed by name in the events table), newest first,
 	// bounded by limit.
 	ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error)
-	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound, and
-	// records heartbeat.removed in the same transaction. Its past events (the
-	// audit trail) are intentionally left in place.
+	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound,
+	// with its ping log, and records heartbeat.removed in the same transaction.
+	// Its past events (the audit trail) are intentionally left in place.
 	DeleteHeartbeat(ctx context.Context, orgID, id int64) error
 	// RecordPing records a dead-man's-switch ping for the heartbeat identified by
 	// the globally-unique token: it stamps last_seen_at and sets status to 'up'.
@@ -204,6 +204,27 @@ type Store interface {
 	// transaction. orgID and name identify the heartbeat for the caller's
 	// dispatch nudge.
 	RecordPing(ctx context.Context, token string, now time.Time) (orgID int64, name string, recovered bool, err error)
+	// RecordHeartbeatPing records one ping of the Healthchecks-compatible
+	// ping API for the heartbeat that owns token (ErrNotFound if none), and
+	// logs it in the heartbeat's ping log with its exit status, rid, body and,
+	// for a completion paired with its start, the run's duration.
+	//   - success: stamps last_seen_at and sets 'up'; a 'down' heartbeat
+	//     recovers (heartbeat.recovered). It ends the run being timed when it
+	//     carries that run's rid or none.
+	//   - fail: stamps last_seen_at and sets 'down' at once; a heartbeat that
+	//     was not down records heartbeat.missed with a heartbeat.FailedEvent
+	//     detail. It ends any run.
+	//   - start: starts timing a run (started_at, started_rid); status and
+	//     last_seen_at are untouched.
+	//   - log: changes nothing.
+	// The state change, the log entry and the event (with its deliveries) are
+	// one transaction, and of concurrent pings exactly one records a
+	// transition. The result names the heartbeat and the event, if any, for
+	// the caller's dispatch nudge.
+	RecordHeartbeatPing(ctx context.Context, token string, in heartbeat.PingInput, now time.Time) (heartbeat.PingResult, error)
+	// ListHeartbeatPings returns the ping log of the heartbeat with id for
+	// orgID, newest first, bounded by limit (a default when <= 0).
+	ListHeartbeatPings(ctx context.Context, orgID, heartbeatID int64, limit int) ([]heartbeat.Ping, error)
 	// DueHeartbeats returns the watched heartbeats whose period+grace deadline has
 	// strictly passed at now. The deadline is computed in Go (dialect-agnostic):
 	// the query selects every 'up' heartbeat with a non-NULL last_seen_at (anchored

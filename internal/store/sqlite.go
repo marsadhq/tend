@@ -1606,10 +1606,10 @@ func (s *SQLiteStore) ListHeartbeatEvents(ctx context.Context, orgID int64, name
 	return scanEvents(rows)
 }
 
-// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound, and
-// records heartbeat.removed in the same transaction. Its past events
-// (source='heartbeat') are intentionally left as an audit trail, which the
-// removal now ends.
+// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound,
+// with its ping log, and records heartbeat.removed in the same transaction.
+// Its past events (source='heartbeat') are intentionally left as an audit
+// trail, which the removal now ends.
 func (s *SQLiteStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1626,6 +1626,10 @@ func (s *SQLiteStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) erro
 	if err != nil {
 		return fmt.Errorf("delete heartbeat: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM heartbeat_pings WHERE org_id = ? AND heartbeat_id = ?`, orgID, id); err != nil {
+		return fmt.Errorf("delete heartbeat pings: %w", err)
+	}
 	if _, err := emitEventTx(ctx, tx, heartbeat.RemovedEvent(orgID, name)); err != nil {
 		return err
 	}
@@ -1635,56 +1639,18 @@ func (s *SQLiteStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) erro
 	return nil
 }
 
-// RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
-// identified by token, returning whether this was a down->up recovery along with
-// the heartbeat's org and name. ErrNotFound is returned when no heartbeat owns
-// the token.
-//
-// A recovery is decided by compare-and-set, not by reading the status first:
-// the first UPDATE only matches a row that is still 'down', so of any number of
-// pings racing on a down heartbeat exactly one sees its row change and reports
-// the recovery. That ping also appends heartbeat.recovered, with the deliveries
-// its rules match, in the SAME transaction, so the heartbeat can no longer come
-// back 'up' while its recovery alert is lost. A failure writes neither.
+// RecordPing records a plain success ping for the heartbeat identified by
+// token: it stamps last_seen_at and sets status to 'up', returning whether this
+// was a down->up recovery along with the heartbeat's org and name. It is
+// RecordHeartbeatPing with a success; see that for the transaction and the
+// compare-and-set that makes exactly one of racing pings the recovery.
+// ErrNotFound is returned when no heartbeat owns the token.
 func (s *SQLiteStore) RecordPing(ctx context.Context, token string, now time.Time) (int64, string, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := s.RecordHeartbeatPing(ctx, token, heartbeat.PingInput{Kind: heartbeat.PingSuccess}, now)
 	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping begin tx: %w", err)
+		return 0, "", false, err
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	var (
-		orgID     int64
-		name      string
-		recovered = true
-		seen      = formatTime(now)
-	)
-	err = tx.QueryRowContext(ctx,
-		`UPDATE heartbeats SET last_seen_at = ?, status = 'up' WHERE token = ? AND status = 'down'
-		 RETURNING org_id, name`, seen, token,
-	).Scan(&orgID, &name)
-	if errors.Is(err, sql.ErrNoRows) {
-		recovered = false
-		err = tx.QueryRowContext(ctx,
-			`UPDATE heartbeats SET last_seen_at = ?, status = 'up' WHERE token = ? RETURNING org_id, name`,
-			seen, token,
-		).Scan(&orgID, &name)
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, "", false, ErrNotFound
-		}
-	}
-	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping update: %w", err)
-	}
-	if recovered {
-		if _, err := emitEventTx(ctx, tx, heartbeat.RecoveredEvent(orgID, name)); err != nil {
-			return 0, "", false, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, "", false, fmt.Errorf("record ping commit: %w", err)
-	}
-	return orgID, name, recovered, nil
+	return res.OrgID, res.Name, res.Event != nil, nil
 }
 
 // heartbeatColumns lists the heartbeats columns in SELECT order. THE ORDER IS
@@ -1692,9 +1658,9 @@ func (s *SQLiteStore) RecordPing(ctx context.Context, token string, now time.Tim
 // match the column order of the heartbeats table in BOTH
 // migrations/sqlite/0001_init.sql + 0002_notifications.sql and the Postgres
 // equivalents. 0001 created (id, org_id, name, last_seen_at, created_at); 0002
-// APPENDED token, period_seconds, grace_seconds, status (in that order). Reorder
-// here only if you reorder there.
-const heartbeatColumns = `id, org_id, name, last_seen_at, created_at, token, period_seconds, grace_seconds, status`
+// APPENDED token, period_seconds, grace_seconds, status (in that order), and
+// 0009 started_at, started_rid. Reorder here only if you reorder there.
+const heartbeatColumns = `id, org_id, name, last_seen_at, created_at, token, period_seconds, grace_seconds, status, started_at, started_rid`
 
 // scanHeartbeat reads a heartbeat.Heartbeat from a row produced by a SELECT of
 // heartbeatColumns. last_seen_at and token may be NULL (a 'new' heartbeat has
@@ -1705,15 +1671,19 @@ func scanHeartbeat(sc interface{ Scan(...any) error }) (heartbeat.Heartbeat, err
 		lastSeen sql.NullString
 		created  sql.NullString
 		token    sql.NullString
+		started  sql.NullString
 	)
 	if err := sc.Scan(
 		&hb.ID, &hb.OrgID, &hb.Name, &lastSeen, &created, &token,
-		&hb.PeriodSeconds, &hb.GraceSeconds, &hb.Status,
+		&hb.PeriodSeconds, &hb.GraceSeconds, &hb.Status, &started, &hb.StartedRID,
 	); err != nil {
 		return heartbeat.Heartbeat{}, err
 	}
 	hb.Token = token.String
 	var err error
+	if hb.StartedAt, err = parseTime(started); err != nil {
+		return heartbeat.Heartbeat{}, err
+	}
 	if hb.LastSeenAt, err = parseTime(lastSeen); err != nil {
 		return heartbeat.Heartbeat{}, err
 	}

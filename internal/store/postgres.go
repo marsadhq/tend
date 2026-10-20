@@ -1072,6 +1072,10 @@ func (s *PostgresStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) er
 	if err != nil {
 		return fmt.Errorf("delete heartbeat: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM heartbeat_pings WHERE org_id = $1 AND heartbeat_id = $2`, orgID, id); err != nil {
+		return fmt.Errorf("delete heartbeat pings: %w", err)
+	}
 	if _, err := pgEmitEventTx(ctx, tx, heartbeat.RemovedEvent(orgID, name)); err != nil {
 		return err
 	}
@@ -1144,53 +1148,19 @@ func (s *PostgresStore) ListHeartbeats(ctx context.Context, orgID int64) ([]hear
 	return out, nil
 }
 
-// RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
-// identified by token, returning whether this was a down->up recovery along with
-// the heartbeat's org and name, and on a recovery appends heartbeat.recovered in
-// the same transaction. Mirrors the SQLite backend. Under READ COMMITTED a
-// second ping racing on the same down row waits for the first one's row lock,
-// then re-checks status = 'down', no longer matches, and records a plain ping,
-// so exactly one recovery is written. ErrNotFound when no heartbeat owns the
-// token.
+// RecordPing records a plain success ping for the heartbeat identified by
+// token, returning whether this was a down->up recovery along with the
+// heartbeat's org and name. It is RecordHeartbeatPing with a success; under
+// READ COMMITTED a second ping racing on the same down row waits for the first
+// one's row lock, then re-checks status = 'down', no longer matches, and
+// records a plain ping, so exactly one recovery is written. ErrNotFound when
+// no heartbeat owns the token.
 func (s *PostgresStore) RecordPing(ctx context.Context, token string, now time.Time) (int64, string, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := s.RecordHeartbeatPing(ctx, token, heartbeat.PingInput{Kind: heartbeat.PingSuccess}, now)
 	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping begin tx: %w", err)
+		return 0, "", false, err
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	var (
-		orgID     int64
-		name      string
-		recovered = true
-		seen      = formatTime(now)
-	)
-	err = tx.QueryRowContext(ctx,
-		`UPDATE heartbeats SET last_seen_at = $1, status = 'up' WHERE token = $2 AND status = 'down'
-		 RETURNING org_id, name`, seen, token,
-	).Scan(&orgID, &name)
-	if errors.Is(err, sql.ErrNoRows) {
-		recovered = false
-		err = tx.QueryRowContext(ctx,
-			`UPDATE heartbeats SET last_seen_at = $1, status = 'up' WHERE token = $2 RETURNING org_id, name`,
-			seen, token,
-		).Scan(&orgID, &name)
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, "", false, ErrNotFound
-		}
-	}
-	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping update: %w", err)
-	}
-	if recovered {
-		if _, err := pgEmitEventTx(ctx, tx, heartbeat.RecoveredEvent(orgID, name)); err != nil {
-			return 0, "", false, err
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, "", false, fmt.Errorf("record ping commit: %w", err)
-	}
-	return orgID, name, recovered, nil
+	return res.OrgID, res.Name, res.Event != nil, nil
 }
 
 // DueHeartbeats returns the watched heartbeats whose period+grace deadline has
