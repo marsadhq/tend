@@ -290,7 +290,8 @@ check tries again instead of losing the alert. A ping is one transaction too
 `heartbeat.missed` of a failure or the `heartbeat.recovered` of a recovery
 commit together or not at all, and of racing pings exactly one records the
 transition. The ping log entry keeps the request body (cleaned to text, the
-URL's credential redacted, capped at 100 kB) and, for a completion paired with
+URL's credential redacted, capped at 10 kB by default and at most 100 kB,
+`TEND_PING_BODY_KB`) and, for a completion paired with
 its start by `?rid=`, the run's duration.
 
 **Notifications are a durable queue.** Every event insert (`EmitEvent`,
@@ -550,7 +551,7 @@ These limits are constants in the code, not configuration.
 - **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
   and `IdleTimeout` are all 10 seconds (`httpx.NewServer`, called by `serve`).
   Every handler is quick and the largest request body is a ping's (read up to
-  100 kB, the rest discarded), so a
+  its body limit, at most 100 kB, the rest discarded), so a
   client that stalls while sending its headers or body, while reading the
   response, or between requests cannot hold a connection open.
 - **Cron validation at the edges.** `jobs.ValidateCron` uses the same parser as

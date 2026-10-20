@@ -200,3 +200,28 @@ func TestServeRefusesAnInvalidDeliveryHold(t *testing.T) {
 		t.Errorf("a refused serve must not create the database (stat err = %v)", statErr)
 	}
 }
+
+// TestServeRefusesAnInvalidPingBodyLimit: TEND_PING_BODY_KB is checked like
+// the other settings, before the database is opened, and doctor reports it.
+func TestServeRefusesAnInvalidPingBodyLimit(t *testing.T) {
+	t.Setenv("TEND_ADDR", "127.0.0.1:0")
+	t.Setenv("TEND_PING_BODY_KB", "500")
+	cfg := keyedConfig(t)
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "TEND_PING_BODY_KB") {
+		t.Fatalf("serve with TEND_PING_BODY_KB=500: err = %v, want an error naming the variable", err)
+	}
+	if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+		t.Errorf("a refused serve must not create the database (stat err = %v)", statErr)
+	}
+
+	t.Setenv("TEND_PING_BODY_KB", "64")
+	stdout.Reset()
+	if err := cli.Run(context.Background(), cfg, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "ping bodies:  first 64 kB of each kept") {
+		t.Errorf("doctor does not report the ping body limit:\n%s", stdout.String())
+	}
+}
