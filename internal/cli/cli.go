@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/auth"
-	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/config"
 	"github.com/marsadhq/tend/internal/configfile"
 	"github.com/marsadhq/tend/internal/core"

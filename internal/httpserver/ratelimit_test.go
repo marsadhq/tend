@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 )
 
 func TestRateLimiter_AllowsBurstThenBlocks(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/secrets"
 	"github.com/marsadhq/tend/internal/store"

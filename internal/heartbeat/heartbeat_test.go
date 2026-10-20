@@ -13,7 +13,7 @@ import (
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver for the raw seed/inspect handle
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
