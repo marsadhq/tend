@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -363,6 +364,62 @@ func TestListHeartbeatPingsIsOrgScoped(t *testing.T) {
 		}
 		if ps := pingLog(t, ctx, s, orgID, id); len(ps) != 1 {
 			t.Fatalf("own org read %d pings, want 1", len(ps))
+		}
+	})
+}
+
+// TestConcurrentFailuresRecordOneMiss: many failure pings (and log entries
+// and starts in between) racing on one up heartbeat take it down once: exactly
+// one reports the transition and one heartbeat.missed is stored, while every
+// ping is logged.
+func TestConcurrentFailuresRecordOneMiss(t *testing.T) {
+	ctx := context.Background()
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		orgID, id := newPingHeartbeat(t, ctx, s, "racy", "tok-racy")
+		ping(t, ctx, s, "tok-racy", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, pingT0)
+
+		const pings = 24
+		kinds := []string{heartbeat.PingFail, heartbeat.PingLog, heartbeat.PingStart}
+		var (
+			wg   sync.WaitGroup
+			mu   sync.Mutex
+			down int
+			errs []error
+		)
+		start := make(chan struct{})
+		for i := 0; i < pings; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				in := heartbeat.PingInput{Kind: kinds[i%len(kinds)]}
+				if in.Kind == heartbeat.PingFail {
+					in.ExitStatus = exitStatus(1)
+				}
+				res, err := s.RecordHeartbeatPing(ctx, "tok-racy", in, pingT0.Add(time.Duration(i+1)*time.Millisecond))
+				mu.Lock()
+				defer mu.Unlock()
+				if err != nil {
+					errs = append(errs, err)
+				}
+				if res.Event != nil {
+					down++
+				}
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		if len(errs) > 0 {
+			t.Fatalf("RecordHeartbeatPing errors: %v", errs)
+		}
+		if down != 1 {
+			t.Fatalf("pings reporting the transition = %d, want exactly 1", down)
+		}
+		if n := len(eventsOfType(t, ctx, s, orgID, heartbeat.EventMissed)); n != 1 {
+			t.Fatalf("heartbeat.missed events = %d, want 1", n)
+		}
+		if n := len(pingLog(t, ctx, s, orgID, id)); n != pings+1 {
+			t.Fatalf("ping log has %d entries, want %d", n, pings+1)
 		}
 	})
 }
