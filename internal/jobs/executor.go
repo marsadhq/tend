@@ -111,6 +111,11 @@ type Executor struct {
 	// Now, if non-nil, is the time the tls, domain and expiry probes judge
 	// expiry dates by; nil means time.Now. Tests set it.
 	Now func() time.Time
+
+	// RDAPBootstrapURL is where domain probes read the RDAP bootstrap file
+	// that names each TLD's RDAP server; empty means IANA's
+	// (IANABootstrapURL). Tests point it at a local server.
+	RDAPBootstrapURL string
 }
 
 // NewExecutor returns a ready-to-use Executor with default backoff.
@@ -247,6 +252,8 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 		return e.runOnceHTTP(cctx, j, attempt, started)
 	case TLS:
 		return e.runOnceTLS(cctx, j, attempt, started)
+	case Domain:
+		return e.runOnceDomain(cctx, j, attempt, started)
 	default: // Shell or empty/default
 		return e.runOnceShell(cctx, j, env, attempt, started)
 	}
