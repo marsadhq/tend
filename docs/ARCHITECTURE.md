@@ -287,6 +287,15 @@ is marked `failed` and `notification.failed` is recorded, so a dropped alert is
 never silent. Delivery is at-least-once: a send that succeeded but could not be
 marked delivered is repeated after the lease.
 
+**Delivery is ordered per channel.** The claim only takes a channel's oldest
+pending delivery; the next one becomes claimable once that one is delivered or
+given up. A delivery that is backing off after a failure therefore holds back
+the ones queued behind it on its channel (and only on its channel), so a
+receiver sees events in the order they happened, `heartbeat.missed` before its
+`heartbeat.recovered`, even after an outage. The cost is head-of-line blocking:
+a delivery the destination keeps rejecting holds its channel until it is
+given up (24 hours).
+
 **The runner's `EventSink`** (`Runner.EventSink func(context.Context,
 core.Event)`) is the seam through which the runner signals that a terminal event
 was recorded. It is a plain `func` over `core.Event` (not a `notify` type)

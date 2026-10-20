@@ -1188,6 +1188,13 @@ func scanDelivery(sc interface{ Scan(...any) error }) (notify.Delivery, error) {
 // now: attempts+1 and next_attempt_at pushed to now+lease in one UPDATE, so a
 // crashed worker's claims become due again after the lease (at-least-once).
 // Each claimed delivery is returned with its originating event joined in.
+//
+// Delivery is ordered per channel: only the oldest pending delivery of each
+// channel can be claimed, and the next one waits until it is delivered or
+// given up. A delivery that failed and is backing off therefore holds back the
+// ones queued behind it on its channel, so after an outage a channel receives
+// heartbeat.missed before the heartbeat.recovered that followed it. Other
+// channels are not held up.
 func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -1201,10 +1208,16 @@ func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lea
 	rows, err := tx.QueryContext(ctx,
 		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ?
 		 WHERE id IN (
-		   SELECT id FROM deliveries WHERE state = ? AND next_attempt_at <= ? ORDER BY id LIMIT ?
+		   SELECT d.id FROM deliveries d
+		   WHERE d.state = ? AND d.next_attempt_at <= ?
+		     AND NOT EXISTS (
+		       SELECT 1 FROM deliveries o
+		       WHERE o.channel_id = d.channel_id AND o.state = ? AND o.id < d.id
+		     )
+		   ORDER BY d.id LIMIT ?
 		 )
 		 RETURNING `+deliveryColumns,
-		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit)
+		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), notify.DeliveryPending, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}

@@ -844,6 +844,11 @@ func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, na
 // crashed worker's claims become due again after the lease (at-least-once).
 // FOR UPDATE SKIP LOCKED keeps concurrent claimers (serve worker + a manual
 // `tend run` drain) from double-claiming a row.
+//
+// Delivery is ordered per channel, as on SQLite: only a channel's oldest
+// pending delivery can be claimed. SKIP LOCKED does not weaken that: a
+// channel's head that another claimer has locked is skipped, but it is still
+// pending, so the NOT EXISTS keeps the deliveries behind it out of reach too.
 func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -857,8 +862,13 @@ func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, l
 	rows, err := tx.QueryContext(ctx,
 		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = $1
 		 WHERE id IN (
-		   SELECT id FROM deliveries WHERE state = $2 AND next_attempt_at <= $3
-		   ORDER BY id LIMIT $4 FOR UPDATE SKIP LOCKED
+		   SELECT d.id FROM deliveries d
+		   WHERE d.state = $2 AND d.next_attempt_at <= $3
+		     AND NOT EXISTS (
+		       SELECT 1 FROM deliveries o
+		       WHERE o.channel_id = d.channel_id AND o.state = $2 AND o.id < d.id
+		     )
+		   ORDER BY d.id LIMIT $4 FOR UPDATE OF d SKIP LOCKED
 		 )
 		 RETURNING `+deliveryColumns,
 		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit)

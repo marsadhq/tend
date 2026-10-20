@@ -40,7 +40,9 @@ type WorkerStore interface {
 	// ClaimDueDeliveries atomically claims up to limit pending deliveries whose
 	// next_attempt_at <= now: attempts is incremented and next_attempt_at is
 	// pushed to now+lease, so a crashed worker's claims become due again after
-	// the lease (at-least-once, no stuck 'sending' state).
+	// the lease (at-least-once, no stuck 'sending' state). Only the oldest
+	// pending delivery of each channel is claimable, so a channel receives its
+	// notifications in order, one at a time.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
 	// MarkDeliveryDelivered finalizes a delivery as delivered.
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
