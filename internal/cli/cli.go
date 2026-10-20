@@ -1995,7 +1995,8 @@ Environment:
   TEND_RETENTION_RUNS_DAYS        days of finished job runs to keep (default 90; 0 = forever)
   TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
   TEND_RETENTION_PINGS_DAYS       days of heartbeat ping logs to keep (default 30; 0 = forever;
-                                  each heartbeat also keeps only its newest 1000 pings)
+                                  each heartbeat also keeps only its newest 1000 pings,
+                                  within 10 MB of bodies)
   TEND_PING_BODY_KB               kB of each ping's body kept in its log (default 10;
                                   0 = none; at most 100), announced in Ping-Body-Limit
   TEND_DELIVERY_HOLD_MINUTES      how long a failing notification may hold back the

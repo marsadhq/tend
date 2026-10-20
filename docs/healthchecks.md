@@ -218,8 +218,9 @@ server.
 - **No pause, no `manual_resume`, no keyword or method filters, no `ign` pings,
   no e-mail pinging.**
 - **Retention.** Healthchecks keeps the last pings per check by count; Tend
-  keeps each heartbeat's newest 1000 pings, and drops older ones after
-  `TEND_RETENTION_PINGS_DAYS` (30 by default, `0` keeps them).
+  keeps each heartbeat's newest 1000 pings, and of those only as many as fit
+  in 10 MB of bodies, and drops older ones after `TEND_RETENTION_PINGS_DAYS`
+  (30 by default, `0` keeps them).
 - **Bodies are text.** A body that is not UTF-8 is stored with its invalid
   bytes replaced; binary bodies are not kept as files.
 - **Management API.** Tend does not serve Healthchecks' Management API; its own

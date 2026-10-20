@@ -536,7 +536,8 @@ These limits are constants in the code, not configuration.
   `TEND_RETENTION_RUNS_DAYS`, `TEND_RETENTION_DELIVERIES_DAYS` and
   `TEND_RETENTION_PINGS_DAYS`; `0` keeps that history forever and an
   invalid value stops `serve` from starting). Each heartbeat also keeps only
-  its newest `store.MaxPingsPerHeartbeat` (1000) pings, trimmed in the ping's
+  its newest `store.MaxPingsPerHeartbeat` (1000) pings, and of those only as
+  many as fit in `store.MaxPingLogBytes` (10 MB) of bodies, trimmed in the ping's
   own transaction, so a runaway client cannot fill the disk between sweeps. When the sweep deleted rows it
   calls `ReclaimSpace`: on SQLite, once at least 8 MiB and a quarter of the file
   is free, the first call switches the file to incremental auto-vacuum with one
