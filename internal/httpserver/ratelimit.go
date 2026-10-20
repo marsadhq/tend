@@ -50,6 +50,19 @@ func newRateLimiter(clk clock.Clock, rate, burst float64) *rateLimiter {
 	}
 }
 
+// Has reports whether key's bucket holds at least one token, without taking
+// it. A key with no bucket yet has a full one, and none is created for it, so
+// asking about an arbitrary key costs no memory.
+func (rl *rateLimiter) Has(key string, now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	b := rl.buckets[key]
+	if b == nil {
+		return rl.burst >= 1
+	}
+	return min(rl.burst, b.tokens+now.Sub(b.last).Seconds()*rl.rate) >= 1
+}
+
 // Allow reports whether one token is available for key, consuming it if so.
 func (rl *rateLimiter) Allow(key string, now time.Time) bool {
 	rl.mu.Lock()
@@ -103,12 +116,17 @@ func (s *Server) rateLimit(rl *rateLimiter, endpoint string, next http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := clientIP(r) + "|" + endpoint
 		if !rl.Allow(key, s.clk.Now()) {
-			w.Header().Set("Retry-After", rl.retryAfter())
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			tooManyRequests(w, rl)
 			return
 		}
 		next(w, r)
 	}
+}
+
+// tooManyRequests answers 429 with the Retry-After of rl.
+func tooManyRequests(w http.ResponseWriter, rl *rateLimiter) {
+	w.Header().Set("Retry-After", rl.retryAfter())
+	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 }
 
 // clientIP returns the request's source IP for rate-limit keying. It uses the

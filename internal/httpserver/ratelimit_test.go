@@ -172,13 +172,38 @@ func TestRateLimiter_RetryAfter(t *testing.T) {
 		rate float64
 		want string
 	}{
-		{10, "1"},   // the ping limiter: a token every 100ms
-		{1, "1"},    // the login limiter: a token every second
+		{10, "1"},   // a token every 100ms
+		{1, "1"},    // the login and ping limiters: a token every second
 		{0.1, "10"}, // a token every 10 seconds
 		{0.3, "4"},  // rounded up
 	} {
 		if got := newRateLimiter(fk, c.rate, 5).retryAfter(); got != c.want {
 			t.Errorf("retryAfter at %v tokens/s = %q, want %q", c.rate, got, c.want)
 		}
+	}
+}
+
+// TestRateLimiter_HasDoesNotConsumeOrAllocate: Has reports whether a token is
+// there without taking it, and asking about a new key creates no bucket.
+func TestRateLimiter_HasDoesNotConsumeOrAllocate(t *testing.T) {
+	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	rl := newRateLimiter(fk, 1, 2)
+
+	for i := 0; i < 5; i++ {
+		if !rl.Has("new", fk.Now()) {
+			t.Fatal("Has on an unseen key: want true (a full bucket)")
+		}
+	}
+	if len(rl.buckets) != 0 {
+		t.Fatalf("Has created %d buckets, want 0", len(rl.buckets))
+	}
+	rl.Allow("k", fk.Now())
+	rl.Allow("k", fk.Now())
+	if rl.Has("k", fk.Now()) {
+		t.Fatal("Has on an empty bucket: want false")
+	}
+	fk.Advance(time.Second)
+	if !rl.Has("k", fk.Now()) || !rl.Has("k", fk.Now()) {
+		t.Fatal("Has after a refill: want true, and still true on asking again")
 	}
 }

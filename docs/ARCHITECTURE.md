@@ -389,11 +389,16 @@ careful.
   `orgID`, and handlers scope every call to `Principal.OrgID` resolved by
   `requireAuth`. A resource id belonging to another org is simply not found.
 - **Rate limiting on the unauthenticated endpoints.** `POST /login` (burst 5,
-  refill 1 per second) and `/ping/{token}` (burst 20, refill 10 per second) pass
-  through an in-memory token bucket keyed by client address and endpoint
-  (`internal/httpserver/ratelimit.go`); requests over the limit get `429` with
-  `Retry-After`. The ping limiter keys on the address rather than the token on
-  purpose, so rotating tokens does not evade it. The client address is the TCP
+  refill 1 per second) passes through an in-memory token bucket keyed by client
+  address and endpoint (`internal/httpserver/ratelimit.go`). `/ping/{token}`
+  has two buckets, checked before the database is touched: unknown tokens are
+  counted per client address (burst 30, refill 1 per second), and once an
+  address has spent that budget every ping from it is refused, whatever token
+  it sends next, so rotating tokens does not evade it; pings for a real
+  heartbeat are counted per token (burst 10, refill 1 per second) and never
+  per address, so a host running many heartbeats on the same minute is never
+  throttled for it. Requests over a limit get `429` with `Retry-After`; ping
+  clients are expected to retry. The client address is the TCP
   peer unless `TEND_TRUST_PROXY` is set, in which case the left-most
   `X-Forwarded-For` entry is used; that is only sound behind a proxy that
   overwrites the header. The entry must parse as an IP address and is keyed in
