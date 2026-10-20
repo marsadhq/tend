@@ -48,11 +48,20 @@ type WorkerStore interface {
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
 	// FailDelivery finalizes a delivery as permanently failed.
 	FailDelivery(ctx context.Context, id int64) error
+	// FailDeliveryAndEmit finalizes a still-pending delivery as failed and
+	// appends ev (notification.failed, with the deliveries its rules match) in
+	// one transaction, so a given-up alert is never dropped silently. A
+	// delivery that is no longer pending is left alone and ev is not written.
+	FailDeliveryAndEmit(ctx context.Context, id int64, ev core.Event) error
 	// GetChannel returns the channel plus its encrypted config blob.
 	GetChannel(ctx context.Context, orgID, id int64) (Channel, string, error)
-	// EmitEvent appends an event (used for notification.failed on exhaustion).
-	EmitEvent(ctx context.Context, e core.Event) (int64, error)
 }
+
+// EventNotificationFailed is the event recorded when the worker gives up on a
+// delivery. Its payload is the type of the event that could not be delivered.
+// It is alertable, so it can be routed to another channel; giving up on the
+// delivery of a notification.failed never records another one (loop guard).
+const EventNotificationFailed = "notification.failed"
 
 // claimBatch bounds how many due deliveries one drain pass claims at a time.
 const claimBatch = 32
@@ -60,7 +69,7 @@ const claimBatch = 32
 // Worker drains the durable deliveries queue: claim due rows, send each via
 // its channel's provider, and either finalize (delivered), reschedule with
 // capped exponential backoff, or - once a delivery is older than MaxAge -
-// give up and emit notification.failed so a dropped alert is never silent.
+// give up and record notification.failed so a dropped alert is never silent.
 //
 // Delivery is asynchronous by design: emitters only enqueue (transactionally
 // with the event insert) and optionally Nudge the worker, so a slow or down
@@ -180,19 +189,28 @@ func (w *Worker) deliverOne(ctx context.Context, d Delivery) bool {
 		// URL; decrypt errors carry no blob), so logging err here is safe.
 		w.log.Error("notify: delivery failed permanently",
 			"delivery", d.ID, "channel", d.ChannelID, "event", d.Event.Type, "attempts", d.Attempts, "err", err)
-		if ferr := w.store.FailDelivery(ctx, d.ID); ferr != nil {
-			w.log.Error("notify: fail delivery", "delivery", d.ID, "err", ferr)
+		// Loop guard: a notification.failed that cannot be delivered is
+		// logged and dropped. Recording another notification.failed for it
+		// could start a chain of them, one per failing channel and day.
+		if d.Event.Type == EventNotificationFailed {
+			if ferr := w.store.FailDelivery(ctx, d.ID); ferr != nil {
+				w.log.Error("notify: fail delivery", "delivery", d.ID, "err", ferr)
+			}
 			return false
 		}
 		// The emitted payload is only the failed event TYPE - no secret, no
-		// output. notification.failed is not Alertable, so this can never
-		// enqueue a delivery of its own (loop guard).
-		_, _ = w.store.EmitEvent(ctx, core.Event{
+		// output.
+		ev := core.Event{
 			OrgID:   d.OrgID,
-			Type:    "notification.failed",
+			Type:    EventNotificationFailed,
 			Source:  "notify",
 			Payload: d.Event.Type,
-		})
+		}
+		if ferr := w.store.FailDeliveryAndEmit(ctx, d.ID, ev); ferr != nil {
+			// Nothing was written: the delivery is still pending and is given
+			// up again, with its notification.failed, after the lease.
+			w.log.Error("notify: fail delivery", "delivery", d.ID, "err", ferr)
+		}
 		return false
 	}
 

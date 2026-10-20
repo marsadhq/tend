@@ -61,16 +61,17 @@ func (f *fakeWorkerStore) FailDelivery(_ context.Context, id int64) error {
 	return nil
 }
 
+func (f *fakeWorkerStore) FailDeliveryAndEmit(_ context.Context, id int64, e core.Event) error {
+	f.failed = append(f.failed, id)
+	f.emitted = append(f.emitted, e)
+	return nil
+}
+
 func (f *fakeWorkerStore) GetChannel(_ context.Context, _, _ int64) (Channel, string, error) {
 	if f.getErr != nil {
 		return Channel{}, "", f.getErr
 	}
 	return f.channel, f.blob, nil
-}
-
-func (f *fakeWorkerStore) EmitEvent(_ context.Context, e core.Event) (int64, error) {
-	f.emitted = append(f.emitted, e)
-	return int64(len(f.emitted)), nil
 }
 
 // fakeProvider is a scripted Provider: it fails the first failN Send calls and
@@ -284,20 +285,47 @@ func TestWorkerShutdownIsNotAFailure(t *testing.T) {
 	})
 }
 
-// TestAlertableLoopGuard pins the contract the store's transactional enqueue
-// relies on: notification.* and non-terminal lifecycle events never enqueue.
-func TestAlertableLoopGuard(t *testing.T) {
+// TestAlertableSet pins the event types the store's transactional enqueue
+// turns into deliveries: non-terminal and non-alert lifecycle events never
+// enqueue. notification.failed does; the worker's loop guard (below) keeps it
+// from feeding itself.
+func TestAlertableSet(t *testing.T) {
 	for typ, want := range map[string]bool{
 		"run.failed":          true,
+		"run.recovered":       true,
 		"heartbeat.missed":    true,
 		"heartbeat.recovered": true,
+		"job.removed":         true,
+		"heartbeat.removed":   true,
+		"notification.failed": true,
 		"run.succeeded":       false,
 		"run.started":         false,
-		"notification.failed": false,
+		"notification.other":  false,
 	} {
 		if got := Alertable(typ); got != want {
 			t.Errorf("Alertable(%q) = %v, want %v", typ, got, want)
 		}
+	}
+}
+
+// TestWorkerNeverReportsAFailedFailureReport pins the loop guard: when the
+// delivery being given up is itself a notification.failed, it is finalized as
+// failed and no further notification.failed is recorded.
+func TestWorkerNeverReportsAFailedFailureReport(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-25 * time.Hour)
+	fs := &fakeWorkerStore{due: []Delivery{due(1, "notification.failed", "run.failed", old)}}
+	w := newTestWorker(t, fs, &fakeProvider{failN: 1000})
+	w.now = func() time.Time { return now }
+
+	if _, err := w.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(fs.failed) != 1 || fs.failed[0] != 1 {
+		t.Fatalf("failed deliveries = %v, want [1]", fs.failed)
+	}
+	if len(fs.emitted) != 0 {
+		t.Fatalf("emitted %+v, want nothing for a failed notification.failed", fs.emitted)
 	}
 }
 

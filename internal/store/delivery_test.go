@@ -83,21 +83,21 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 				len(after), after)
 		}
 
-		// A non-alertable event never enqueues (the loop guard) - even with a
-		// matching rule shape for it.
-		mustRule(10, "notification.failed", 0, true)
+		// A non-alertable event never enqueues - even with a matching rule
+		// shape for it.
+		mustRule(10, "run.succeeded", 0, true)
 		if _, err := s.EmitEvent(ctx, core.Event{
-			OrgID: org.ID, Type: "notification.failed", Source: "notify", Payload: "run.failed",
+			OrgID: org.ID, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"job_id":42}`,
 		}); err != nil {
-			t.Fatalf("EmitEvent notification.failed: %v", err)
+			t.Fatalf("EmitEvent run.succeeded: %v", err)
 		}
 		none, err := s.ClaimDueDeliveries(ctx, time.Now().Add(10*time.Minute), time.Minute, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
 		for _, d := range none {
-			if d.Event.Type == "notification.failed" {
-				t.Fatal("notification.failed enqueued a delivery: loop guard broken")
+			if d.Event.Type == "run.succeeded" {
+				t.Fatal("run.succeeded enqueued a delivery")
 			}
 		}
 	})

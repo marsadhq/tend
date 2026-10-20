@@ -1270,6 +1270,37 @@ func (s *SQLiteStore) FailDelivery(ctx context.Context, id int64) error {
 	return nil
 }
 
+// FailDeliveryAndEmit finalizes a still-pending delivery as failed and appends
+// ev (notification.failed) with its own deliveries in the same transaction, so
+// the given-up alert cannot be lost between the two writes. A delivery that is
+// no longer pending (finalized meanwhile) is left alone and ev is not written,
+// so a delivery is never given up twice.
+func (s *SQLiteStore) FailDeliveryAndEmit(ctx context.Context, id int64, ev core.Event) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("fail delivery begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	res, err := tx.ExecContext(ctx,
+		`UPDATE deliveries SET state = ? WHERE id = ? AND state = ?`,
+		notify.DeliveryFailed, id, notify.DeliveryPending)
+	if err != nil {
+		return fmt.Errorf("fail delivery: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("fail delivery rows: %w", err)
+	} else if n == 0 {
+		return nil
+	}
+	if _, err := emitEventTx(ctx, tx, ev); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("fail delivery commit: %w", err)
+	}
+	return nil
+}
+
 // --- retention pruning -----------------------------------------------------
 
 // PruneEvents hard-deletes events created strictly before the cutoff, except
