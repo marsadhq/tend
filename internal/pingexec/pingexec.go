@@ -10,8 +10,9 @@
 // <uuid>, or a slug URL) and the actions are appended to its path.
 //
 // Monitoring never gets in the way of the job: a ping that fails is retried
-// (network errors, 5xx and 429, honouring Retry-After) and then given up with
-// a warning, and the command runs and exits as it would have without it.
+// (network errors, 5xx and 429, honouring Retry-After) within a short budget
+// (5 seconds for the start ping, 20 for the completion) and then given up
+// with a warning, and the command runs and exits as it would have without it.
 package pingexec
 
 import (
@@ -22,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,8 +40,21 @@ import (
 // Defaults for the zero values of Config.
 const (
 	DefaultBodyLimit = 10_000
-	DefaultTimeout   = 10 * time.Second
+	DefaultTimeout   = 5 * time.Second
 	DefaultRetries   = 5
+	// DefaultStartBudget is the most the start ping may delay the command,
+	// all its attempts and the waits between them together; past it the
+	// command runs anyway. DefaultFinishBudget bounds the completion ping
+	// the same way, so a job is never held long by a Tend it cannot reach.
+	DefaultStartBudget  = 5 * time.Second
+	DefaultFinishBudget = 20 * time.Second
+)
+
+// Connection limits of the default client: an unreachable server is given up
+// on quickly, leaving the budget room for another attempt.
+const (
+	dialTimeout         = 2 * time.Second
+	tlsHandshakeTimeout = 3 * time.Second
 )
 
 // Backoff between attempts of one ping: maxBackoff caps the doubling, and
@@ -64,6 +79,10 @@ type Config struct {
 	BodyLimit int
 	// Timeout bounds each ping attempt; 0 means DefaultTimeout.
 	Timeout time.Duration
+	// StartBudget and FinishBudget bound the start and the completion ping,
+	// all attempts and waits together; 0 means DefaultStartBudget and
+	// DefaultFinishBudget. Each attempt also ends with its ping's budget.
+	StartBudget, FinishBudget time.Duration
 	// Retries is how many times a failed ping is tried again; 0 means
 	// DefaultRetries, a negative value none.
 	Retries int
@@ -151,7 +170,7 @@ func Run(ctx context.Context, cfg Config, name string, args ...string) int {
 	if code < 0 || code > 255 {
 		suffix = "fail" // only 0 to 255 can be reported as a status
 	}
-	p.send(pctx, suffix, body)
+	p.send(pctx, suffix, body, p.cfg.FinishBudget)
 	return code
 }
 
@@ -180,7 +199,7 @@ func (p *pinger) startPing(ctx context.Context, sigs <-chan os.Signal) (limit in
 		case <-done:
 		}
 	}()
-	limit, ok = p.send(sctx, "start", nil)
+	limit, ok = p.send(sctx, "start", nil, p.cfg.StartBudget)
 	close(done)
 	wg.Wait()
 	select {
@@ -258,7 +277,16 @@ type pinger struct {
 func newPinger(cfg Config) *pinger {
 	p := &pinger{cfg: cfg, rid: newRID(), log: orDiscard(cfg.Log), client: cfg.Client}
 	if p.client == nil {
-		p.client = &http.Client{}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.DialContext = (&net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}).DialContext
+		tr.TLSHandshakeTimeout = tlsHandshakeTimeout
+		p.client = &http.Client{Transport: tr}
+	}
+	if p.cfg.StartBudget <= 0 {
+		p.cfg.StartBudget = DefaultStartBudget
+	}
+	if p.cfg.FinishBudget <= 0 {
+		p.cfg.FinishBudget = DefaultFinishBudget
 	}
 	p.base, _ = url.Parse(cfg.PingURL) // checked by CheckPingURL; a bad one fails each send
 	switch {
@@ -295,19 +323,24 @@ func (p *pinger) url(action string) string {
 }
 
 // send POSTs the ping for action with body, retrying network errors, 5xx and
-// 429. It reports whether the ping got through and the Ping-Body-Limit the
-// server announced (0 when none). A ping that does not get through is a
-// warning on Log naming only the server's host: the URL holds the token.
-func (p *pinger) send(ctx context.Context, action string, body []byte) (limit int, ok bool) {
+// 429, within budget: every attempt ends when the budget does, and a retry
+// whose wait would outlast it is not made. It reports whether the ping got
+// through and the Ping-Body-Limit the server announced (0 when none). A ping
+// that does not get through is a warning on Log naming only the server's
+// host: the URL holds the token.
+func (p *pinger) send(ctx context.Context, action string, body []byte, budget time.Duration) (limit int, ok bool) {
 	if p.base == nil || CheckPingURL(p.cfg.PingURL) != nil {
 		fmt.Fprintf(p.log, "tend exec: not pinging /%s: %v\n", action, ErrBadPingURL)
 		return 0, false
 	}
 	target := p.url(action)
 	host := urlredact.Host(target)
+	deadline := time.Now().Add(budget)
+	bctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	backoff := firstBackoff
 	for attempt := 0; ; attempt++ {
-		status, retryAfter, limit, err := p.attempt(ctx, target, body)
+		status, retryAfter, limit, err := p.attempt(bctx, target, body)
 		if err == nil && status >= 200 && status < 300 {
 			return limit, true
 		}
@@ -324,15 +357,19 @@ func (p *pinger) send(ctx context.Context, action string, body []byte) (limit in
 			fmt.Fprintf(p.log, "tend exec: /%s ping to %s refused: %s\n", action, host, reason)
 			return 0, false
 		}
-		if attempt >= p.cfg.Retries {
-			fmt.Fprintf(p.log, "tend exec: /%s ping to %s failed (%s); giving up after %d attempts\n", action, host, reason, attempt+1)
-			return 0, false
-		}
 		wait := backoff
 		if retryAfter > 0 {
 			wait = min(retryAfter, maxRetryAfter)
 		}
-		p.cfg.Sleep(ctx, wait)
+		switch {
+		case attempt >= p.cfg.Retries:
+			fmt.Fprintf(p.log, "tend exec: /%s ping to %s failed (%s); giving up after %d attempts\n", action, host, reason, attempt+1)
+			return 0, false
+		case bctx.Err() != nil || time.Until(deadline) <= wait:
+			fmt.Fprintf(p.log, "tend exec: /%s ping to %s failed (%s); giving up after %d attempts, its %s budget spent\n", action, host, reason, attempt+1, budget)
+			return 0, false
+		}
+		p.cfg.Sleep(bctx, wait)
 		backoff = min(2*backoff, maxBackoff)
 	}
 }

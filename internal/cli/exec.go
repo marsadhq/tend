@@ -38,6 +38,8 @@ func cmdExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	noStart := fs.Bool("no-start", false, "do not send /start before running the command")
 	bodyLimit := fs.Int("body-limit", pingexec.DefaultBodyLimit, "bytes of output tail to send with the completion ping (0: none)")
 	timeout := fs.Duration("timeout", pingexec.DefaultTimeout, "timeout of each ping attempt")
+	startBudget := fs.Duration("start-budget", pingexec.DefaultStartBudget, "the most the start ping may delay the command, retries included; the command then runs anyway")
+	finishBudget := fs.Duration("finish-budget", pingexec.DefaultFinishBudget, "the most the completion ping may take, retries included")
 	retries := fs.Int("retries", pingexec.DefaultRetries, "times a failed ping is retried (network errors, 5xx, 429)")
 	fs.Usage = func() { printExecUsage(fs.Output(), fs) }
 	if err := fs.Parse(args); err != nil {
@@ -75,16 +77,18 @@ func cmdExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	cfg := pingexec.Config{
-		PingURL:   target,
-		Start:     !*noStart,
-		BodyLimit: *bodyLimit,
-		Timeout:   *timeout,
-		Retries:   *retries,
-		UserAgent: "tend/" + Version,
-		Stdin:     stdin,
-		Stdout:    stdout,
-		Stderr:    stderr,
-		Log:       stderr,
+		PingURL:      target,
+		Start:        !*noStart,
+		BodyLimit:    *bodyLimit,
+		Timeout:      *timeout,
+		StartBudget:  *startBudget,
+		FinishBudget: *finishBudget,
+		Retries:      *retries,
+		UserAgent:    "tend/" + Version,
+		Stdin:        stdin,
+		Stdout:       stdout,
+		Stderr:       stderr,
+		Log:          stderr,
 	}
 	if *bodyLimit == 0 {
 		cfg.BodyLimit = -1
@@ -124,7 +128,10 @@ Sends <url>/start, runs the command with its output passed through, then
 sends <url>/<exit-status> with the tail of the output as the body, and exits
 with the command's status. Every ping carries the same ?rid=, so concurrent
 runs are told apart. A ping that fails is retried (network errors, 5xx, 429)
-and then given up with a warning; the command runs regardless. Works with a
+and then given up with a warning; the command runs regardless, held at most
+--start-budget by the start ping. --no-start reports the completion only (a
+started run is reported if it outlasts the heartbeat's grace, or its period
+when the grace is 0). Works with a
 Tend server and with any Healthchecks-compatible one (https://hc-ping.com/<uuid>,
 slug URLs too). Needs no database.
 

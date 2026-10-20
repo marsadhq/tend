@@ -143,7 +143,7 @@ Tend answers the [Healthchecks ping API](https://healthchecks.io/docs/http_api/)
 
 **Not the same:** a recorded ping answers `ok` in lower case, as Tend always has (Healthchecks: `OK`); an unknown token is `404 page not found` and a rate-limited ping `429` with `Retry-After` (hosted Healthchecks answers `200 OK (not found)` / `200 OK (rate limited)`); a heartbeat is armed from its creation, before its first ping; there are no cron schedules (an imported cron check gets an approximating period and a warning), no pause, no keyword filters, and no Management API.
 
-**Wrap a cron job** with `tend exec`, Tend's runitor: it pings `/start`, runs the command with its output passed through, pings `/<exit-status>` with the output's tail, retries pings on network errors, 5xx and 429, and exits with the command's status. It needs no database and works against Healthchecks-compatible URLs too.
+**Wrap a cron job** with `tend exec`, Tend's runitor: it pings `/start`, runs the command with its output passed through, pings `/<exit-status>` with the output's tail, retries pings on network errors, 5xx and 429 within a short budget (the start ping holds the command at most 5 seconds, the completion ping takes at most 20), and exits with the command's status. It needs no database and works against Healthchecks-compatible URLs too.
 
 ```cron
 15 3 * * *  tend exec --ping-url https://tend.example/ping/<token> -- /usr/local/bin/backup.sh
