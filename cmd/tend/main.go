@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -24,6 +25,13 @@ func main() {
 	defer stop()
 
 	if err := cli.Run(ctx, cfg, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
+		// tend exec exits with the status of the command it ran, which has
+		// said what it had to.
+		var exit *cli.ExitError
+		if errors.As(err, &exit) {
+			stop()
+			os.Exit(exit.Code)
+		}
 		fmt.Fprintf(os.Stderr, "tend: %v\n", err)
 		os.Exit(1)
 	}

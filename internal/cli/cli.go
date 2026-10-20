@@ -71,6 +71,11 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		printUsage(stdout)
 		return nil
 	}
+	// `tend exec` wraps a command on any host and talks to a ping URL only;
+	// it never opens a database.
+	if cmd == "exec" {
+		return cmdExec(ctx, args[1:], stdin, stdout, stderr)
+	}
 	// `tend serve -h` works with no environment set and neither creates the
 	// DSN file nor starts the daemon.
 	if cmd == "serve" && wantsHelp(args[1:]) {
@@ -1882,6 +1887,8 @@ Commands:
   job disable <name>  disable a job
   job rm <name>       delete a job (and its runs + job-scoped rules)
   run <name>          run a job immediately
+  exec [flags] -- <cmd>  run a command and report it to a ping URL (start,
+                      exit status, output tail); no database needed
   logs <name>         show run logs
   secret set <key>    store a secret (value read from stdin)
   channel add [flags] create/update a notification channel (config from stdin)
