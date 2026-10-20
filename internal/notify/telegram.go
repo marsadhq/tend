@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/marsadhq/tend/internal/urlredact"
+	"github.com/marsadhq/kit/urlredact"
 )
 
 // telegramAPIBase is the Telegram Bot API root. It is a package var so tests can

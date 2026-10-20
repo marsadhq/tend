@@ -67,7 +67,6 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
 | `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, the security-headers middleware, and the rate limiter for `/login` and `/ping`. |
-| `internal/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, shared by `notify` and `jobs` so secret-bearing URLs stay out of logs and run output. |
 | `internal/config` | Environment-driven process configuration (driver, DSN, master key). `TEND_DB` has no default; an unset value leaves the DSN empty and `cli.Run` refuses to open a database. |
 | `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, delivery worker, and retention sweep together. |
 
@@ -79,6 +78,7 @@ Code the Marsad tools share comes from the
 | --- | --- |
 | `kit/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 | `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
+| `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
 ---
 
@@ -431,7 +431,7 @@ careful.
   sent, because `serve` speaks plain HTTP and TLS is terminated at a reverse
   proxy.
 - **URLs are kept out of error text.** A failed outbound request surfaces as a
-  `*url.Error` that quotes the full URL. `internal/urlredact` reduces it to the
+  `*url.Error` that quotes the full URL. `kit/urlredact` reduces it to the
   host and the underlying cause; the webhook, Slack, Discord, and Telegram
   providers and the HTTP job executor all go through it, so a token embedded in
   a URL reaches neither the logs nor `job_runs.output`. Two causes would quote

@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/marsadhq/tend/internal/urlredact"
+	"github.com/marsadhq/kit/urlredact"
 )
 
 // killGraceDelay bounds how long cmd.Wait will block after the per-attempt
