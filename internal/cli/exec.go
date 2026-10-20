@@ -29,7 +29,10 @@ const envPingURL = "TEND_PING_URL"
 func cmdExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("exec", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	pingURL := fs.String("ping-url", os.Getenv(envPingURL), "the check's ping URL, e.g. https://tend.example/ping/<token> or https://hc-ping.com/<uuid> (default $"+envPingURL+")")
+	// The default comes from the environment after parsing, not as the
+	// flag's default: the usage text prints defaults, and this one holds a
+	// token.
+	pingURL := fs.String("ping-url", "", "the check's ping URL, e.g. https://tend.example/ping/<token> or https://hc-ping.com/<uuid> (default $"+envPingURL+")")
 	token := fs.String("token", "", "a Tend ping token; the URL is then <base-url>/ping/<token>")
 	base := fs.String("base-url", "", "Tend's base URL for --token (default $TEND_BASE_URL)")
 	noStart := fs.Bool("no-start", false, "do not send /start before running the command")
@@ -48,6 +51,9 @@ func cmdExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 
 	target := *pingURL
+	if target == "" && *token == "" {
+		target = os.Getenv(envPingURL)
+	}
 	if *token != "" {
 		if isFlagSet(fs, "ping-url") {
 			return errors.New("exec: pass --ping-url or --token, not both")
