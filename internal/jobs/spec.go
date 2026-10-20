@@ -130,7 +130,7 @@ func DefaultWarnDays(t JobType) int {
 // HasSpec reports whether jobs of type t carry settings in Job.Spec.
 func HasSpec(t JobType) bool {
 	switch t {
-	case TLS, Domain, Expiry:
+	case TLS, Domain, Expiry, Drill:
 		return true
 	}
 	return false
@@ -148,7 +148,7 @@ func ValidateSpec(t JobType, s *Spec) error {
 	if s == nil {
 		s = &Spec{}
 	}
-	if s.WarnDays < 0 {
+	if s.WarnDays < 0 && t != Drill {
 		return fmt.Errorf("warn_days must be 0 or more, got %d", s.WarnDays)
 	}
 	switch t {
@@ -158,6 +158,26 @@ func ValidateSpec(t JobType, s *Spec) error {
 		return validateDomain(s)
 	case Expiry:
 		return validateExpiry(s)
+	case Drill:
+		return validateDrill(s)
+	}
+	return nil
+}
+
+func validateDrill(s *Spec) error {
+	if strings.TrimSpace(s.Restore) == "" {
+		return errors.New("restore is required for drill jobs")
+	}
+	for i, c := range s.Checks {
+		if strings.TrimSpace(c) == "" {
+			return fmt.Errorf("check %d is empty", i+1)
+		}
+	}
+	if s.ScratchDir != "" && !filepath.IsAbs(s.ScratchDir) {
+		return fmt.Errorf("scratch_dir must be an absolute path, got %q", s.ScratchDir)
+	}
+	if s.MaxDurationSeconds < 0 {
+		return fmt.Errorf("max_duration_seconds must be 0 (no limit) or positive, got %d", s.MaxDurationSeconds)
 	}
 	return nil
 }

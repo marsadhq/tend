@@ -168,10 +168,16 @@ func (e *Executor) maxRunDuration(j Job) time.Duration {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	if timeout > forever-killGraceDelay {
+	grace := killGraceDelay
+	if j.Type == Drill {
+		// A drill's cleanup runs after its attempt's timeout, within a bound
+		// of its own.
+		grace += drillCleanupTimeout + killGraceDelay
+	}
+	if timeout > forever-grace {
 		return forever
 	}
-	perAttempt := timeout + killGraceDelay
+	perAttempt := timeout + grace
 
 	total := perAttempt
 	for attempt := 1; attempt < attempts; attempt++ {
@@ -256,6 +262,8 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 		return e.runOnceDomain(cctx, j, attempt, started)
 	case Expiry:
 		return e.runOnceExpiry(cctx, j, env, attempt, started)
+	case Drill:
+		return e.runOnceDrill(cctx, j, env, attempt, started)
 	default: // Shell or empty/default
 		return e.runOnceShell(cctx, j, env, attempt, started)
 	}
