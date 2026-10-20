@@ -101,17 +101,21 @@ func (s *PostgresStore) CreateJob(ctx context.Context, j jobs.Job) (int64, error
 	if err != nil {
 		return 0, err
 	}
+	spec, err := encodeSpec(j.Spec)
+	if err != nil {
+		return 0, err
+	}
 	now := nowStr()
 	var id int64
 	err = s.db.QueryRowContext(ctx, `INSERT INTO jobs (
 		org_id, name, type, command, http_url, http_method, http_body, cron,
 		interval_seconds, run_at, timeout_seconds, max_retries, enabled, env,
-		next_run, created_at, updated_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		next_run, created_at, updated_at, spec
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 	RETURNING id`,
 		j.OrgID, j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
 		j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries, boolToInt(j.Enabled), env,
-		nullTime(j.NextRunAt), now, now,
+		nullTime(j.NextRunAt), now, now, spec,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert job: %w", err)
@@ -177,14 +181,18 @@ func (s *PostgresStore) UpdateJob(ctx context.Context, j jobs.Job) error {
 	if err != nil {
 		return err
 	}
+	spec, err := encodeSpec(j.Spec)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET
 		name = $1, type = $2, command = $3, http_url = $4, http_method = $5, http_body = $6,
 		cron = $7, interval_seconds = $8, run_at = $9, timeout_seconds = $10, max_retries = $11,
-		enabled = $12, env = $13, next_run = $14, updated_at = $15
-		WHERE org_id = $16 AND id = $17`,
+		enabled = $12, env = $13, next_run = $14, updated_at = $15, spec = $16
+		WHERE org_id = $17 AND id = $18`,
 		j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody,
 		j.Cron, j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries,
-		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(),
+		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(), spec,
 		j.OrgID, j.ID,
 	)
 	if err != nil {

@@ -176,6 +176,31 @@ func decodeEnv(ns sql.NullString) (map[string]string, error) {
 	return m, nil
 }
 
+// encodeSpec serialises a job's type-specific settings to JSON, returning NULL
+// for a job that has none (shell and http jobs).
+func encodeSpec(spec *jobs.Spec) (sql.NullString, error) {
+	if spec == nil {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("marshal spec: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+// decodeSpec parses a stored spec back; NULL/empty yields nil.
+func decodeSpec(ns sql.NullString) (*jobs.Spec, error) {
+	if !ns.Valid || ns.String == "" {
+		return nil, nil
+	}
+	var spec jobs.Spec
+	if err := json.Unmarshal([]byte(ns.String), &spec); err != nil {
+		return nil, fmt.Errorf("unmarshal spec: %w", err)
+	}
+	return &spec, nil
+}
+
 // --- tenancy -------------------------------------------------------------
 
 // BootstrapDefaultOrg returns the "default" org, creating it if absent. It is
@@ -211,15 +236,19 @@ func (s *SQLiteStore) CreateJob(ctx context.Context, j jobs.Job) (int64, error) 
 	if err != nil {
 		return 0, err
 	}
+	spec, err := encodeSpec(j.Spec)
+	if err != nil {
+		return 0, err
+	}
 	now := nowStr()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO jobs (
 		org_id, name, type, command, http_url, http_method, http_body, cron,
 		interval_seconds, run_at, timeout_seconds, max_retries, enabled, env,
-		next_run, created_at, updated_at
-	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		next_run, created_at, updated_at, spec
+	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		j.OrgID, j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
 		j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries, boolToInt(j.Enabled), env,
-		nullTime(j.NextRunAt), now, now,
+		nullTime(j.NextRunAt), now, now, spec,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("insert job: %w", err)
@@ -234,10 +263,11 @@ func (s *SQLiteStore) CreateJob(ctx context.Context, j jobs.Job) (int64, error) 
 // jobColumns lists the jobs columns in SELECT order. THE ORDER IS LOAD-BEARING:
 // scanJob reads these by ordinal position, so this list must match the column
 // order of the jobs table in BOTH migrations/sqlite/0001_init.sql and
-// migrations/postgres/0001_init.sql. Reorder here only if you reorder there.
+// migrations/postgres/0001_init.sql, followed by the columns later migrations
+// appended (spec, 0012). Reorder here only if you reorder there.
 const jobColumns = `id, org_id, name, type, command, http_url, http_method, http_body, cron,
 	interval_seconds, run_at, timeout_seconds, max_retries, enabled, env, next_run,
-	created_at, updated_at`
+	created_at, updated_at, spec`
 
 // scanJob reads a jobs.Job from a row produced by a SELECT of jobColumns.
 func scanJob(sc interface{ Scan(...any) error }) (jobs.Job, error) {
@@ -255,11 +285,12 @@ func scanJob(sc interface{ Scan(...any) error }) (jobs.Job, error) {
 		nextRun  sql.NullString
 		created  sql.NullString
 		updated  sql.NullString
+		spec     sql.NullString
 	)
 	if err := sc.Scan(
 		&j.ID, &j.OrgID, &j.Name, &typ, &command, &httpURL, &httpMeth, &httpBody, &cron,
 		&j.IntervalSeconds, &runAt, &j.TimeoutSeconds, &j.MaxRetries, &enabled, &env, &nextRun,
-		&created, &updated,
+		&created, &updated, &spec,
 	); err != nil {
 		return jobs.Job{}, err
 	}
@@ -285,6 +316,9 @@ func scanJob(sc interface{ Scan(...any) error }) (jobs.Job, error) {
 		return jobs.Job{}, err
 	}
 	if j.Env, err = decodeEnv(env); err != nil {
+		return jobs.Job{}, err
+	}
+	if j.Spec, err = decodeSpec(spec); err != nil {
 		return jobs.Job{}, err
 	}
 	return j, nil
@@ -348,14 +382,18 @@ func (s *SQLiteStore) UpdateJob(ctx context.Context, j jobs.Job) error {
 	if err != nil {
 		return err
 	}
+	spec, err := encodeSpec(j.Spec)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET
 		name = ?, type = ?, command = ?, http_url = ?, http_method = ?, http_body = ?,
 		cron = ?, interval_seconds = ?, run_at = ?, timeout_seconds = ?, max_retries = ?,
-		enabled = ?, env = ?, next_run = ?, updated_at = ?
+		enabled = ?, env = ?, next_run = ?, updated_at = ?, spec = ?
 		WHERE org_id = ? AND id = ?`,
 		j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody,
 		j.Cron, j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries,
-		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(),
+		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(), spec,
 		j.OrgID, j.ID,
 	)
 	if err != nil {

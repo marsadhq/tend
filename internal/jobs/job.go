@@ -38,6 +38,7 @@ type Job struct {
 	MaxRetries      int       // additional attempts after the first
 	Enabled         bool
 	Env             map[string]string // per-job env vars; values may be secret refs (resolved later)
+	Spec            *Spec             // tls, domain, expiry and drill settings; nil for shell and http jobs
 	NextRunAt       time.Time         // persisted next fire time (zero = unscheduled)
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
