@@ -1,6 +1,13 @@
 package jobs
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"net"
+	"path/filepath"
+	"strings"
+	"time"
+)
 
 // The job types that watch something rather than do something, and the
 // restore drill. Like shell and http jobs they are scheduled, run, retried and
@@ -88,4 +95,100 @@ type Spec struct {
 	// MaxDurationSeconds (drill) fails the run when the restore took longer;
 	// 0 means no limit beyond the job's timeout.
 	MaxDurationSeconds int `json:"max_duration_seconds,omitempty"`
+}
+
+// Defaults applied where a probe is defined when it does not say otherwise.
+const (
+	// DefaultTLSWarnDays is a tls probe's warn_days: two weeks, the most
+	// Let's Encrypt's retired expiry emails ever gave.
+	DefaultTLSWarnDays = 14
+	// DefaultRenewAfterFraction is a tls probe's renew_after_fraction: ACME
+	// clients (certbot, Caddy, cert-manager) renew after two thirds of a
+	// certificate's lifetime.
+	DefaultRenewAfterFraction = 2.0 / 3
+)
+
+// DefaultWarnDays is the warn_days of a probe of type t that sets none.
+func DefaultWarnDays(t JobType) int {
+	switch t {
+	case TLS:
+		return DefaultTLSWarnDays
+	}
+	return 0
+}
+
+// HasSpec reports whether jobs of type t carry settings in Job.Spec.
+func HasSpec(t JobType) bool {
+	switch t {
+	case TLS:
+		return true
+	}
+	return false
+}
+
+// ValidateSpec reports what is wrong with the settings s of a job of type t,
+// or nil when they are complete and make sense. Shell and http jobs have no
+// settings, so s is not looked at for them. tend job add and tend sync call it
+// before anything is written, and the executor again before a run, so a job
+// stored by other means fails its run with the same message.
+func ValidateSpec(t JobType, s *Spec) error {
+	if !HasSpec(t) {
+		return nil
+	}
+	if s == nil {
+		s = &Spec{}
+	}
+	if s.WarnDays < 0 {
+		return fmt.Errorf("warn_days must be 0 or more, got %d", s.WarnDays)
+	}
+	switch t {
+	case TLS:
+		return validateTLS(s)
+	}
+	return nil
+}
+
+func validateTLS(s *Spec) error {
+	if s.Host == "" {
+		return errors.New("host is required for tls jobs")
+	}
+	if err := validHost(s.Host); err != nil {
+		return fmt.Errorf("host %q: %w", s.Host, err)
+	}
+	if s.Port < 0 || s.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535 (0 for the default), got %d", s.Port)
+	}
+	if s.ServerName != "" {
+		if err := validHost(s.ServerName); err != nil {
+			return fmt.Errorf("server_name %q: %w", s.ServerName, err)
+		}
+	}
+	switch s.StartTLS {
+	case "", "smtp", "imap":
+	default:
+		return fmt.Errorf("starttls must be smtp or imap (or unset for TLS from the start), got %q", s.StartTLS)
+	}
+	if s.RenewAfterFraction < 0 || s.RenewAfterFraction >= 1 {
+		return fmt.Errorf("renew_after_fraction must be at least 0 (off) and below 1, got %g", s.RenewAfterFraction)
+	}
+	if s.CAFile != "" && !filepath.IsAbs(s.CAFile) {
+		return fmt.Errorf("ca_file must be an absolute path, got %q", s.CAFile)
+	}
+	return nil
+}
+
+// validHost accepts a host name or an IP address, without a port or a scheme.
+func validHost(h string) error {
+	if net.ParseIP(h) != nil {
+		return nil
+	}
+	switch {
+	case strings.Contains(h, "://"):
+		return errors.New("give the host name alone, without a scheme")
+	case strings.Contains(h, ":"):
+		return errors.New("give the host name alone; the port has its own setting")
+	case strings.ContainsAny(h, "/ \t\r\n"), len(h) > 253:
+		return errors.New("not a host name")
+	}
+	return nil
 }
