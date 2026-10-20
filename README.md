@@ -228,7 +228,21 @@ printf 'the-secret-value' | tend secret set my_api_key
 
 ## Alerting
 
-Tend emits events (`run.failed`, `heartbeat.missed`, `heartbeat.recovered`, and others). A **channel** is a delivery destination; a **rule** routes matching event types to a channel. Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
+Tend emits events; a **channel** is a delivery destination and a **rule** routes matching event types to a channel. These event types can be routed:
+
+| Event | When | Payload |
+|---|---|---|
+| `run.failed` | a run failed, timed out, or was reaped (the precise status is in the payload) | `{"run_id","job_id","job_name","status","exit_code"}` |
+| `run.recovered` | a run succeeded and the job's previous finished run had not | same as `run.failed` |
+| `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping | the heartbeat name |
+| `heartbeat.recovered` | a ping arrived for a heartbeat that was down | the heartbeat name |
+| `job.removed` | a job was deleted (`tend job rm`) | `{"job_id","job_name"}` |
+| `heartbeat.removed` | a heartbeat was deleted (`tend heartbeat rm`) | the heartbeat name |
+| `notification.failed` | a delivery was given up after 24 hours of failures | the type of the event that was not delivered |
+
+`run.started` and `run.succeeded` are recorded (dashboard, `GET /api/events`) but never notify. A `notification.failed` whose own delivery is given up is dropped rather than reported again, so route it to a different channel than the ones it reports on.
+
+Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
 
 **Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
 

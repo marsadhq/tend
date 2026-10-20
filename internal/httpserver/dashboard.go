@@ -358,7 +358,7 @@ func toHeartbeatRow(h heartbeat.Heartbeat) heartbeatRow {
 // status palette where it overlaps.
 func eventStatusClass(eventType string) string {
 	switch {
-	case eventType == "run.failed", strings.HasPrefix(eventType, "heartbeat.missed"):
+	case eventType == "run.failed", eventType == "notification.failed", strings.HasPrefix(eventType, "heartbeat.missed"):
 		return "st-fail"
 	case eventType == "run.succeeded", eventType == "run.recovered", strings.HasPrefix(eventType, "heartbeat.recovered"):
 		return "st-ok"

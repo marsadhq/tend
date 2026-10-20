@@ -240,7 +240,8 @@ Event types currently emitted:
   scoped to the deleted job still routes its `job.removed`: the event is
   written before the job's rules are deleted. (`tend sync` does not delete
   jobs or heartbeats; see section 5.)
-- **Notifications:** `notification.failed` (emitted when delivery is exhausted).
+- **Notifications:** `notification.failed` (recorded when a delivery is given
+  up; the payload is the type of the event that was not delivered).
 
 **Terminal run events are written atomically with the run.** The runner records
 the terminal run state and appends the terminal event (and, for a recovery,
@@ -260,12 +261,16 @@ Because the delivery commits atomically with the event, neither a crash nor a
 slow destination can lose a matched notification. Overlapping rules for the
 same channel produce a single delivery.
 
-**The loop guard lives at enqueue time.** Only the `alertable` set
-(`run.failed`, `heartbeat.missed`, `heartbeat.recovered`; see
-`notify.Alertable`) ever enqueues deliveries. Every other event type, including
-all `notification.*` events, enqueues nothing. A delivery that is given up on
-emits `notification.failed`, which therefore can never feed back in and start a
-notification storm, and emitters can record `run.succeeded` freely.
+**Only alertable events enqueue.** Only the `alertable` set (`run.failed`,
+`run.recovered`, `heartbeat.missed`, `heartbeat.recovered`, `job.removed`,
+`heartbeat.removed`, `notification.failed`; see `notify.Alertable`) ever
+enqueues deliveries, so emitters can record `run.started` and `run.succeeded`
+freely. `notification.failed` is alertable so that a channel that stopped
+working can be reported through another one. The loop guard is in the worker:
+when the delivery it gives up on is itself a `notification.failed`, it marks it
+failed and records nothing further, so a broken channel cannot start a chain of
+failure reports. A given-up delivery and its `notification.failed` are written
+in one transaction (`FailDeliveryAndEmit`).
 
 **`notify.Worker` drains the queue.** It claims due rows (`ClaimDueDeliveries`
 increments the attempt count and pushes `next_attempt_at` out by a one-minute
@@ -273,7 +278,7 @@ lease, so a claim held by a crashed worker simply becomes due again), decrypts
 the channel config, builds the provider, and sends. Success marks the row
 `delivered`. Failure reschedules it with exponential backoff (1 second,
 doubling, capped at 5 minutes). Once a delivery has been failing for 24 hours it
-is marked `failed` and `notification.failed` is emitted, so a dropped alert is
+is marked `failed` and `notification.failed` is recorded, so a dropped alert is
 never silent. Delivery is at-least-once: a send that succeeded but could not be
 marked delivered is repeated after the lease.
 

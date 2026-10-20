@@ -139,6 +139,10 @@ type Store interface {
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
 	FailDelivery(ctx context.Context, id int64) error
+	// FailDeliveryAndEmit finalizes a still-pending delivery as failed and
+	// appends ev (notification.failed) in the same transaction; a delivery
+	// that is no longer pending is left alone and ev is not written.
+	FailDeliveryAndEmit(ctx context.Context, id int64, ev core.Event) error
 
 	// notification channels (encrypted config blob in/out; encryption lives elsewhere)
 	CreateChannel(ctx context.Context, ch notify.Channel, configBlob string) (int64, error) // upsert by (org,name); returns row ID

@@ -8,11 +8,12 @@ import (
 )
 
 // alertable is the set of event types that may trigger notifications.
-// notification.* is deliberately excluded so a delivery failure (which emits
-// notification.failed) can never enqueue a new delivery and start a loop.
-// Non-alert lifecycle events (run.started, run.succeeded) are likewise absent,
-// so emitters can fire on every event and let this filter drop the
-// non-failures.
+// Non-alert lifecycle events (run.started, run.succeeded) are absent, so
+// emitters can fire on every event and let this filter drop them.
+// notification.failed is alertable so that a channel that stopped working can
+// be reported through another one; the worker's loop guard keeps it from
+// feeding itself: giving up on the delivery of a notification.failed records
+// nothing further.
 var alertable = map[string]bool{
 	"run.failed":          true, // timeouts surface as run.failed (status in payload)
 	"run.recovered":       true, // a success after a run that did not succeed
@@ -20,12 +21,12 @@ var alertable = map[string]bool{
 	"heartbeat.recovered": true,
 	"job.removed":         true,
 	"heartbeat.removed":   true,
+	"notification.failed": true, // see the loop guard in Worker.deliverOne
 }
 
 // Alertable reports whether events of type t may trigger notifications. The
 // store consults it when enqueueing deliveries transactionally with an event
-// insert; it is the loop guard that keeps notification.* events from ever
-// producing deliveries of their own.
+// insert.
 func Alertable(t string) bool { return alertable[t] }
 
 // EventJobID extracts the job_id from a run.* event's JSON payload, or 0 when
@@ -127,6 +128,17 @@ func messageFor(ev core.Event) Message {
 		return Message{
 			Subject: "Heartbeat removed: " + ev.Payload,
 			Body:    "the heartbeat was deleted; it is no longer monitored",
+			Event:   ev,
+		}
+
+	case EventNotificationFailed:
+		subject, what := "Alert delivery failed", "a notification"
+		if ev.Payload != "" {
+			subject, what = subject+": "+ev.Payload, "a "+ev.Payload+" notification"
+		}
+		return Message{
+			Subject: subject,
+			Body:    what + " could not be delivered and was given up after retrying; that alert was not received",
 			Event:   ev,
 		}
 

@@ -117,3 +117,18 @@ func TestMessageForRemovals(t *testing.T) {
 		t.Fatal("job.removed payload must scope to its job")
 	}
 }
+
+// TestMessageForNotificationFailed asserts the failure report names the event
+// type that was not delivered.
+func TestMessageForNotificationFailed(t *testing.T) {
+	m := messageFor(core.Event{Type: "notification.failed", Payload: "run.failed"})
+	if m.Subject != "Alert delivery failed: run.failed" {
+		t.Fatalf("subject = %q", m.Subject)
+	}
+	if !strings.Contains(m.Body, "run.failed") {
+		t.Fatalf("body should name the undelivered event type: %q", m.Body)
+	}
+	if m2 := messageFor(core.Event{Type: "notification.failed"}); m2.Subject != "Alert delivery failed" {
+		t.Fatalf("empty payload subject = %q", m2.Subject)
+	}
+}
