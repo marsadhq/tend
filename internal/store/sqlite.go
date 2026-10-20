@@ -571,8 +571,9 @@ func enqueueDeliveriesTx(ctx context.Context, tx *sql.Tx, eventID int64, e core.
 		return nil
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT DISTINCT channel_id FROM notification_rules
-		 WHERE org_id = ? AND enabled = 1 AND event_type = ? AND (job_id = 0 OR job_id = ?)`,
+		`SELECT DISTINCT r.channel_id FROM notification_rules r
+		 JOIN notification_channels c ON c.id = r.channel_id AND c.org_id = r.org_id
+		 WHERE r.org_id = ? AND r.enabled = 1 AND r.event_type = ? AND (r.job_id = 0 OR r.job_id = ?)`,
 		e.OrgID, e.Type, notify.EventJobID(e))
 	if err != nil {
 		return fmt.Errorf("enqueue deliveries match: %w", err)
@@ -948,12 +949,32 @@ func (s *SQLiteStore) ListChannels(ctx context.Context, orgID int64) ([]notify.C
 	return out, nil
 }
 
-// DeleteChannel removes a channel scoped to its org.
+// DeleteChannel removes a channel scoped to its org together with everything
+// that pointed at it, in one transaction: its notification rules (which would
+// otherwise keep matching and queue deliveries to nowhere) and its pending
+// deliveries, which are finalized as failed since there is nowhere left to
+// send them. Deleting a channel that does not exist is a no-op.
 func (s *SQLiteStore) DeleteChannel(ctx context.Context, orgID, id int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM notification_channels WHERE org_id = ? AND id = ?`, orgID, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("delete channel begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM notification_rules WHERE org_id = ? AND channel_id = ?`, orgID, id); err != nil {
+		return fmt.Errorf("delete channel rules: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE deliveries SET state = ? WHERE org_id = ? AND channel_id = ? AND state = ?`,
+		notify.DeliveryFailed, orgID, id, notify.DeliveryPending); err != nil {
+		return fmt.Errorf("delete channel deliveries: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM notification_channels WHERE org_id = ? AND id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete channel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete channel commit: %w", err)
 	}
 	return nil
 }

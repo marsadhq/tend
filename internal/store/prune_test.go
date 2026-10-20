@@ -60,7 +60,7 @@ func TestPruneEvents(t *testing.T) {
 		backdate(t, s, "events", oldPlain, cutoff.Add(-time.Hour))
 
 		// Old event with a PENDING delivery -> kept by the guard.
-		if _, err := s.CreateRule(ctx, notify.Rule{OrgID: org.ID, ChannelID: 10, EventType: "run.failed", Enabled: true}); err != nil {
+		if _, err := s.CreateRule(ctx, notify.Rule{OrgID: org.ID, ChannelID: newChannel(t, ctx, s, org.ID, "ops"), EventType: "run.failed", Enabled: true}); err != nil {
 			t.Fatalf("CreateRule: %v", err)
 		}
 		oldPending := emit("run.failed")
@@ -153,11 +153,11 @@ func TestPruneDeliveries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BootstrapDefaultOrg: %v", err)
 		}
-		if _, err := s.CreateRule(ctx, notify.Rule{OrgID: org.ID, ChannelID: 10, EventType: "run.failed", Enabled: true}); err != nil {
+		if _, err := s.CreateRule(ctx, notify.Rule{OrgID: org.ID, ChannelID: newChannel(t, ctx, s, org.ID, "ops"), EventType: "run.failed", Enabled: true}); err != nil {
 			t.Fatalf("CreateRule: %v", err)
 		}
 
-		// Each alertable emit enqueues exactly one pending delivery for channel 10.
+		// Each alertable emit enqueues exactly one pending delivery for that channel.
 		emitDelivery := func() int64 {
 			evID, err := s.EmitEvent(ctx, core.Event{OrgID: org.ID, Type: "run.failed", Source: "test"})
 			if err != nil {
