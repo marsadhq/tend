@@ -1,0 +1,99 @@
+{{define "content"}}
+<nav class="crumbs"><a href="/heartbeats">Heartbeats</a> <span>/</span> <span>{{.Heartbeat.Name}}</span></nav>
+
+<section class="page-head">
+  <div>
+    <p class="eyebrow">Heartbeat</p>
+    <h1 class="page-title">{{.Heartbeat.Name}}</h1>
+  </div>
+  <span class="pill pill-lg {{.Heartbeat.StatusClass}}">{{.Heartbeat.Status}}</span>
+</section>
+
+{{/* SECURITY: the ping token is not in heartbeatRow, so it cannot reach this
+     page. A ping's Body is what the pinging script sent and is rendered only
+     through html/template auto-escaping, never as markup. */}}
+<dl class="meta-grid">
+  <div class="meta-item">
+    <dt>Period</dt>
+    <dd class="cell-mono">{{.Heartbeat.Period}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Grace</dt>
+    <dd class="cell-mono">{{.Heartbeat.Grace}}</dd>
+  </div>
+  <div class="meta-item">
+    <dt>Last ping</dt>
+    <dd class="cell-mono cell-muted">{{.Heartbeat.LastSeen}}</dd>
+  </div>
+  {{if .Running}}
+  <div class="meta-item">
+    <dt>Running since</dt>
+    <dd class="cell-mono cell-muted">{{.Running}}</dd>
+  </div>
+  {{end}}
+</dl>
+
+<section class="section">
+  <h2 class="section-title">Recent pings</h2>
+  {{if .Pings}}
+  <table class="grid-table">
+    <thead>
+      <tr>
+        <th>Kind</th>
+        <th>Exit</th>
+        <th>Took</th>
+        <th>Run</th>
+        <th>Logged</th>
+        <th class="col-status">When</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Pings}}
+      <tr>
+        <td><span class="pill {{.Class}}">{{.Kind}}</span></td>
+        <td class="cell-mono">{{.Exit}}</td>
+        <td class="cell-mono cell-muted">{{.Duration}}</td>
+        <td class="cell-mono cell-muted">{{.RID}}</td>
+        <td class="cell-mono">{{if .Body}}<details><summary>{{.BodySize}}</summary><pre class="output">{{.Body}}</pre></details>{{end}}</td>
+        <td class="col-status cell-mono cell-muted">{{.When}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">
+    <p class="empty-title">No pings yet</p>
+    <p class="empty-sub">Pings to this heartbeat's URL, and what they log, appear here.</p>
+  </div>
+  {{end}}
+</section>
+
+<section class="section">
+  <h2 class="section-title">Transitions</h2>
+  {{if .Transitions}}
+  <table class="grid-table event-table">
+    <thead>
+      <tr>
+        <th>Type</th>
+        <th>Detail</th>
+        <th class="col-status">When</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Transitions}}
+      <tr class="{{if .IsAlert}}is-alert{{end}}">
+        <td><span class="pill {{.Class}}">{{.Type}}</span></td>
+        <td class="cell-mono cell-payload">{{.Subject}}</td>
+        <td class="col-status cell-mono cell-muted">{{.Created}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty">
+    <p class="empty-title">No transitions yet</p>
+    <p class="empty-sub">Missed, failed and recovered alerts for this heartbeat appear here.</p>
+  </div>
+  {{end}}
+</section>
+{{end}}
