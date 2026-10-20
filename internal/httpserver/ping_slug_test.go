@@ -50,6 +50,18 @@ func TestSlugPings(t *testing.T) {
 		if hb := p.hb(t); hb.Status != "down" {
 			t.Fatalf("after /7 by slug: status %q, want down", hb.Status)
 		}
+
+		// A name with characters that need escaping is one segment.
+		ctx := context.Background()
+		if _, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{OrgID: p.orgID, Name: "db/backup nightly", Token: "tok-escaped", PeriodSeconds: 60}); err != nil {
+			t.Fatal(err)
+		}
+		p = newPingAPIKeep(t, p)
+		wantOK(t, p.do(http.MethodGet, testPingKey+"/db%2Fbackup%20nightly/start", ""), "escaped slug")
+		hb, err := s.GetHeartbeatByName(ctx, p.orgID, "db/backup nightly")
+		if err != nil || hb.StartedAt.IsZero() {
+			t.Fatalf("escaped slug ping did not reach its heartbeat: %+v, %v", hb, err)
+		}
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -96,11 +97,19 @@ var errPingNotFound = errors.New("not found")
 // log, or an exit status), and otherwise the slug form, key <a> and slug <b>.
 // A heartbeat named like an action is therefore reached by slug only with an
 // action of its own (/ping/<key>/<name>/0 for a success).
-func parsePing(path string, query map[string][]string) (pingRequest, error) {
-	path = strings.TrimSuffix(path, "/")
-	segs := strings.Split(path, "/")
-	if path == "" || len(segs) > 3 {
+func parsePing(escapedPath string, query map[string][]string) (pingRequest, error) {
+	escapedPath = strings.TrimSuffix(escapedPath, "/")
+	segs := strings.Split(escapedPath, "/")
+	if escapedPath == "" || len(segs) > 3 {
 		return pingRequest{}, errPingNotFound
+	}
+	// Segments are split before they are unescaped, so a heartbeat name with
+	// an escaped '/' in it stays one segment.
+	for i, seg := range segs {
+		var err error
+		if segs[i], err = url.PathUnescape(seg); err != nil || segs[i] == "" {
+			return pingRequest{}, errPingNotFound
+		}
 	}
 	req := pingRequest{in: heartbeat.PingInput{Kind: heartbeat.PingSuccess}}
 	switch len(segs) {
@@ -125,9 +134,6 @@ func parsePing(path string, query map[string][]string) (pingRequest, error) {
 			return pingRequest{}, errPingNotFound
 		}
 		req.key, req.slug, req.in = segs[0], segs[1], in
-	}
-	if req.key != "" && req.slug == "" {
-		return pingRequest{}, errPingNotFound
 	}
 	if req.key != "" {
 		req.create = len(query["create"]) > 0 && query["create"][0] == "1"
@@ -293,7 +299,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		pingReply(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	req, err := parsePing(strings.TrimPrefix(r.URL.Path, "/ping/"), r.URL.Query())
+	req, err := parsePing(strings.TrimPrefix(r.URL.EscapedPath(), "/ping/"), r.URL.Query())
 	switch {
 	case errors.Is(err, errPingURL), errors.Is(err, errPingRID):
 		pingReply(w, http.StatusBadRequest, err.Error())
