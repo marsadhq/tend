@@ -1062,7 +1062,7 @@ func cmdChannelAdd(ctx context.Context, st store.Store, box *secrets.Box, orgID 
 	fs := flag.NewFlagSet("channel add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	name := fs.String("name", "", "channel name (required)")
-	typ := fs.String("type", "", "channel type: webhook, slack, discord, smtp, or telegram (required)")
+	typ := fs.String("type", "", "channel type: "+notify.ChannelTypeList()+" (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1070,12 +1070,10 @@ func cmdChannelAdd(ctx context.Context, st store.Store, box *secrets.Box, orgID 
 		return fmt.Errorf("channel add: -name is required")
 	}
 	if *typ == "" {
-		return fmt.Errorf("channel add: -type is required (webhook, slack, discord, smtp, or telegram)")
+		return fmt.Errorf("channel add: -type is required (%s)", notify.ChannelTypeList())
 	}
-	switch kitnotify.ChannelType(*typ) {
-	case kitnotify.Webhook, kitnotify.Slack, kitnotify.Discord, kitnotify.SMTP, kitnotify.Telegram:
-	default:
-		return fmt.Errorf("channel add: unknown type %q (must be webhook, slack, discord, smtp, or telegram)", *typ)
+	if !notify.ValidChannelType(*typ) {
+		return fmt.Errorf("channel add: unknown type %q (must be %s)", *typ, notify.ChannelTypeList())
 	}
 	if box == nil {
 		return fmt.Errorf("channel add: TEND_MASTER_KEY is not set; cannot encrypt channel config")

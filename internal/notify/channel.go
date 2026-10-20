@@ -15,6 +15,8 @@ package notify
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"time"
 
 	kitnotify "github.com/marsadhq/kit/notify"
@@ -71,4 +73,29 @@ func GetChannelDecrypted(ctx context.Context, s ChannelStore, box *secrets.Box, 
 		return Channel{}, nil, err
 	}
 	return ch, cfg, nil
+}
+
+// channelTypes are the channel kinds Tend accepts, in the order its help and
+// error messages name them.
+var channelTypes = []kitnotify.ChannelType{
+	kitnotify.Webhook,
+	kitnotify.Slack,
+	kitnotify.Discord,
+	kitnotify.SMTP,
+	kitnotify.Telegram,
+}
+
+// ValidChannelType reports whether t names a channel kind Tend accepts.
+func ValidChannelType(t string) bool {
+	return slices.Contains(channelTypes, kitnotify.ChannelType(t))
+}
+
+// ChannelTypeList names the accepted channel kinds for a message:
+// "webhook, slack, ..., or telegram".
+func ChannelTypeList() string {
+	names := make([]string, len(channelTypes))
+	for i, t := range channelTypes {
+		names[i] = string(t)
+	}
+	return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
 }

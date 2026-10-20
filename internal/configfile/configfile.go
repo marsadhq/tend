@@ -116,15 +116,6 @@ type jobSpec struct {
 	Env             map[string]string `yaml:"env"`
 }
 
-// validChannelTypes enumerates the channel kinds the config may declare.
-var validChannelTypes = map[string]bool{
-	string(kitnotify.Webhook):  true,
-	string(kitnotify.Slack):    true,
-	string(kitnotify.Discord):  true,
-	string(kitnotify.SMTP):     true,
-	string(kitnotify.Telegram): true,
-}
-
 // -------------------------------------------------------------------
 // Parse
 // -------------------------------------------------------------------
@@ -160,8 +151,8 @@ func Parse(data []byte) (Config, error) {
 			if c.Type == "" {
 				return Config{}, fmt.Errorf("configfile: channel %q: type is required", c.Name)
 			}
-			if !validChannelTypes[c.Type] {
-				return Config{}, fmt.Errorf("configfile: channel %q: unknown type %q (must be webhook, slack, discord, or smtp)", c.Name, c.Type)
+			if !notify.ValidChannelType(c.Type) {
+				return Config{}, fmt.Errorf("configfile: channel %q: unknown type %q (must be %s)", c.Name, c.Type, notify.ChannelTypeList())
 			}
 			cfg.Channels = append(cfg.Channels, ChannelSpec{
 				Name:   c.Name,
