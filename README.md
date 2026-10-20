@@ -26,7 +26,7 @@ Most teams stitch this together from three or four moving parts: system cron to 
 - **Scheduling**: shell or HTTP jobs on cron expressions, fixed intervals, or a one-off `run_at` time.
 - **Run monitoring**: every execution is recorded with its status, exit code, timing, and captured output (up to 1 MiB per attempt), browsable in the dashboard or over the HTTP API.
 - **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, SMTP, Telegram, ntfy, or Pushover channels, globally or scoped to a single job.
-- **Dead-man's-switch heartbeats**: give Tend a ping URL for any external job; if a ping doesn't arrive within its period plus grace, Tend alerts.
+- **Dead-man's-switch heartbeats**: give Tend a ping URL for any external job; if a ping doesn't arrive within its period plus grace, Tend alerts. The ping API is [Healthchecks'](#coming-from-healthchecksio) (`/start`, `/fail`, exit statuses, logged output), so existing scripts, borgmatic and runitor switch by changing one base URL, `tend exec` wraps any cron job, and `tend import healthchecks` brings a project's checks over with their UUIDs.
 
 It's a **single static, CGO-free binary**. SQLite is the default store (no database to stand up), with an optional Postgres backend for a managed or external database. **No Redis, no external dependencies.** Configure it imperatively with the CLI or declaratively with a YAML file you keep in version control.
 
@@ -129,6 +129,35 @@ For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a har
 
 ---
 
+## Coming from Healthchecks.io
+
+Tend answers the [Healthchecks ping API](https://healthchecks.io/docs/http_api/), so anything written for Healthchecks moves over by changing the base of its ping URL. The full guide, with every difference spelled out, is [docs/healthchecks.md](docs/healthchecks.md).
+
+| Healthchecks | Tend |
+|---|---|
+| `https://hc-ping.com/<uuid>` | `<TEND_BASE_URL>/ping/<token>` (an imported check keeps its UUID as the token) |
+| `…/start`, `…/fail`, `…/log`, `…/<0-255>`, `?rid=<uuid>` | the same suffixes and query on `/ping/<token>` |
+| `https://hc-ping.com/<ping-key>/<slug>[/…]`, `?create=1` | `<TEND_BASE_URL>/ping/<ping-key>/<heartbeat-name>[/…]`, `?create=1`, once the org has a ping key (`tend heartbeat ping-key -new`, or `-set` to adopt the project's) |
+
+**Supported:** success, `/start` (a run that does not finish within the grace takes the heartbeat down), `/fail` and exit statuses 1 to 255 (down at once, alerting as `heartbeat.missed` with the subject `Heartbeat failed: <name> (exit 3)` and the tail of the output), `/0`, `/log`, `?rid=` (durations, concurrent runs), the request body as the ping's log (up to 100 kB, shown by `tend heartbeat history -body`, `tend heartbeat show`, the dashboard and `GET /api/heartbeats/{id}/pings`), HEAD, GET and POST, slug URLs with `?create=1`, and Healthchecks' `OK`/`Created` replies and `Ping-Body-Limit` header.
+
+**Not the same:** an unknown token is `404 not found` and a rate-limited ping `429` with `Retry-After` (hosted Healthchecks answers `200 OK (not found)` / `200 OK (rate limited)`); a heartbeat is armed from its creation, before its first ping; there are no cron schedules (an imported cron check gets an approximating period and a warning), no pause, no keyword filters, and no Management API.
+
+**Wrap a cron job** with `tend exec`, Tend's runitor: it pings `/start`, runs the command with its output passed through, pings `/<exit-status>` with the output's tail, retries pings on network errors, 5xx and 429, and exits with the command's status. It needs no database and works against Healthchecks-compatible URLs too.
+
+```cron
+15 3 * * *  tend exec --ping-url https://tend.example/ping/<token> -- /usr/local/bin/backup.sh
+```
+
+**Import a project** with the project's read-write API key (read from a file, never printed): each check becomes a heartbeat with the check's UUID as its token, `timeout` as the period and `grace` as the grace. `--dry-run` prints the plan first.
+
+```sh
+tend import healthchecks --api-key-file ~/hc-api-key --dry-run
+tend import healthchecks --api-key-file ~/hc-api-key [--url https://healthchecks.example] [--include-paused]
+```
+
+---
+
 # Reference
 
 ## Environment variables
@@ -140,9 +169,10 @@ For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a har
 | `TEND_ADDR`          | `:8080`                 | TCP listen address for the HTTP server. |
 | `TEND_BASE_URL`      | `http://localhost:8080` | Externally-reachable base URL. Used when printing heartbeat ping URLs. Set this when Tend is behind a reverse proxy. |
 | `TEND_COOKIE_SECURE` | `false`                 | Set to `1`, `true`, `yes`, or `on` to mark session cookies as `Secure` (HTTPS-only). Leave `false` when TLS is terminated at a reverse proxy. |
-| `TEND_RETENTION_EVENTS_DAYS` / `TEND_RETENTION_RUNS_DAYS` / `TEND_RETENTION_DELIVERIES_DAYS` | `30` / `90` / `7` | Days of events, finished job runs, and finished notification deliveries the [retention sweep](#limits-and-housekeeping) keeps; `0` keeps that history forever. |
+| `TEND_RETENTION_EVENTS_DAYS` / `TEND_RETENTION_RUNS_DAYS` / `TEND_RETENTION_DELIVERIES_DAYS` / `TEND_RETENTION_PINGS_DAYS` | `30` / `90` / `7` / `30` | Days of events, finished job runs, finished notification deliveries, and heartbeat ping logs the [retention sweep](#limits-and-housekeeping) keeps; `0` keeps that history forever. |
 | `TEND_DELIVERY_HOLD_MINUTES` | `15` | How long a notification that keeps failing may hold back the later ones on its channel, counted from its first attempt (see [Delivery](#alerting)); `0` turns per-channel ordering off. A whole number of minutes up to 1440; `serve` refuses anything else. |
 | `TEND_TRUST_PROXY`   | `false`                 | Set to `1`, `true`, `yes`, or `on` when Tend runs behind a reverse proxy you control. [Rate limiting](#limits-and-housekeeping) then keys on the left-most `X-Forwarded-For` address instead of the TCP peer (an entry that is not an IP address is ignored). Only enable it when the proxy **overwrites** that header; if clients can reach Tend directly, or the proxy merely appends to the header, they can forge it and dodge the limit. |
+| `TEND_PING_URL`      | *(unset)*               | The ping URL `tend exec` reports to when `--ping-url` is not given. |
 | `TEND_INSTANCE`      | the host name           | This installation's name in the `marsad` envelope of [webhook notifications](#send-tend-events-to-ward-or-any-sink) (`source.instance`), so a receiver fed by several Tends can tell them apart. |
 
 `tend serve` **refuses to start without `TEND_MASTER_KEY`**, and with a key that is not 32 base64-encoded bytes: channel configs are encrypted with it, so a server without it could not send a single alert, and a typo in the variable name used to produce exactly that without a word. For a local experiment, `tend serve --no-master-key` starts anyway with alerts and the dashboard off (only `/healthz` and `/ping/{token}` are served) and says so in its banner. The master key serves two roles: it derives a stable session-cookie signing key (HKDF-SHA256, so restarts keep existing sessions valid) and it encrypts stored secrets and channel configs. See the [security model](docs/ARCHITECTURE.md#6-security-model) for details.
@@ -237,7 +267,7 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 |---|---|---|
 | `run.failed` | a run failed, timed out, or was reaped (the precise status is in the payload) | `{"run_id","job_id","job_name","status","exit_code"}` |
 | `run.recovered` | a run succeeded and the job's previous finished run had not | same as `run.failed` |
-| `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping | the heartbeat name |
+| `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping, a run it started (`/start`) did not finish within its grace, or it reported a failure (`/fail`, an exit status of 1 to 255); the subject says which, e.g. `Heartbeat failed: db-backup (exit 3)`, and a failure's body ends with the tail of its logged output | the heartbeat name |
 | `heartbeat.recovered` | a ping arrived for a heartbeat that was down | the heartbeat name |
 | `job.removed` | a job was deleted (`tend job rm`) | `{"job_id","job_name"}` |
 | `heartbeat.removed` | a heartbeat was deleted (`tend heartbeat rm`) | the heartbeat name |
@@ -263,7 +293,7 @@ Secrets in a channel's config (tokens, keys, webhook URLs) can come from `{{ sec
 
 ### Alert on a missed heartbeat
 
-A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. Route both to a channel with a rule:
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. The job can say more with the [Healthchecks-compatible](#coming-from-healthchecksio) suffixes: `/start` when it begins (it is then reported if it does not finish within the grace), `/fail` or `/<exit-status>` when it ends (a failure is reported at once), `/log` for a note, with its output as the POST body; `tend exec` does all of that for any command. Route both events to a channel with a rule:
 
 ```yaml
 notifications:
@@ -283,7 +313,7 @@ Make the ping retry, so a moment of unavailability (a restart, a network blip, o
 curl -fsS -m 10 --retry 5 --retry-max-time 60 -X POST "$TEND_BASE_URL/ping/<token>"
 ```
 
-Recover a synced heartbeat's ping URL any time with `tend heartbeat ping-url <name>` (or `tend heartbeat show <name>`), and inspect its transition history with `tend heartbeat history <name>`.
+Recover a synced heartbeat's ping URL any time with `tend heartbeat ping-url <name>` (or `tend heartbeat show <name>`, which also shows the run being timed and the last result with its output), and inspect its pings and transitions with `tend heartbeat history <name>` (`-body` prints what each ping logged).
 
 ### Send Tend events to Ward (or any sink)
 
@@ -368,9 +398,12 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend rule list` | List rules. |
 | `tend heartbeat add -name <n> -period <s> [-grace <s>]` | Create/update a heartbeat; prints the ping URL. |
 | `tend heartbeat list` | List heartbeats and their current status. |
-| `tend heartbeat show <name>` | Show a heartbeat's status, period, grace, last-seen, and ping URL. |
+| `tend heartbeat show <name>` | Show a heartbeat's status, period, grace, last-seen, the run being timed, the last ping and result (with its duration and the tail of its output), and its ping URLs. |
 | `tend heartbeat ping-url <name>` | Print a heartbeat's ping URL (recover a synced heartbeat's token). |
-| `tend heartbeat history <name> [-limit <n>]` | Show a heartbeat's missed/recovered transitions (default 20). |
+| `tend heartbeat history <name> [-limit <n>] [-body]` | Show a heartbeat's pings (kind, exit status, duration, run id, body size) and transitions, newest first (default 20); `-body` prints each ping's logged body. |
+| `tend heartbeat ping-key [-new \| -set \| -clear]` | Show, generate, adopt (from stdin) or remove the org's ping key, which turns on slug ping URLs (`/ping/<ping-key>/<name>`). |
+| `tend exec [flags] [--] <command> [args...]` | Run a command between a `/start` ping and an `/<exit-status>` ping carrying its output's tail, and exit with its status ([details](docs/healthchecks.md#tend-exec)). Needs no database. |
+| `tend import healthchecks --api-key-file <file> [--url <url>] [--dry-run] [--include-paused]` | Import a Healthchecks project's checks as heartbeats that keep their UUIDs as tokens ([details](docs/healthchecks.md#importing-a-project)). |
 | `tend heartbeat rm <name>` | Delete a heartbeat (its past events are kept). |
 | `tend user add -email <e>` | Create an admin user; password read from stdin. |
 | `tend token create -name <n>` | Create an API token; printed once. |
@@ -379,7 +412,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 `tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive; a cron expression that does not parse is rejected and no job is created); `-timeout <seconds>` per attempt (default `0` = 30 minutes); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
 
-`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, `telegram`, `ntfy`, or `pushover`, with the config JSON shown in [Alerting](#alerting) on stdin. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
+`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, `telegram`, `ntfy`, or `pushover`, with the config JSON shown in [Alerting](#alerting) on stdin. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a HEAD, GET or POST to it from any external job, with the [Healthchecks suffixes](#coming-from-healthchecksio) when the job has more to say. There is no `user list` or `user rm` in this release.
 
 ## HTTP API
 
@@ -394,13 +427,16 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `GET` | `/api/channels` | List channels (metadata only; no config/credentials). |
 | `GET` | `/api/rules` | List notification rules. |
 | `GET` | `/api/heartbeats` | List heartbeats (no ping token). |
+| `GET` | `/api/heartbeats/{id}` | Get a heartbeat, with the run being timed (`started_at`, `started_rid`). |
+| `GET` | `/api/heartbeats/{id}/history` | List a heartbeat's transitions; an event's `detail` says why it went down. |
+| `GET` | `/api/heartbeats/{id}/pings` | List a heartbeat's ping log (`?limit=`, max 200): kind, exit status, run id, duration, logged body. |
 | `GET` | `/api/events` | List recent events (`?limit=`, max 200). |
 | `GET` | `/api/secrets` | List secret names and timestamps (no values). |
 | `POST` | `/api/jobs/{id}/run` | Enqueue a run. Returns `202 {"run_id": N}`. |
 | `POST` | `/api/jobs/{id}/enable` | Enable a job. Returns the updated job. |
 | `POST` | `/api/jobs/{id}/disable` | Disable a job. Returns the updated job. |
 
-Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `GET`/`POST` `/ping/{token}` is the heartbeat ping receiver. `/ping/{token}` and `POST /login` are rate limited; see [Limits and housekeeping](#limits-and-housekeeping).
+Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `/ping/...` (HEAD, GET or POST) is the [heartbeat ping API](#coming-from-healthchecksio). `/ping/...` and `POST /login` are rate limited; see [Limits and housekeeping](#limits-and-housekeeping).
 
 The API is **read-mostly by design**: resource definitions are managed via the CLI and config-as-code; only run-now, enable, and disable are exposed as mutations. See the [capability asymmetries](docs/ARCHITECTURE.md#7-capability-asymmetries-by-design) for the rationale.
 
@@ -411,11 +447,12 @@ These are built in; only the retention windows are configurable.
 | What | Behavior |
 |------|----------|
 | Captured output | At most 1 MiB per attempt (stdout and stderr combined for shell jobs, the response body for HTTP jobs). The rest is discarded and the output ends with `... [output truncated at 1MiB]`; the cut never splits a UTF-8 character. The run's status and exit code are not affected. When a job retries, the run stores the output of its last attempt. Output is stored as text on either database: NUL bytes are dropped and bytes that are not valid UTF-8 are replaced with U+FFFD, before secret values are redacted. What is stored, the `HTTP <status>` line of an HTTP job included, never exceeds 1 MiB plus that marker. |
+| Ping bodies | The body of a POST to `/ping/...` is logged with the ping: at most its first 100 kB (announced in the `Ping-Body-Limit` reply header), cleaned to text the same way as job output, with the ping's token or ping key replaced by `***`, and ending with `... [ping body truncated at 100 kB]` when cut. |
 | Job timeout | A job without a timeout (`timeout_seconds` / `-timeout` of 0) gets 30 minutes per attempt. A negative timeout is refused by `tend job add` and `tend sync`. |
 | Stale runs | On startup, runs a crashed `tend serve` left `running` are put back in the queue. A run that a `tend run` command is executing is left to it, so starting the server meanwhile never runs that job twice; if the command died, the sweep below fails the run. While `serve` is up, a sweep every minute looks for runs still `running` more than 2 minutes past the longest they could legitimately take, counted from the start of the run: every attempt (`max_retries` + 1 of them) reaching its timeout, plus the pauses between retries. For a run the server itself is executing, the timeout and retry count are the ones the job had when the run started, so editing a job cannot get its run in flight failed; for any other run they are the job's current ones. Such a run is presumed to have lost its worker: it is marked failed and `run.failed` is emitted, so the job is not blocked until the next restart. That result is final; if the worker turns up after all, its late result is discarded, which the server logs. |
-| Retention | `serve` prunes at startup and then every 24 hours: events older than 30 days, finished job runs older than 90 days (**up from 30 days before v0.3.0**; the banner says so while that default is in effect), and finished (delivered or failed) notification deliveries older than 7 days. Set `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS` and `TEND_RETENTION_DELIVERIES_DAYS` to a whole number of days to change a window, or to `0` to keep that history forever; `serve` refuses to start on any other value, and its banner and `tend doctor` print the windows in effect. Pending and running runs, pending deliveries, and the events they refer to are never pruned. |
+| Retention | `serve` prunes at startup and then every 24 hours: events older than 30 days, finished job runs older than 90 days (**up from 30 days before v0.3.0**; the banner says so while that default is in effect), finished (delivered or failed) notification deliveries older than 7 days, and heartbeat ping log entries older than 30 days. Set `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS`, `TEND_RETENTION_DELIVERIES_DAYS` and `TEND_RETENTION_PINGS_DAYS` to a whole number of days to change a window, or to `0` to keep that history forever; `serve` refuses to start on any other value, and its banner and `tend doctor` print the windows in effect. Pending and running runs, pending deliveries, and the events they refer to are never pruned. Whatever the window, each heartbeat keeps only its newest 1000 pings, trimmed as pings arrive. |
 | Disk space (SQLite) | When a sweep has freed at least 8 MiB and a quarter of the database file, `serve` gives the space back to the file system. The first time, it switches the file to incremental auto-vacuum with one `VACUUM`, which rewrites the file and holds every other query for that moment; it only does this for a file of at most 64 MiB. After that it frees space in small steps, each a short statement with other queries let through in between, for at most about 2 seconds per sweep, leaving any rest to the next sweep. A larger file that has never been switched is left alone, which the server says once: stop `tend serve` and run `sqlite3 /path/to/tend.db 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM;'` once, and the sweeps take it from there. Postgres reuses the space of deleted rows itself (autovacuum). |
-| Rate limits | `POST /login`: a burst of 5 requests, then 1 per second, per client address. `/ping/{token}`: pings for a real heartbeat are limited per heartbeat (a burst of 10, then 1 per second) and never per address, so one host can ping any number of heartbeats on the same minute; pings with an unknown token are limited per client address (a burst of 30, then 1 per second), and an address over that limit is refused for every token until it refills, which is what stops token guessing. Limits are held in memory by the server process. Requests over a limit get `429 Too Many Requests` with a `Retry-After` header; ping clients should retry (see [the heartbeat section](#alert-on-a-missed-heartbeat)). Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
+| Rate limits | `POST /login`: a burst of 5 requests, then 1 per second, per client address. `/ping/...`: pings for a real heartbeat, of every kind and by token or slug alike, are limited per heartbeat (a burst of 10, then 1 per second) and never per address, so one host can ping any number of heartbeats on the same minute; pings with an unknown token, ping key or slug are limited per client address (a burst of 30, then 1 per second), and an address over that limit is refused for every token until it refills, which is what stops token guessing. Slug pings with `?create=1` create at most 20 heartbeats per org at once, then 1 a minute. Limits are held in memory by the server process. Requests over a limit get `429 Too Many Requests` with a `Retry-After` header; ping clients should retry (see [the heartbeat section](#alert-on-a-missed-heartbeat)). Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
 | HTTP timeouts | The server gives up on a connection after 10 seconds spent reading a request (headers and body), writing a response, or sitting idle. |
 | Security headers | Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` that only allows same-origin scripts, styles, and images. `Strict-Transport-Security` is not sent because Tend itself serves plain HTTP; add it at the proxy that terminates TLS. |
 | URLs in errors | When a webhook, Slack, Discord, Telegram, ntfy, or Pushover delivery or an HTTP job fails, the error names only the host. The rest of the URL, where tokens usually live (an ntfy topic among them), is kept out of logs and stored run output, and so are the Pushover token and user key. |
@@ -468,6 +505,7 @@ Only run-now, enable, and disable are available as API mutations; creating, edit
 ## Documentation and links
 
 - [Architecture](docs/ARCHITECTURE.md): package layout, store parity, event pipeline, security model, and intentional capability asymmetries.
+- [Coming from Healthchecks.io](docs/healthchecks.md): the ping API, `tend exec`, the importer, and what differs.
 - [Contributing](CONTRIBUTING.md): how to build, test, and submit changes.
 - [Security policy](SECURITY.md): how to report vulnerabilities.
 - [License](LICENSE): AGPL-3.0.

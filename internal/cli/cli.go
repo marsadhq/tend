@@ -290,7 +290,8 @@ const serveShutdownTimeout = 5 * time.Second
 // httpTimeout bounds each phase of an HTTP connection (reading the headers,
 // reading the whole request including its body, writing the response, and
 // idling between requests); see httpx.NewServer. All handlers are quick and
-// the largest request body is a login form, so one short limit fits them all.
+// the largest request body is a ping's (up to 100 kB is read), so one short
+// limit fits them all.
 const httpTimeout = 10 * time.Second
 
 // sessionKeyInfo is the HKDF "info" label that domain-separates the session
@@ -1939,8 +1940,10 @@ Runs these components until interrupted (Ctrl-C):
   - the job runner (executes due jobs; fails runs left running past their timeout)
   - the HTTP server: the heartbeat ping API at /ping/<token>, compatible
     with Healthchecks' (/start, /fail, /log, /<exit-status>, ?rid=, a POST
-    body of up to 100 kB is logged), /healthz, and the dashboard/API
-  - the heartbeat watcher (flags missed dead-man's-switch pings)
+    body of up to 100 kB is logged; /ping/<ping-key>/<name> once the org
+    has a ping key), /healthz, and the dashboard/API
+  - the heartbeat watcher (flags missed dead-man's-switch pings, and started
+    runs that did not finish within their grace)
   - the notification delivery worker
   - a daily retention sweep (prunes old events, job runs, deliveries and
     heartbeat pings, then gives the space back on SQLite)
@@ -1972,5 +1975,8 @@ Environment:
 Related commands:
   tend doctor          diagnose config/DB/connectivity
   tend heartbeat add   create a heartbeat (prints the ping URL)
-  tend heartbeat list  list heartbeats`)
+  tend heartbeat list  list heartbeats
+  tend heartbeat ping-key  turn on slug ping URLs (/ping/<ping-key>/<name>)
+  tend exec            wrap a command with start and exit-status pings
+  tend import healthchecks  import a Healthchecks project's checks`)
 }
