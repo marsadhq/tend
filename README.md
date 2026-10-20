@@ -136,13 +136,13 @@ For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a har
 | Variable             | Default                 | Description |
 |----------------------|-------------------------|-------------|
 | `TEND_DB`            | *(required)*            | SQLite file path **or** a `postgres://` / `postgresql://` URL. There is no default: every command that opens the database refuses to run while it is unset (`tend version`, `tend help`, and `tend serve -h` are the exceptions). Use an absolute path for SQLite. The Docker image sets it to `/data/tend.db` and the shipped system unit to `/var/lib/tend/tend.db`. |
-| `TEND_MASTER_KEY`    | *(none)*                | Base64-encoded 32-byte key. Required for the dashboard, session signing, and secrets encryption. Generate once with `head -c 32 /dev/urandom \| base64`. **Must be stable** across restarts; changing it invalidates all sessions and makes all stored secrets unreadable. |
+| `TEND_MASTER_KEY`    | *(required by `serve`)* | Base64-encoded 32-byte key. Required for alerting, the dashboard, session signing, and secrets encryption. Generate once with `head -c 32 /dev/urandom \| base64`. **Must be stable** across restarts; changing it invalidates all sessions and makes all stored secrets unreadable. |
 | `TEND_ADDR`          | `:8080`                 | TCP listen address for the HTTP server. |
 | `TEND_BASE_URL`      | `http://localhost:8080` | Externally-reachable base URL. Used when printing heartbeat ping URLs. Set this when Tend is behind a reverse proxy. |
 | `TEND_COOKIE_SECURE` | `false`                 | Set to `1`, `true`, `yes`, or `on` to mark session cookies as `Secure` (HTTPS-only). Leave `false` when TLS is terminated at a reverse proxy. |
 | `TEND_TRUST_PROXY`   | `false`                 | Set to `1`, `true`, `yes`, or `on` when Tend runs behind a reverse proxy you control. [Rate limiting](#limits-and-housekeeping) then keys on the left-most `X-Forwarded-For` address instead of the TCP peer (an entry that is not an IP address is ignored). Only enable it when the proxy **overwrites** that header; if clients can reach Tend directly, or the proxy merely appends to the header, they can forge it and dodge the limit. |
 
-Without `TEND_MASTER_KEY` the server starts in **public-only mode**: the dashboard, `/login`, secrets, and notification channels are all disabled. The master key serves two roles: it derives a stable session-cookie signing key (HKDF-SHA256, so restarts keep existing sessions valid) and it encrypts stored secrets and channel configs. See the [security model](docs/ARCHITECTURE.md#6-security-model) for details.
+`tend serve` **refuses to start without `TEND_MASTER_KEY`**, and with a key that is not 32 base64-encoded bytes: channel configs are encrypted with it, so a server without it could not send a single alert, and a typo in the variable name used to produce exactly that without a word. For a local experiment, `tend serve --no-master-key` starts anyway with alerts and the dashboard off (only `/healthz` and `/ping/{token}` are served) and says so in its banner. The master key serves two roles: it derives a stable session-cookie signing key (HKDF-SHA256, so restarts keep existing sessions valid) and it encrypts stored secrets and channel configs. See the [security model](docs/ARCHITECTURE.md#6-security-model) for details.
 
 ## SQLite vs Postgres
 
@@ -288,7 +288,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 | Command | Description |
 |---------|-------------|
-| `tend serve` | Start the job runner, HTTP server, heartbeat watcher, notification delivery worker, and daily retention sweep. `tend serve -h` prints its usage and environment variables without opening the database. |
+| `tend serve [--no-master-key]` | Start the job runner, HTTP server, heartbeat watcher, notification delivery worker, and daily retention sweep. Refuses to start without `TEND_MASTER_KEY` unless `--no-master-key` is passed (alerts and dashboard off). `tend serve -h` prints its usage and environment variables without opening the database. |
 | `tend sync [-prune] <file>` | Reconcile jobs/channels/rules/heartbeats from YAML. |
 | `tend version` | Print the binary version. |
 | `tend help` (or `-h`, `--help`) | Print the command list. Like `version`, it works without `TEND_DB`. |

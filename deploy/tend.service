@@ -19,7 +19,7 @@
 #
 # ENV VARS (tend.env)
 # -------------------
-# TEND_MASTER_KEY=<base64 32 bytes>   # required for dashboard + secrets
+# TEND_MASTER_KEY=<base64 32 bytes>   # required: serve refuses to start without it
 # TEND_ADDR=:8080                     # optional; default :8080
 # TEND_BASE_URL=https://tend.example.com  # optional
 #

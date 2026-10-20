@@ -82,6 +82,21 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		return errors.New("TEND_DB is not set; refusing to use default ./tend.db (set TEND_DB to an absolute SQLite path or a postgres:// DSN)")
 	}
 
+	// serve's flags are read, and its master-key requirement enforced, before
+	// the store is opened: a server that refuses to start must not create or
+	// migrate a database on its way out.
+	var serveOpts serveOptions
+	if cmd == "serve" {
+		opts, err := parseServeFlags(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		if cfg.MasterKey == "" && !opts.noMasterKey {
+			return errNoMasterKey
+		}
+		serveOpts = opts
+	}
+
 	// Open store.
 	st, err := store.Open(cfg.Driver, cfg.DSN)
 	if err != nil {
@@ -102,14 +117,14 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 	if cfg.MasterKey != "" {
 		b, err := secrets.NewBox(cfg.MasterKey)
 		if err != nil {
-			return fmt.Errorf("init secrets box: %w", err)
+			return fmt.Errorf("TEND_MASTER_KEY is not a valid key (it must be 32 random bytes, base64-encoded: head -c 32 /dev/urandom | base64): %w", err)
 		}
 		box = b
 	}
 
 	switch cmd {
 	case "serve":
-		return cmdServe(ctx, st, box, cfg, org, stdout)
+		return cmdServe(ctx, st, box, cfg, org, serveOpts, stdout)
 
 	case "sync":
 		return cmdSync(ctx, st, box, org.ID, args[1:], stdout, stderr)
@@ -154,6 +169,36 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 // -------------------------------------------------------------------
 // serve
 // -------------------------------------------------------------------
+
+// errNoMasterKey is serve's refusal to start without TEND_MASTER_KEY. Without
+// the key nothing can be alerted on (channel configs are encrypted with it) and
+// there is no dashboard, and a typo in the variable name used to produce
+// exactly that silently. --no-master-key is the explicit opt-out.
+var errNoMasterKey = errors.New("serve: refusing to start without TEND_MASTER_KEY: without it no alert can be sent and the dashboard is off " +
+	"(set it to a stable key from `head -c 32 /dev/urandom | base64`, or pass --no-master-key to run a local experiment without alerts or dashboard)")
+
+// serveOptions are serve's command-line flags.
+type serveOptions struct {
+	// noMasterKey lets serve start without TEND_MASTER_KEY, with alerts and
+	// the dashboard off. A key that is set is used regardless.
+	noMasterKey bool
+}
+
+// parseServeFlags parses serve's flags.
+func parseServeFlags(args []string, stderr io.Writer) (serveOptions, error) {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var opts serveOptions
+	fs.BoolVar(&opts.noMasterKey, "no-master-key", false,
+		"start without TEND_MASTER_KEY: no alerts and no dashboard (local experiments only)")
+	if err := fs.Parse(args); err != nil {
+		return serveOptions{}, err
+	}
+	if fs.NArg() > 0 {
+		return serveOptions{}, fmt.Errorf("serve: unexpected argument %q (serve is configured through the environment; see tend serve -h)", fs.Arg(0))
+	}
+	return opts, nil
+}
 
 // watcherInterval is how often the heartbeat watcher scans for missed pings.
 const watcherInterval = 30 * time.Second
@@ -292,13 +337,13 @@ func buildServeHandler(masterKeyB64 string) (http.Handler, error) {
 // a child context (serveCtx / cancelAll), so the process exits promptly rather
 // than hanging until a SIGINT arrives. A clean parent-ctx cancel (SIGINT/SIGTERM)
 // propagates identically; serveErr stays nil in that case.
-func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.Config, org core.Org, stdout io.Writer) error {
+func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.Config, org core.Org, opts serveOptions, stdout io.Writer) error {
 	clk := clock.RealClock{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// authCfg mounts the authenticated dashboard/API surface when a master key is
-	// present; nil leaves the server public-only (M2 behavior). The derived
-	// session key is never logged.
+	// present; nil leaves the server public-only, which Run allows only under
+	// --no-master-key. The derived session key is never logged.
 	authCfg, err := buildAuthConfig(cfg.MasterKey)
 	if err != nil {
 		return fmt.Errorf("serve: build auth config: %w", err)
@@ -326,11 +371,13 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 		addr = ":8080"
 	}
 
-	alertsOn := "off (no master key)"
+	// Reaching here without a box means --no-master-key was passed (Run
+	// refuses otherwise); say so loudly, since nothing will be alerted on.
+	alertsOn := "OFF (--no-master-key: nothing will be alerted on)"
 	if dispatch != nil {
 		alertsOn = "on"
 	}
-	dashboardOn := "off (no master key)"
+	dashboardOn := "OFF (--no-master-key)"
 	if authCfg != nil {
 		dashboardOn = "on"
 	}
@@ -1226,7 +1273,7 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 	if err != nil {
 		return fmt.Errorf("doctor: list heartbeats: %w", err)
 	}
-	masterKey := "unset (public-only mode: dashboard/secrets disabled)"
+	masterKey := "unset (serve refuses to start without it unless --no-master-key; no alerts, dashboard or secrets)"
 	if cfg.MasterKey != "" {
 		masterKey = "set"
 	}
@@ -1592,6 +1639,7 @@ Usage:
 
 Commands:
   serve               start the runner + HTTP server + heartbeat watcher
+                      (needs TEND_MASTER_KEY unless --no-master-key)
   sync <file>         reconcile jobs/channels/rules/heartbeats from a YAML config
   job list            list jobs
   job add [flags]     create a new job
@@ -1627,33 +1675,40 @@ func wantsHelp(args []string) bool {
 }
 
 // printServeUsage prints `tend serve`'s help text. It must stay accurate to
-// the components cmdServe starts and to serve's actual env knobs (TEND_DB and
-// TEND_MASTER_KEY at config.Load, TEND_ADDR at cmdServe's addr resolution,
-// TEND_COOKIE_SECURE at cookieSecure(), TEND_TRUST_PROXY in httpserver).
+// the components cmdServe starts and to serve's actual knobs (its flags in
+// parseServeFlags; TEND_DB and TEND_MASTER_KEY at config.Load, TEND_ADDR at
+// cmdServe's addr resolution, TEND_COOKIE_SECURE at cookieSecure(),
+// TEND_TRUST_PROXY in httpserver).
 func printServeUsage(w io.Writer) {
 	fmt.Fprintln(w, `tend serve - start the runner + HTTP server + heartbeat watcher
 
 Usage:
-  tend serve
+  tend serve [--no-master-key]
 
 Runs these components until interrupted (Ctrl-C):
   - the job runner (executes due jobs; fails runs left running past their timeout)
-  - the HTTP server (heartbeat ping + healthz; dashboard/API when a master key is set)
+  - the HTTP server (heartbeat ping + healthz; dashboard/API)
   - the heartbeat watcher (flags missed dead-man's-switch pings)
-  - the notification delivery worker (when a master key is set)
+  - the notification delivery worker
   - a daily retention sweep (prunes old events, job runs, and deliveries)
+
+serve refuses to start without TEND_MASTER_KEY: channel configs are encrypted
+with it, so without it nothing can be alerted on, and the dashboard needs it
+to sign sessions.
+
+Flags:
+  --no-master-key      start without TEND_MASTER_KEY anyway, with alerts and the
+                       dashboard off (local experiments only)
 
 Environment:
   TEND_DB              sqlite file path, or a postgres://... DSN (required)
+  TEND_MASTER_KEY      base64 32-byte master key (required; see above)
   TEND_ADDR            listen address (default ":8080")
-  TEND_MASTER_KEY      base64 master key; enables alerts + dashboard/API
   TEND_COOKIE_SECURE   mark session cookie Secure (default off; set behind TLS)
   TEND_TRUST_PROXY     honor X-Forwarded-For for rate-limit keying (default off)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity
   tend heartbeat add   create a heartbeat (prints the ping URL)
-  tend heartbeat list  list heartbeats
-
-serve takes no flags; configure it via the environment above.`)
+  tend heartbeat list  list heartbeats`)
 }

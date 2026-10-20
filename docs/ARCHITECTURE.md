@@ -30,8 +30,7 @@ schedules resolve identically everywhere with no host `tzdata` dependency.
   - the **HTTP server** (heartbeat ping endpoint, `/healthz`, the read + action
     REST API, and the htmx dashboard),
   - the **heartbeat watcher** (periodic scan for missed dead-man's-switch pings),
-  - the **delivery worker** (drains the durable notification queue; started
-    only when a master key is configured),
+  - the **delivery worker** (drains the durable notification queue),
   - the **retention sweep** (prunes old events, job runs, and deliveries at
     startup and then daily).
 
@@ -39,6 +38,12 @@ schedules resolve identically everywhere with no host `tzdata` dependency.
   single `func(context.Context, core.Event)` closure that nudges the delivery
   worker, so behavior is consistent and testable (a `clock.FakeClock` drives
   time in tests).
+
+  `serve` refuses to start without `TEND_MASTER_KEY` (fail closed): channel
+  configs are encrypted with it, so without it nothing could be alerted on,
+  and the dashboard signs its sessions with it. `--no-master-key` is the
+  explicit opt-out for a local experiment; it starts without the delivery
+  worker and the dashboard and says so in the banner.
 
 Other subcommands (`sync`, `job`, `run`, `logs`, `secret`, `channel`, `rule`,
 `heartbeat`, `doctor`, `user`, `token`, `version`) are one-shot CLI operations
@@ -289,9 +294,10 @@ precisely so `jobs` never imports `notify`, keeping the graph acyclic. In
 `serve`, the sink, and the same closure handed to the HTTP server and the
 watcher, only calls `Worker.Nudge()` to wake the worker for a prompt drain.
 Nothing is sent inline, so a slow or failing destination never blocks a runner
-worker, a ping response, or the watcher. Without a master key the worker is not
-started (channel config cannot be decrypted) and the closure is nil; events are
-still recorded and their deliveries stay queued until `serve` runs with a key.
+worker, a ping response, or the watcher. Under `--no-master-key` the worker is
+not started (channel config cannot be decrypted) and the closure is nil; events
+are still recorded and their deliveries stay queued until `serve` runs with a
+key.
 `tend run` drains the queue once inline after its run, so a manual run notifies
 even when no server is running.
 
