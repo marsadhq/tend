@@ -283,3 +283,52 @@ func (s *PostgresStore) RecordHeartbeatPing(ctx context.Context, token string, i
 func (s *PostgresStore) ListHeartbeatPings(ctx context.Context, orgID, heartbeatID int64, limit int) ([]heartbeat.Ping, error) {
 	return listHeartbeatPings(ctx, s.db, dialectPostgres, orgID, heartbeatID, limit)
 }
+
+// markHeartbeatDown is MarkHeartbeatDownAndEmit for both backends. The guard
+// compares last_seen_at and started_at null-safely (SQLite's IS, Postgres's IS
+// NOT DISTINCT FROM): a zero time stands for NULL, a never-pinged heartbeat or
+// one with no run.
+func markHeartbeatDown(ctx context.Context, db *sql.DB, d dialect, observed heartbeat.Heartbeat, ev core.Event) (bool, error) {
+	eq := " IS "
+	if d == dialectPostgres {
+		eq = " IS NOT DISTINCT FROM "
+	}
+	sqlTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("mark heartbeat down begin tx: %w", err)
+	}
+	defer sqlTx.Rollback() //nolint:errcheck
+	t := dialectTx{tx: sqlTx, d: d}
+	res, err := t.exec(ctx, `UPDATE heartbeats SET status = 'down', started_at = NULL, started_rid = ''
+		WHERE id = ? AND status = ? AND last_seen_at`+eq+`? AND started_at`+eq+`?`,
+		observed.ID, observed.Status, nullTime(observed.LastSeenAt), nullTime(observed.StartedAt))
+	if err != nil {
+		return false, fmt.Errorf("mark heartbeat down: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark heartbeat down rows: %w", err)
+	}
+	if n == 0 {
+		return false, nil
+	}
+	if _, err := t.emit(ctx, ev); err != nil {
+		return false, err
+	}
+	if err := sqlTx.Commit(); err != nil {
+		return false, fmt.Errorf("mark heartbeat down commit: %w", err)
+	}
+	return true, nil
+}
+
+// MarkHeartbeatDownAndEmit moves the observed heartbeat to 'down' and records
+// ev; see Store.MarkHeartbeatDownAndEmit.
+func (s *SQLiteStore) MarkHeartbeatDownAndEmit(ctx context.Context, observed heartbeat.Heartbeat, ev core.Event) (bool, error) {
+	return markHeartbeatDown(ctx, s.db, dialectSQLite, observed, ev)
+}
+
+// MarkHeartbeatDownAndEmit moves the observed heartbeat to 'down' and records
+// ev; see Store.MarkHeartbeatDownAndEmit.
+func (s *PostgresStore) MarkHeartbeatDownAndEmit(ctx context.Context, observed heartbeat.Heartbeat, ev core.Event) (bool, error) {
+	return markHeartbeatDown(ctx, s.db, dialectPostgres, observed, ev)
+}
