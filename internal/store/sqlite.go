@@ -1542,16 +1542,53 @@ func (s *SQLiteStore) SetHeartbeatStatus(ctx context.Context, id int64, status s
 // ping flips status to 'up' (and stamps last_seen_at), so the guard rejects and
 // no spurious miss is emitted.
 func (s *SQLiteStore) SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
+	return setHeartbeatStatusIf(ctx, s.db, id, fromStatus, toStatus, lastSeenAt)
+}
+
+// SetHeartbeatStatusIfAndEmit makes the same guarded transition as
+// SetHeartbeatStatusIf and, when it fires, appends ev (enqueueing the
+// deliveries its rules match) in the SAME transaction, mirroring
+// FinishRunAndEmit: a heartbeat can no longer be marked 'down' while its
+// heartbeat.missed is lost. When the guard rejects the transition nothing is
+// written and (false, nil) is returned; any error leaves both unwritten.
+func (s *SQLiteStore) SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("set heartbeat status and emit begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	fired, err := setHeartbeatStatusIf(ctx, tx, id, fromStatus, toStatus, lastSeenAt)
+	if err != nil || !fired {
+		return false, err
+	}
+	if _, err := emitEventTx(ctx, tx, ev); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("set heartbeat status and emit commit: %w", err)
+	}
+	return true, nil
+}
+
+// execer is what *sql.DB and *sql.Tx have in common for a plain write, so a
+// statement can run on its own or inside a caller's transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// setHeartbeatStatusIf is the single source of the SQLite guarded-transition
+// SQL; see SetHeartbeatStatusIf.
+func setHeartbeatStatusIf(ctx context.Context, db execer, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
 	var (
 		res sql.Result
 		err error
 	)
 	if lastSeenAt.IsZero() {
-		res, err = s.db.ExecContext(ctx,
+		res, err = db.ExecContext(ctx,
 			`UPDATE heartbeats SET status = ? WHERE id = ? AND status = ? AND last_seen_at IS NULL`,
 			toStatus, id, fromStatus)
 	} else {
-		res, err = s.db.ExecContext(ctx,
+		res, err = db.ExecContext(ctx,
 			`UPDATE heartbeats SET status = ? WHERE id = ? AND status = ? AND last_seen_at = ?`,
 			toStatus, id, fromStatus, formatTime(lastSeenAt))
 	}

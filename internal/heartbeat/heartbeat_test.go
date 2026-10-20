@@ -394,18 +394,12 @@ func (f *fakeWatchStore) DueHeartbeats(_ context.Context, _ time.Time) ([]heartb
 	return f.due, nil
 }
 
-func (f *fakeWatchStore) SetHeartbeatStatus(_ context.Context, _ int64, _ string) error {
-	return nil
-}
-
-func (f *fakeWatchStore) SetHeartbeatStatusIf(_ context.Context, id int64, _, _ string, _ time.Time) (bool, error) {
+func (f *fakeWatchStore) SetHeartbeatStatusIfAndEmit(_ context.Context, id int64, _, _ string, _ time.Time, e core.Event) (bool, error) {
 	r := f.setStatusIfResult[id]
+	if r.fired && r.err == nil {
+		f.emitted = append(f.emitted, e)
+	}
 	return r.fired, r.err
-}
-
-func (f *fakeWatchStore) EmitEvent(_ context.Context, e core.Event) (int64, error) {
-	f.emitted = append(f.emitted, e)
-	return int64(len(f.emitted)), nil
 }
 
 // TestCheck_DBError_IsLoggedAndContinues verifies that a DB error from

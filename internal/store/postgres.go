@@ -1121,16 +1121,44 @@ func (s *PostgresStore) SetHeartbeatStatus(ctx context.Context, id int64, status
 // A zero lastSeenAt matches a NULL last_seen_at column (the new→down path); a
 // concurrent first ping flips status to 'up' so the guard rejects the update.
 func (s *PostgresStore) SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
+	return pgSetHeartbeatStatusIf(ctx, s.db, id, fromStatus, toStatus, lastSeenAt)
+}
+
+// SetHeartbeatStatusIfAndEmit makes the guarded transition and, when it
+// fires, appends ev with its deliveries in the same transaction. Mirrors the
+// SQLite backend.
+func (s *PostgresStore) SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("set heartbeat status and emit begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	fired, err := pgSetHeartbeatStatusIf(ctx, tx, id, fromStatus, toStatus, lastSeenAt)
+	if err != nil || !fired {
+		return false, err
+	}
+	if _, err := pgEmitEventTx(ctx, tx, ev); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("set heartbeat status and emit commit: %w", err)
+	}
+	return true, nil
+}
+
+// pgSetHeartbeatStatusIf is the single source of the Postgres
+// guarded-transition SQL; see SetHeartbeatStatusIf.
+func pgSetHeartbeatStatusIf(ctx context.Context, db execer, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error) {
 	var (
 		res sql.Result
 		err error
 	)
 	if lastSeenAt.IsZero() {
-		res, err = s.db.ExecContext(ctx,
+		res, err = db.ExecContext(ctx,
 			`UPDATE heartbeats SET status = $1 WHERE id = $2 AND status = $3 AND last_seen_at IS NULL`,
 			toStatus, id, fromStatus)
 	} else {
-		res, err = s.db.ExecContext(ctx,
+		res, err = db.ExecContext(ctx,
 			`UPDATE heartbeats SET status = $1 WHERE id = $2 AND status = $3 AND last_seen_at = $4`,
 			toStatus, id, fromStatus, formatTime(lastSeenAt))
 	}

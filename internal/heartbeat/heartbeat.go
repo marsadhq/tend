@@ -1,8 +1,9 @@
 // Package heartbeat implements dead-man's-switch monitoring for external jobs.
 // A Heartbeat record is "up" while its owner keeps pinging; when a ping is
-// missed past its period+grace deadline the Watcher marks it "down", emits a
-// heartbeat.missed event, and dispatches it for notification. Recovery (down ->
-// up) happens on the next ping via the store's RecordPing path.
+// missed past its period+grace deadline the Watcher marks it "down" and records
+// a heartbeat.missed event in the same transaction, then nudges the delivery
+// worker. Recovery (down -> up) happens on the next ping via the store's
+// RecordPing path, which records heartbeat.recovered the same way.
 //
 // This package defines the Heartbeat domain type and depends only on core,
 // clock, and the standard library. The store imports heartbeat (its
@@ -45,16 +46,44 @@ func NewToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// Event types of a heartbeat's lifecycle. Every one of them carries the plain
+// heartbeat name as its payload and no dedup key.
+const (
+	EventMissed    = "heartbeat.missed"
+	EventRecovered = "heartbeat.recovered"
+	EventRemoved   = "heartbeat.removed"
+)
+
+// eventSource is the Source of every heartbeat event. ListHeartbeatEvents
+// finds a heartbeat's history by it and the name in the payload.
+const eventSource = "heartbeat"
+
+// MissedEvent is the event recorded when the heartbeat named name, of org
+// orgID, missed its deadline.
+func MissedEvent(orgID int64, name string) core.Event {
+	return core.Event{OrgID: orgID, Type: EventMissed, Source: eventSource, Payload: name}
+}
+
+// RecoveredEvent is the event recorded when a ping brings a heartbeat that
+// was down back up.
+func RecoveredEvent(orgID int64, name string) core.Event {
+	return core.Event{OrgID: orgID, Type: EventRecovered, Source: eventSource, Payload: name}
+}
+
+// RemovedEvent is the event recorded when a heartbeat is deleted.
+func RemovedEvent(orgID int64, name string) core.Event {
+	return core.Event{OrgID: orgID, Type: EventRemoved, Source: eventSource, Payload: name}
+}
+
 // WatchStore is the consumer interface the watcher needs.
 type WatchStore interface {
 	DueHeartbeats(ctx context.Context, now time.Time) ([]Heartbeat, error)
-	SetHeartbeatStatus(ctx context.Context, id int64, status string) error
-	// SetHeartbeatStatusIf guards the down-transition against the watcher↔ping
-	// race: it updates only when both the current status and last_seen_at match
-	// the values observed by DueHeartbeats. Returns false (no-op) when a
-	// concurrent RecordPing changed last_seen_at before this write landed.
-	SetHeartbeatStatusIf(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time) (bool, error)
-	EmitEvent(ctx context.Context, e core.Event) (int64, error)
+	// SetHeartbeatStatusIfAndEmit moves a heartbeat from fromStatus to
+	// toStatus and records ev, with its deliveries, in one transaction. The
+	// move happens only when both the current status and last_seen_at still
+	// match the values observed by DueHeartbeats; it returns false, having
+	// written nothing, when a concurrent RecordPing changed them first.
+	SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error)
 }
 
 // Watcher periodically scans for heartbeats that have missed their deadline.
@@ -75,8 +104,8 @@ func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core
 	return &Watcher{store: s, clock: c, dispatch: dispatch, log: log}
 }
 
-// Check marks overdue heartbeats 'down', emits heartbeat.missed, and dispatches
-// it. This covers both an 'up' heartbeat that stopped pinging and a 'new' one
+// Check marks overdue heartbeats 'down', records heartbeat.missed, and
+// dispatches it. This covers both an 'up' heartbeat that stopped pinging and a 'new' one
 // that never pinged (armed on created_at) — the dead-man's-switch blind spot.
 // Idempotent: a heartbeat already 'down' is not returned by DueHeartbeats, so it
 // is not re-alerted.
@@ -88,11 +117,12 @@ func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core
 // SetHeartbeatStatusIf makes the conditional UPDATE a no-op (fired==false), so
 // no spurious heartbeat.missed is emitted for the now-healthy heartbeat.
 //
-// The status update is the commit point; the subsequent EmitEvent + dispatch
-// are best-effort (errors are not retried within this Check), matching Task 6's
-// recovery path. A heartbeat that was marked down but whose event was lost is
-// not re-alerted on the next Check (it is no longer 'up'); this is acceptable
-// for v1.
+// The status change and the heartbeat.missed event (with the deliveries its
+// rules match) are written in ONE transaction. A heartbeat therefore never
+// ends up 'down' without its alert: when the write fails, nothing is written,
+// the failure is logged, and the heartbeat is still overdue on the next Check,
+// which tries again. Only the dispatch afterwards is best-effort, and it only
+// nudges the delivery worker, which also polls.
 func (w *Watcher) Check(ctx context.Context) error {
 	now := w.clock.Now()
 	due, err := w.store.DueHeartbeats(ctx, now)
@@ -105,19 +135,22 @@ func (w *Watcher) Check(ctx context.Context) error {
 		// dead-man's switch on created_at). Both transition to 'down' and emit the
 		// same heartbeat.missed event. The guard (status + last_seen_at, which is
 		// NULL for 'new') makes a concurrent ping win the race as a no-op.
-		fired, err := w.store.SetHeartbeatStatusIf(ctx, hb.ID, hb.Status, "down", hb.LastSeenAt)
+		ev := MissedEvent(hb.OrgID, hb.Name)
+		fired, err := w.store.SetHeartbeatStatusIfAndEmit(ctx, hb.ID, hb.Status, "down", hb.LastSeenAt, ev)
 		if err != nil {
-			// A real DB failure here silently drops this heartbeat's missed alert;
-			// it must be visible. Do NOT abort the scan - other heartbeats may still
-			// transition. Payload carries no secret (heartbeat name/id only).
-			w.log.Error("heartbeat: set status failed", "heartbeat", hb.Name, "id", hb.ID, "err", err)
+			// Nothing was written, so the heartbeat is retried on the next
+			// Check; the failure must still be visible. Do NOT abort the scan -
+			// other heartbeats may still transition. A failure caused by
+			// shutdown is not worth a line. Payload carries no secret
+			// (heartbeat name/id only).
+			if ctx.Err() == nil {
+				w.log.Error("heartbeat: record missed heartbeat failed", "heartbeat", hb.Name, "id", hb.ID, "err", err)
+			}
 			continue
 		}
 		if !fired {
 			continue // a ping won the race → do NOT emit a spurious miss (benign)
 		}
-		ev := core.Event{OrgID: hb.OrgID, Type: "heartbeat.missed", Source: "heartbeat", Payload: hb.Name}
-		_, _ = w.store.EmitEvent(ctx, ev)
 		if w.dispatch != nil {
 			w.dispatch(ctx, ev)
 		}
