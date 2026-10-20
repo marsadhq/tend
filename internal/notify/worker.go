@@ -85,7 +85,8 @@ type Worker struct {
 	// Interval is the poll cadence between drain passes; default 2s.
 	Interval time.Duration
 	// Lease is how long a claim holds before the delivery becomes due again;
-	// it must exceed the slowest single send (HTTP timeout is 10s). Default 1m.
+	// it must exceed the slowest single send (HTTP sends time out after 10s,
+	// SMTP sends after smtpTimeout, 30s). Default 1m.
 	Lease time.Duration
 	// MaxAge is how long a delivery may keep failing before the worker gives
 	// up and emits notification.failed. Default 24h.
