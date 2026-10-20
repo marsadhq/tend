@@ -42,6 +42,9 @@ type Server struct {
 	// pingCreateLimiter bounds the heartbeats slug pings with ?create=1 may
 	// create, per org.
 	pingCreateLimiter *httpx.RateLimiter
+	// pingBodyLimit is how many bytes of a ping's body are kept; see
+	// SetPingBodyLimit.
+	pingBodyLimit int
 }
 
 // New constructs a Server. dispatch may be nil (e.g. in tests or when no
@@ -72,6 +75,7 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 		// leaked token) from writing to the database flat out.
 		pingTokenLimiter:  httpx.NewRateLimiter(clk, pingTokenRate, pingTokenBurst),
 		pingCreateLimiter: httpx.NewRateLimiter(clk, pingCreateRate, pingCreateBurst),
+		pingBodyLimit:     DefaultPingBodyLimit,
 	}
 }
 

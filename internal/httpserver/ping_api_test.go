@@ -23,6 +23,7 @@ import (
 // API in-process.
 type pingAPI struct {
 	s      store.Store
+	srv    *httpserver.Server
 	h      http.Handler
 	orgID  int64
 	id     int64
@@ -43,8 +44,9 @@ func newPingAPI(t *testing.T, s store.Store, token string) *pingAPI {
 	}
 	p := &pingAPI{s: s, orgID: org.ID, id: id, token: tok}
 	fk := clock.NewFake(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
-	p.h = httpserver.New(s, fk, func(_ context.Context, ev core.Event) { p.events = append(p.events, ev) },
-		slog.New(slog.NewTextHandler(io.Discard, nil)), nil).Handler()
+	p.srv = httpserver.New(s, fk, func(_ context.Context, ev core.Event) { p.events = append(p.events, ev) },
+		slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	p.h = p.srv.Handler()
 	return p
 }
 
@@ -115,8 +117,8 @@ func TestPingAPIVariants(t *testing.T) {
 				if method != http.MethodHead && rec.Body.String() != "ok" {
 					t.Fatalf("%s /ping/<token>%s: body %q, want ok", method, c.suffix, rec.Body.String())
 				}
-				if got := rec.Header().Get("Ping-Body-Limit"); got != "100000" {
-					t.Errorf("%s %s: Ping-Body-Limit = %q, want 100000", method, c.suffix, got)
+				if got := rec.Header().Get("Ping-Body-Limit"); got != "10000" {
+					t.Errorf("%s %s: Ping-Body-Limit = %q, want 10000 (the default)", method, c.suffix, got)
 				}
 				got := p.log(t)[0]
 				if got.Kind != c.kind {
@@ -140,8 +142,9 @@ func newPingAPIKeep(t *testing.T, p *pingAPI) *pingAPI {
 	t.Helper()
 	q := &pingAPI{s: p.s, orgID: p.orgID, id: p.id, token: p.token}
 	fk := clock.NewFake(time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
-	q.h = httpserver.New(p.s, fk, func(_ context.Context, ev core.Event) { q.events = append(q.events, ev) },
-		slog.New(slog.NewTextHandler(io.Discard, nil)), nil).Handler()
+	q.srv = httpserver.New(p.s, fk, func(_ context.Context, ev core.Event) { q.events = append(q.events, ev) },
+		slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	q.h = q.srv.Handler()
 	return q
 }
 
@@ -259,25 +262,45 @@ func TestPingAPIBody(t *testing.T) {
 			t.Fatalf("cleaned body = %q", got)
 		}
 
+		// The default keeps 10 kB, cut on a character boundary.
 		big := strings.Repeat("é", 60_000) // 120 000 bytes
 		p = newPingAPIKeep(t, p)
 		wantOK(t, p.do(http.MethodPost, p.token+"/fail", big), "big body")
 		got := p.log(t)[0].Body
-		if !utf8.ValidString(got) {
-			t.Fatal("capped body is not valid UTF-8")
-		}
 		body, marker := strings.CutSuffix(got, httpserver.PingBodyTruncated)
-		if !marker || len(body) > httpserver.PingBodyLimit || len(body) < httpserver.PingBodyLimit-1 {
-			t.Fatalf("capped body: %d bytes, marker %v; want %d (or one less) and the marker", len(body), marker, httpserver.PingBodyLimit)
+		if !utf8.ValidString(got) || !marker || len(body) > httpserver.DefaultPingBodyLimit || len(body) < httpserver.DefaultPingBodyLimit-1 {
+			t.Fatalf("capped body: %d bytes, marker %v; want %d (or one less) and the marker", len(body), marker, httpserver.DefaultPingBodyLimit)
+		}
+
+		// TEND_PING_BODY_KB raises it up to Healthchecks' 100 kB.
+		p = newPingAPIKeep(t, p)
+		p.srv.SetPingBodyLimit(httpserver.MaxPingBodyLimit)
+		rec := p.do(http.MethodPost, p.token+"/fail", big)
+		if got := rec.Header().Get("Ping-Body-Limit"); got != "100000" {
+			t.Fatalf("Ping-Body-Limit = %q, want 100000", got)
+		}
+		got = p.log(t)[0].Body
+		body, marker = strings.CutSuffix(got, httpserver.PingBodyTruncated)
+		if !marker || len(body) > httpserver.MaxPingBodyLimit || len(body) < httpserver.MaxPingBodyLimit-1 {
+			t.Fatalf("body capped at 100 kB: %d bytes, marker %v", len(body), marker)
 		}
 
 		// A token cut in two by the cap is not left half in the log.
 		p = newPingAPIKeep(t, p)
-		straddle := strings.Repeat("x", httpserver.PingBodyLimit-10) + p.token + strings.Repeat("y", 50)
+		straddle := strings.Repeat("x", httpserver.DefaultPingBodyLimit-10) + p.token + strings.Repeat("y", 50)
 		wantOK(t, p.do(http.MethodPost, p.token+"/log", straddle), "token across the cap")
 		if got := p.log(t)[0].Body; strings.Contains(got, p.token[:8]) || !strings.HasSuffix(got, httpserver.PingBodyTruncated) {
 			t.Fatalf("a token straddling the cap left %q in the log", got[len(got)-60:])
 		}
+
+		// With a limit of 0 no body is kept.
+		p = newPingAPIKeep(t, p)
+		p.srv.SetPingBodyLimit(0)
+		wantOK(t, p.do(http.MethodPost, p.token+"/log", "secret-ish"), "limit 0")
+		if got := p.log(t)[0].Body; got != "" {
+			t.Fatalf("limit 0 kept %q", got)
+		}
+		p.srv.SetPingBodyLimit(httpserver.DefaultPingBodyLimit)
 
 		wantOK(t, p.do(http.MethodGet, p.token+"/log", ""), "no body")
 		if got := p.log(t)[0].Body; got != "" {

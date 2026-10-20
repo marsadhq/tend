@@ -37,11 +37,14 @@ kept); otherwise the headers are the ones Tend has always sent.
 
 ### The request body
 
-The body of a POST is logged with the ping: the first 100 kB of it, made into
+The body of a POST is logged with the ping: the first 10 kB of it by default
+(`TEND_PING_BODY_KB`, from 0 to Healthchecks' 100; the limit is announced in
+the `Ping-Body-Limit` reply header, which Healthchecks clients size what they
+send by), made into
 plain text the way captured job output is (NUL bytes dropped, bytes that are
 not UTF-8 replaced with U+FFFD), with the ping's own token or ping key
 replaced by `***` in case the script echoes its URL, and cut on a character
-boundary with `... [ping body truncated at 100 kB]` when it was longer. It is
+boundary with `... [ping body truncated]` when it was longer. It is
 shown by `tend heartbeat history <name> -body`, by `tend heartbeat show
 <name>` (the tail of the last result's body), on the heartbeat's dashboard
 page, and by `GET /api/heartbeats/{id}/pings`.

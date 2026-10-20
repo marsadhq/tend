@@ -33,16 +33,21 @@ import (
 //	/ping/<ping-key>/<slug>[/start|/fail|/log|/<exit-status>]
 //
 // where <slug> is the heartbeat's name; ?create=1 creates a missing one.
-// HEAD, GET and POST all work. A POST body is logged with the ping, up to
-// PingBodyLimit bytes, and ?rid=<uuid> ties a start to its completion.
+// HEAD, GET and POST all work. A POST body is logged with the ping, up to the
+// server's body limit, and ?rid=<uuid> ties a start to its completion.
 
-// PingBodyLimit is how much of a ping's request body is kept, in bytes: the
-// first 100 kB, as in Healthchecks, which announces it in the same
-// Ping-Body-Limit response header.
-const PingBodyLimit = 100_000
+// How much of a ping's request body is kept, in bytes: by default the first
+// 10 kB (TEND_PING_BODY_KB changes it, see Server.SetPingBodyLimit), at most
+// the 100 kB Healthchecks keeps. The limit is announced in the
+// Ping-Body-Limit reply header, which Healthchecks clients size their bodies
+// by.
+const (
+	DefaultPingBodyLimit = 10_000
+	MaxPingBodyLimit     = 100_000
+)
 
-// PingBodyTruncated ends a logged body that was cut at PingBodyLimit.
-const PingBodyTruncated = "\n... [ping body truncated at 100 kB]"
+// PingBodyTruncated ends a logged body that was cut at the limit.
+const PingBodyTruncated = "\n... [ping body truncated]"
 
 // Ping limits; see the limiters in New.
 const (
@@ -201,8 +206,8 @@ func normalizeToken(token string) string {
 	return token
 }
 
-// readPingBody returns the body of a ping as it is logged: at most
-// PingBodyLimit bytes of it, made plain text the way captured job output is
+// readPingBody returns the body of a ping as it is logged: at most limit
+// bytes of it (none for a limit of 0), made plain text the way captured job output is
 // (NUL bytes dropped, invalid UTF-8 replaced with U+FFFD), with every
 // credential in creds (the ping's token, its ping key) replaced by "***" so a
 // script that echoes its ping URL does not put it on the dashboard, and cut on
@@ -210,25 +215,25 @@ func normalizeToken(token string) string {
 //
 // The order is that of a job's output: clean, then redact, then cap, so the
 // cap never cuts a credential in two before redaction could see it whole. To
-// that end a little more than PingBodyLimit is read; where even that cut
+// that end a little more than limit is read; where even that cut
 // falls inside a credential, what is left of it at the end of the text is
 // dropped too. A UUID-shaped token is matched in either letter case, as it is
 // when the ping is looked up.
-func readPingBody(r *http.Request, creds ...string) (string, error) {
-	if r.Body == nil || r.Method != http.MethodPost {
+func readPingBody(r *http.Request, limit int, creds ...string) (string, error) {
+	if r.Body == nil || r.Method != http.MethodPost || limit <= 0 {
 		return "", nil
 	}
 	slack := utf8.UTFMax
 	for _, c := range creds {
 		slack = max(slack, len(c)+utf8.UTFMax)
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, int64(PingBodyLimit+slack+1)))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, int64(limit+slack+1)))
 	if err != nil {
 		return "", err
 	}
-	cutRaw := len(raw) > PingBodyLimit+slack
+	cutRaw := len(raw) > limit+slack
 	if cutRaw {
-		raw = trimPartialRune(raw[:PingBodyLimit+slack])
+		raw = trimPartialRune(raw[:limit+slack])
 	}
 	s := string(raw)
 	if !utf8.ValidString(s) || strings.Contains(s, "\x00") {
@@ -241,9 +246,9 @@ func readPingBody(r *http.Request, creds ...string) (string, error) {
 		s = redactCredential(s, c)
 	}
 	truncated := cutRaw
-	if len(s) > PingBodyLimit {
+	if len(s) > limit {
 		truncated = true
-		cut := PingBodyLimit
+		cut := limit
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
@@ -330,10 +335,10 @@ func trimPartialRune(b []byte) []byte {
 // The plain success reply is "ok", in lower case, exactly as Tend has always
 // answered (Healthchecks answers "OK"; clients normally check the status), and
 // carries no other header a v0.3.0 reply did not.
-func pingOK(w http.ResponseWriter, code int, body string) {
+func pingOK(w http.ResponseWriter, code, bodyLimit int, body string) {
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
-	h.Set("Ping-Body-Limit", strconv.Itoa(PingBodyLimit))
+	h.Set("Ping-Body-Limit", strconv.Itoa(bodyLimit))
 	w.WriteHeader(code)
 	_, _ = io.WriteString(w, body)
 }
@@ -423,7 +428,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		httpx.TooManyRequests(w, s.pingTokenLimiter)
 		return
 	}
-	if req.in.Body, err = readPingBody(r, req.token, req.key); err != nil {
+	if req.in.Body, err = readPingBody(r, s.pingBodyLimit, req.token, req.key); err != nil {
 		pingError(w, r, http.StatusBadRequest, "could not read the request body")
 		return
 	}
@@ -446,10 +451,10 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		s.dispatch(ctx, *res.Event)
 	}
 	if created {
-		pingOK(w, status, "Created")
+		pingOK(w, status, s.pingBodyLimit, "Created")
 		return
 	}
-	pingOK(w, status, "ok")
+	pingOK(w, status, s.pingBodyLimit, "ok")
 }
 
 // resolveSlug finds the token of the heartbeat a slug ping names: the
@@ -512,4 +517,11 @@ func tokenHint(token string) string {
 		return "********"
 	}
 	return token[:8] + "..."
+}
+
+// SetPingBodyLimit sets how many bytes of a ping's body are kept (and
+// announced in Ping-Body-Limit): from 0, which keeps none, to
+// MaxPingBodyLimit; a value out of range is clamped. Call it before serving.
+func (s *Server) SetPingBodyLimit(n int) {
+	s.pingBodyLimit = min(max(n, 0), MaxPingBodyLimit)
 }

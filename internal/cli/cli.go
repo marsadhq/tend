@@ -109,6 +109,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		if opts.deliveryHold, err = config.LoadDeliveryHold(); err != nil {
 			return fmt.Errorf("serve: %w", err)
 		}
+		if opts.pingBodyLimit, err = config.LoadPingBodyLimit(); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
 		serveOpts = opts
 	}
 
@@ -206,6 +209,9 @@ type serveOptions struct {
 	// deliveryHold bounds how long a failing notification holds back its
 	// channel (TEND_DELIVERY_HOLD_MINUTES).
 	deliveryHold time.Duration
+	// pingBodyLimit is how many bytes of a ping's body are kept
+	// (TEND_PING_BODY_KB).
+	pingBodyLimit int
 }
 
 // parseServeFlags parses serve's flags.
@@ -290,8 +296,8 @@ const serveShutdownTimeout = 5 * time.Second
 // httpTimeout bounds each phase of an HTTP connection (reading the headers,
 // reading the whole request including its body, writing the response, and
 // idling between requests); see httpx.NewServer. All handlers are quick and
-// the largest request body is a ping's (up to 100 kB is read), so one short
-// limit fits them all.
+// the largest request body is a ping's (up to its body limit, at most 100 kB,
+// is read), so one short limit fits them all.
 const httpTimeout = 10 * time.Second
 
 // sessionKeyInfo is the HKDF "info" label that domain-separates the session
@@ -468,7 +474,9 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	}()
 
 	// --- HTTP server ---
-	srv := httpx.NewServer(addr, httpserver.New(st, clk, dispatch, logger, authCfg).Handler(), httpTimeout)
+	hs := httpserver.New(st, clk, dispatch, logger, authCfg)
+	hs.SetPingBodyLimit(opts.pingBodyLimit)
+	srv := httpx.NewServer(addr, hs.Handler(), httpTimeout)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1339,6 +1347,11 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 	} else {
 		fmt.Fprintf(stdout, "delivery hold: %s per channel\n", hold)
 	}
+	if limit, err := config.LoadPingBodyLimit(); err != nil {
+		fmt.Fprintf(stdout, "ping bodies:  invalid, serve will refuse to start: %v\n", err)
+	} else {
+		fmt.Fprintf(stdout, "ping bodies:  first %d kB of each kept\n", limit/1000)
+	}
 	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
 	return nil
 }
@@ -1956,7 +1969,7 @@ Runs these components until interrupted (Ctrl-C):
   - the job runner (executes due jobs; fails runs left running past their timeout)
   - the HTTP server: the heartbeat ping API at /ping/<token>, compatible
     with Healthchecks' (/start, /fail, /log, /<exit-status>, ?rid=, a POST
-    body of up to 100 kB is logged; /ping/<ping-key>/<name> once the org
+    body is logged, 10 kB by default; /ping/<ping-key>/<name> once the org
     has a ping key), /healthz, and the dashboard/API
   - the heartbeat watcher (flags missed dead-man's-switch pings, and started
     runs that did not finish within their grace)
@@ -1983,6 +1996,8 @@ Environment:
   TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
   TEND_RETENTION_PINGS_DAYS       days of heartbeat ping logs to keep (default 30; 0 = forever;
                                   each heartbeat also keeps only its newest 1000 pings)
+  TEND_PING_BODY_KB               kB of each ping's body kept in its log (default 10;
+                                  0 = none; at most 100), announced in Ping-Body-Limit
   TEND_DELIVERY_HOLD_MINUTES      how long a failing notification may hold back the
                                   later ones on its channel (default 15; 0 = no ordering)
   TEND_INSTANCE        this installation's name in webhook notifications
