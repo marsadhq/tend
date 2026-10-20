@@ -5,3 +5,5 @@
 /dist/
 /tend
 
+# Host-specific deploy settings (see deploy/deploy.env.example)
+/deploy/deploy.env
