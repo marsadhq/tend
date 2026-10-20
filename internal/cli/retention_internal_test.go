@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,7 +169,7 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			backdate("deliveries", ds[0].ID, 8*24*time.Hour)
 
 			ret := config.Retention{Events: 0, JobRuns: 90 * 24 * time.Hour, Deliveries: 7 * 24 * time.Hour}
-			retentionSweep(ctx, s, now, ret, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			(&sweeper{st: s, ret: ret, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}).run(ctx, now)
 
 			if n := count("job_runs"); n != 1 {
 				t.Errorf("job runs after the sweep = %d, want 1 (60 days old kept, 100 days old pruned)", n)
@@ -179,5 +181,30 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 				t.Errorf("deliveries after the sweep = %d, want 0", n)
 			}
 		})
+	}
+}
+
+// tooLargeStore prunes something on every sweep and is always too large to
+// compact while serving.
+type tooLargeStore struct{ store.Store }
+
+func (tooLargeStore) PruneEvents(context.Context, time.Time) (int64, error)     { return 1, nil }
+func (tooLargeStore) PruneJobRuns(context.Context, time.Time) (int64, error)    { return 0, nil }
+func (tooLargeStore) PruneDeliveries(context.Context, time.Time) (int64, error) { return 0, nil }
+func (tooLargeStore) ReclaimSpace(context.Context) (int64, error) {
+	return 0, fmt.Errorf("%w: 900 MiB of the 1200 MiB file is free", store.ErrCompactTooLarge)
+}
+
+// TestSweepSaysOnceThatTheFileIsTooLarge: the warning that the database is
+// too large to compact while serving is logged on the first sweep only, not
+// every day.
+func TestSweepSaysOnceThatTheFileIsTooLarge(t *testing.T) {
+	var logs bytes.Buffer
+	sw := &sweeper{st: tooLargeStore{}, ret: config.Retention{Events: time.Hour}, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	for i := 0; i < 3; i++ {
+		sw.run(context.Background(), time.Now())
+	}
+	if n := strings.Count(logs.String(), "space not reclaimed"); n != 1 {
+		t.Fatalf("logged the too-large warning %d times over 3 sweeps, want once:\n%s", n, logs.String())
 	}
 }

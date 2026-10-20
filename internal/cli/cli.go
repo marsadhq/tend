@@ -220,12 +220,23 @@ const watcherInterval = 30 * time.Second
 // otherwise grow without bound. The sweep also runs once at startup.
 const retentionSweepInterval = 24 * time.Hour
 
-// retentionSweep prunes the history older than ret's windows (a zero window
+// sweeper runs serve's retention sweep. It remembers whether it has already
+// said that the database is too large to compact while serving, so that is
+// logged once per process, not on every daily sweep.
+type sweeper struct {
+	st             store.Store
+	ret            config.Retention
+	logger         *slog.Logger
+	warnedTooLarge bool
+}
+
+// run prunes the history older than the retention windows (a zero window
 // keeps that history forever) and then, when the prune deleted anything, gives
 // the freed space back to the file system if there is enough of it (see
 // store.ReclaimSpace). Errors are logged, never fatal: a failed sweep just
 // retries on the next tick.
-func retentionSweep(ctx context.Context, st store.Store, now time.Time, ret config.Retention, logger *slog.Logger) {
+func (sw *sweeper) run(ctx context.Context, now time.Time) {
+	st, ret, logger := sw.st, sw.ret, sw.logger
 	var deleted int64
 	prune := func(what string, fn func(context.Context, time.Time) (int64, error), window time.Duration) {
 		if window <= 0 {
@@ -249,7 +260,10 @@ func retentionSweep(ctx context.Context, st store.Store, now time.Time, ret conf
 	reclaimed, err := st.ReclaimSpace(ctx)
 	switch {
 	case errors.Is(err, store.ErrCompactTooLarge):
-		logger.Warn("retention sweep: space not reclaimed", "err", err)
+		if !sw.warnedTooLarge {
+			sw.warnedTooLarge = true
+			logger.Warn("retention sweep: space not reclaimed (said once per process)", "err", err)
+		}
 	case err != nil && ctx.Err() == nil:
 		logger.Error("retention sweep: reclaim space", "err", err)
 	case reclaimed > 0:
@@ -509,11 +523,12 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 
 	// --- retention sweep ---
 	// Prunes old events/job_runs/deliveries once at startup and then daily so
-	// the audit tables stay bounded, then reclaims the space (retentionSweep).
+	// the audit tables stay bounded, then reclaims the space (sweeper.run).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sweep := func() { retentionSweep(serveCtx, st, clk.Now(), opts.retention, logger) }
+		sw := &sweeper{st: st, ret: opts.retention, logger: logger}
+		sweep := func() { sw.run(serveCtx, clk.Now()) }
 		sweep()
 		t := time.NewTicker(retentionSweepInterval)
 		defer t.Stop()

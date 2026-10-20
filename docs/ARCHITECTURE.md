@@ -504,11 +504,14 @@ These limits are constants in the code, not configuration.
   invalid value stops `serve` from starting). When the sweep deleted rows it
   calls `ReclaimSpace`: on SQLite, once at least 8 MiB and a quarter of the file
   is free, the first call switches the file to incremental auto-vacuum with one
-  `VACUUM` (only for a file of at most 512 MiB; a larger one is logged for an
-  offline `VACUUM`), and later calls free pages in short `incremental_vacuum`
-  steps so pings and runs are never held up for long. On Postgres it does
-  nothing; autovacuum makes the space reusable. A failed sweep is logged and
-  retried on the next tick.
+  `VACUUM` (only for a file of at most 64 MiB, since the store's single
+  connection is held for the whole rewrite; a larger file is reported once per
+  process, for an offline `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;`). Later
+  calls free pages in `incremental_vacuum` steps of 512 pages, each its own
+  statement through the pool, so queued pings and runs get the connection
+  between two steps, and stop after about 2 seconds; the next sweep carries
+  on. On Postgres it does nothing; autovacuum makes the space reusable. A
+  failed sweep is logged and retried on the next tick.
 - **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
   and `IdleTimeout` are all 10 seconds (`newHTTPServer` in `internal/cli`).
   Every handler is quick and the largest request body is a login form, so a

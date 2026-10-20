@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,110 @@ func TestReclaimSpaceWillNotRewriteALargeFileWhileServing(t *testing.T) {
 		}
 		if after := sqlitePragma(t, s, "page_count"); after != before {
 			t.Errorf("pages %d -> %d, want the file untouched", before, after)
+		}
+	})
+}
+
+// incrementalStore returns a SQLite store already in incremental auto-vacuum
+// mode with a good amount of free space on its free list, or skips on
+// Postgres.
+func incrementalStore(t *testing.T, ctx context.Context, s store.Store) {
+	t.Helper()
+	if _, ok := s.(*store.SQLiteStore); !ok {
+		t.Skip("SQLite only: Postgres never compacts")
+	}
+	fillAndPrune(t, ctx, s, 400)
+	if _, err := s.ReclaimSpace(ctx); err != nil { // the one-time VACUUM
+		t.Fatalf("ReclaimSpace: %v", err)
+	}
+	if mode := sqlitePragma(t, s, "auto_vacuum"); mode != 2 {
+		t.Fatalf("auto_vacuum = %d, want 2", mode)
+	}
+	fillAndPrune(t, ctx, s, 400)
+}
+
+// TestReclaimSpaceLetsOtherQueriesThroughBetweenSteps pins that reclaiming
+// space does not take the store's only connection for the whole loop. The
+// loop is stopped after its first step until a query from elsewhere has been
+// answered; it used to run every step on one pinned connection, so that query
+// would have waited for the whole reclaim.
+func TestReclaimSpaceLetsOtherQueriesThroughBetweenSteps(t *testing.T) {
+	ctx := context.Background()
+	defer store.SetReclaimThresholds(64<<10, 0.25, 64<<20)()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		incrementalStore(t, ctx, s)
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		inStep, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		defer store.SetReclaimSteps(16, time.Minute, func() {
+			once.Do(func() {
+				close(inStep)
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+				}
+			})
+		})()
+
+		type result struct {
+			n   int64
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			n, err := s.ReclaimSpace(ctx)
+			done <- result{n, err}
+		}()
+
+		<-inStep
+		qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err = s.ListEvents(qctx, org.ID, 1)
+		cancel()
+		close(release)
+		if err != nil {
+			t.Fatalf("a query during the reclaim failed (it waited for the whole loop): %v", err)
+		}
+		select {
+		case r := <-done:
+			if r.err != nil || r.n <= 0 {
+				t.Fatalf("ReclaimSpace = %d, %v; want space back", r.n, r.err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("ReclaimSpace did not finish")
+		}
+	})
+}
+
+// TestReclaimSpaceStopsWhenItsTimeIsUp: one call spends at most its budget
+// (here: one step) and leaves the rest to the next sweep.
+func TestReclaimSpaceStopsWhenItsTimeIsUp(t *testing.T) {
+	ctx := context.Background()
+	defer store.SetReclaimThresholds(0, 0.0, 64<<20)()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		incrementalStore(t, ctx, s)
+		defer store.SetReclaimSteps(16, time.Nanosecond, nil)()
+
+		before := sqlitePragma(t, s, "freelist_count")
+		if n, err := s.ReclaimSpace(ctx); err != nil || n <= 0 {
+			t.Fatalf("ReclaimSpace = %d, %v; want some space back", n, err)
+		}
+		after := sqlitePragma(t, s, "freelist_count")
+		if after <= 0 || after >= before {
+			t.Fatalf("free pages %d -> %d, want one step's worth freed and the rest left for later", before, after)
+		}
+		for i := 0; i < 1000 && sqlitePragma(t, s, "freelist_count") > 0; i++ {
+			if _, err := s.ReclaimSpace(ctx); err != nil {
+				t.Fatalf("ReclaimSpace: %v", err)
+			}
+		}
+		if left := sqlitePragma(t, s, "freelist_count"); left != 0 {
+			t.Fatalf("free pages after later calls = %d, want 0", left)
 		}
 	})
 }
