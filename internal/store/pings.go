@@ -157,19 +157,30 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 	if in.ExitStatus != nil {
 		exit = sql.NullInt64{Int64: int64(*in.ExitStatus), Valid: true}
 	}
+	body := t.text(in.Body)
 	if _, err := t.exec(ctx, `INSERT INTO heartbeat_pings
-		(org_id, heartbeat_id, kind, exit_status, rid, duration_ms, body, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		res.OrgID, res.HeartbeatID, in.Kind, exit, in.RID, duration, nullIfEmpty(t.text(in.Body)), seen); err != nil {
+		(org_id, heartbeat_id, kind, exit_status, rid, duration_ms, body, created_at, body_bytes)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		res.OrgID, res.HeartbeatID, in.Kind, exit, in.RID, duration, nullIfEmpty(body), seen, len(body)); err != nil {
 		return heartbeat.PingResult{}, fmt.Errorf("record ping log: %w", err)
 	}
-	// Keep the heartbeat's newest maxPingsPerHeartbeat entries: the window
-	// of the retention sweep bounds the log by age, this by size, so a
-	// client pinging flat out cannot fill the disk between two sweeps.
+	// Keep the heartbeat's newest maxPingsPerHeartbeat entries, and of those
+	// only as many as fit in maxPingLogBytes of body: the window of the
+	// retention sweep bounds the log by age, these by size, so a client
+	// pinging flat out cannot fill the disk between two sweeps. The byte sum
+	// runs on the (heartbeat_id, id, body_bytes) index, never on the bodies.
 	if _, err := t.exec(ctx, `DELETE FROM heartbeat_pings WHERE heartbeat_id = ? AND id <= (
 		SELECT id FROM heartbeat_pings WHERE heartbeat_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?)`,
 		res.HeartbeatID, res.HeartbeatID, maxPingsPerHeartbeat); err != nil {
 		return heartbeat.PingResult{}, fmt.Errorf("record ping: trim the ping log: %w", err)
+	}
+	if _, err := t.exec(ctx, `DELETE FROM heartbeat_pings WHERE heartbeat_id = ? AND id <= (
+		SELECT MAX(id) FROM (
+			SELECT id, SUM(body_bytes) OVER (ORDER BY id DESC) AS kept
+			FROM heartbeat_pings WHERE heartbeat_id = ?
+		) AS log WHERE kept > ?)`,
+		res.HeartbeatID, res.HeartbeatID, maxPingLogBytes); err != nil {
+		return heartbeat.PingResult{}, fmt.Errorf("record ping: hold the ping log to its byte budget: %w", err)
 	}
 	if event != nil {
 		// The event is stamped when it is written (event.CreatedAt is zero),
@@ -195,6 +206,14 @@ const MaxPingsPerHeartbeat = 1000
 
 // maxPingsPerHeartbeat is MaxPingsPerHeartbeat, a var so tests can lower it.
 var maxPingsPerHeartbeat = MaxPingsPerHeartbeat
+
+// MaxPingLogBytes is the most body bytes a heartbeat's ping log keeps: the
+// oldest entries beyond it are dropped as new pings arrive, whatever the
+// entry cap and the retention window. 1000 pings of the default 10 kB fit.
+const MaxPingLogBytes = 10_000_000
+
+// maxPingLogBytes is MaxPingLogBytes, a var so tests can lower it.
+var maxPingLogBytes = MaxPingLogBytes
 
 // runDuration is the duration, in milliseconds, of the run a success or
 // failure completes, or NULL. As in Healthchecks it pairs the completion with

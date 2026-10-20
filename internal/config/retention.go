@@ -14,7 +14,7 @@ type Retention struct {
 	Events     time.Duration // events, except those a pending delivery still needs
 	JobRuns    time.Duration // finished job runs; pending and running runs are never pruned
 	Deliveries time.Duration // delivered and failed deliveries; pending ones are never pruned
-	Pings      time.Duration // heartbeat ping log entries (each heartbeat also keeps only its newest 1000)
+	Pings      time.Duration // heartbeat ping log entries (each heartbeat also keeps only its newest 1000, within 10 MB of bodies)
 
 	// jobRunsByDefault records that JobRuns is the default because
 	// TEND_RETENTION_RUNS_DAYS is unset, so String can point out that the

@@ -46,3 +46,11 @@ func SetMaxPingsPerHeartbeat(n int) (restore func()) {
 	maxPingsPerHeartbeat = n
 	return func() { maxPingsPerHeartbeat = old }
 }
+
+// SetMaxPingLogBytes lowers the per-heartbeat ping log byte budget for a test
+// and returns a func that restores it.
+func SetMaxPingLogBytes(n int) (restore func()) {
+	old := maxPingLogBytes
+	maxPingLogBytes = n
+	return func() { maxPingLogBytes = old }
+}

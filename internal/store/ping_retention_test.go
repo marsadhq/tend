@@ -57,3 +57,38 @@ func TestPingLogIsCappedPerHeartbeat(t *testing.T) {
 		}
 	})
 }
+
+// TestPingLogHasAByteBudgetPerHeartbeat: besides the entry cap, a heartbeat
+// keeps only as many of its newest pings as fit in MaxPingLogBytes of body,
+// so large bodies cannot make one heartbeat's log huge; the cut falls on the
+// oldest entries, bodiless pings cost nothing, and bytes are counted as bytes.
+func TestPingLogHasAByteBudgetPerHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	defer store.SetMaxPingLogBytes(25)()
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		orgID, id := newPingHeartbeat(t, ctx, s, "bulky", "tok-bulky")
+		at := pingT0
+		send := func(body string) {
+			t.Helper()
+			at = at.Add(time.Second)
+			ping(t, ctx, s, "tok-bulky", heartbeat.PingInput{Kind: heartbeat.PingLog, Body: body}, at)
+		}
+		for _, b := range []string{"aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"} { // 10 bytes each
+			send(b)
+		}
+		ps := pingLog(t, ctx, s, orgID, id)
+		if len(ps) != 2 || ps[0].Body != "cccccccccc" || ps[1].Body != "bbbbbbbbbb" {
+			t.Fatalf("log after 30 bytes with a 25 byte budget = %+v, want the newest two", ps)
+		}
+		send("")
+		send("")
+		if n := len(pingLog(t, ctx, s, orgID, id)); n != 4 {
+			t.Fatalf("bodiless pings were trimmed: %d entries, want 4", n)
+		}
+		send("ééééé") // 10 bytes, 5 characters
+		ps = pingLog(t, ctx, s, orgID, id)
+		if len(ps) != 4 || ps[0].Body != "ééééé" || ps[3].Body != "cccccccccc" {
+			t.Fatalf("log = %+v, want the multi-byte body counted as 10 bytes and bbbbbbbbbb dropped", ps)
+		}
+	})
+}
