@@ -1,5 +1,6 @@
-// Package jobs - executor.go runs a single Job (shell or HTTP) with timeout,
-// retry-with-backoff, and captures combined output + exit code.
+// Package jobs - executor.go runs a single Job (shell, HTTP, or one of the
+// probes and drills) with timeout, retry-with-backoff, and captures its output
+// + exit code.
 package jobs
 
 import (
@@ -106,6 +107,10 @@ type Executor struct {
 	// Tests set this to func(int) time.Duration { return 0 } for instant retries.
 	// If nil, the default exponential backoff is used.
 	Backoff func(attempt int) time.Duration
+
+	// Now, if non-nil, is the time the tls, domain and expiry probes judge
+	// expiry dates by; nil means time.Now. Tests set it.
+	Now func() time.Time
 }
 
 // NewExecutor returns a ready-to-use Executor with default backoff.
@@ -240,6 +245,8 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 	switch j.Type {
 	case HTTP:
 		return e.runOnceHTTP(cctx, j, attempt, started)
+	case TLS:
+		return e.runOnceTLS(cctx, j, attempt, started)
 	default: // Shell or empty/default
 		return e.runOnceShell(cctx, j, env, attempt, started)
 	}
