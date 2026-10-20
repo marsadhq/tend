@@ -82,9 +82,23 @@ func Fetch(ctx context.Context, client *http.Client, baseURL, apiKey string) ([]
 	if err != nil {
 		return nil, err
 	}
-	if client == nil {
-		client = &http.Client{}
+	// Go copies a custom header like X-Api-Key onto every redirect, so one
+	// to another host would hand that host the key: refuse it. (A redirect
+	// on the same host, http to https say, is followed.)
+	c := http.Client{}
+	if client != nil {
+		c = *client
 	}
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if req.URL.Host != via[0].URL.Host {
+			return fmt.Errorf("refusing to follow a redirect to another host (%s) with the API key", req.URL.Host)
+		}
+		return nil
+	}
+	client = &c
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
