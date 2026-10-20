@@ -371,3 +371,76 @@ func (s *SQLiteStore) PruneHeartbeatPings(ctx context.Context, before time.Time)
 func (s *PostgresStore) PruneHeartbeatPings(ctx context.Context, before time.Time) (int64, error) {
 	return pruneHeartbeatPings(ctx, s.db, dialectPostgres, before)
 }
+
+// --- org ping keys (the slug form of the ping API) ---------------------------
+
+// setOrgPingKey is SetOrgPingKey for both backends.
+func setOrgPingKey(ctx context.Context, db *sql.DB, d dialect, orgID int64, key string) error {
+	res, err := db.ExecContext(ctx, rebind(d, `UPDATE orgs SET ping_key = ? WHERE id = ?`), nullIfEmpty(key), orgID)
+	if err != nil {
+		return fmt.Errorf("set org ping key: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// getOrgPingKey is GetOrgPingKey for both backends.
+func getOrgPingKey(ctx context.Context, db *sql.DB, d dialect, orgID int64) (string, error) {
+	var key sql.NullString
+	err := db.QueryRowContext(ctx, rebind(d, `SELECT ping_key FROM orgs WHERE id = ?`), orgID).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("get org ping key: %w", err)
+	}
+	return key.String, nil
+}
+
+// orgByPingKey is OrgByPingKey for both backends.
+func orgByPingKey(ctx context.Context, db *sql.DB, d dialect, key string) (int64, error) {
+	if key == "" {
+		return 0, ErrNotFound
+	}
+	var id int64
+	err := db.QueryRowContext(ctx, rebind(d, `SELECT id FROM orgs WHERE ping_key = ?`), key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("org by ping key: %w", err)
+	}
+	return id, nil
+}
+
+// SetOrgPingKey sets (or, with "", clears) the org's ping key.
+func (s *SQLiteStore) SetOrgPingKey(ctx context.Context, orgID int64, key string) error {
+	return setOrgPingKey(ctx, s.db, dialectSQLite, orgID, key)
+}
+
+// GetOrgPingKey returns the org's ping key, "" when it has none.
+func (s *SQLiteStore) GetOrgPingKey(ctx context.Context, orgID int64) (string, error) {
+	return getOrgPingKey(ctx, s.db, dialectSQLite, orgID)
+}
+
+// OrgByPingKey returns the org that owns key, or ErrNotFound.
+func (s *SQLiteStore) OrgByPingKey(ctx context.Context, key string) (int64, error) {
+	return orgByPingKey(ctx, s.db, dialectSQLite, key)
+}
+
+// SetOrgPingKey sets (or, with "", clears) the org's ping key.
+func (s *PostgresStore) SetOrgPingKey(ctx context.Context, orgID int64, key string) error {
+	return setOrgPingKey(ctx, s.db, dialectPostgres, orgID, key)
+}
+
+// GetOrgPingKey returns the org's ping key, "" when it has none.
+func (s *PostgresStore) GetOrgPingKey(ctx context.Context, orgID int64) (string, error) {
+	return getOrgPingKey(ctx, s.db, dialectPostgres, orgID)
+}
+
+// OrgByPingKey returns the org that owns key, or ErrNotFound.
+func (s *PostgresStore) OrgByPingKey(ctx context.Context, key string) (int64, error) {
+	return orgByPingKey(ctx, s.db, dialectPostgres, key)
+}
