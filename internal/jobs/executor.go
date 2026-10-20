@@ -254,6 +254,8 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 		return e.runOnceTLS(cctx, j, attempt, started)
 	case Domain:
 		return e.runOnceDomain(cctx, j, attempt, started)
+	case Expiry:
+		return e.runOnceExpiry(cctx, j, env, attempt, started)
 	default: // Shell or empty/default
 		return e.runOnceShell(cctx, j, env, attempt, started)
 	}
