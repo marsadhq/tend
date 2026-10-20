@@ -60,7 +60,7 @@ func TestServeGivesTheRunnerItsLogger(t *testing.T) {
 	realStderr := os.Stderr
 	os.Stderr = logFile
 	done := make(chan error, 1)
-	go func() { done <- cli.Run(ctx, cfg, []string{"serve"}, nil, &stdout, &stderr) }()
+	go func() { done <- cli.Run(ctx, cfg, []string{"serve", "--no-master-key"}, nil, &stdout, &stderr) }()
 	stop := func() error {
 		cancel()
 		err := <-done

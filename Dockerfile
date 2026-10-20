@@ -13,7 +13,8 @@
 #
 # Environment variables:
 #   TEND_DB          SQLite path or postgres:// DSN (default: /data/tend.db)
-#   TEND_MASTER_KEY  32-byte base64 key; required for dashboard + secrets.
+#   TEND_MASTER_KEY  32-byte base64 key; required (serve refuses to start
+#                    without it: alerts, dashboard and secrets depend on it).
 #                    Generate: head -c 32 /dev/urandom | base64
 #   TEND_ADDR        Listen address (default: :8080)
 #   TEND_BASE_URL    Externally-reachable base URL (used in heartbeat ping URLs)

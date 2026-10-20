@@ -236,8 +236,8 @@ func TestServeHelp_WorksWithoutTendDB(t *testing.T) {
 	}
 }
 
-// TestServe_NoHelp_StillServes guards against over-matching: a plain `serve`
-// (no help flag) must still reach cmdServe and open the store. We cancel the
+// TestServe_NoHelp_StillServes guards against over-matching: a `serve` without
+// a help flag must still reach cmdServe and open the store. We cancel the
 // context immediately so it returns promptly, and assert the DSN file WAS
 // created (proof the help short-circuit did not fire).
 func TestServe_NoHelp_StillServes(t *testing.T) {
@@ -247,7 +247,7 @@ func TestServe_NoHelp_StillServes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var stdout, stderr bytes.Buffer
-	_ = cli.Run(ctx, cfg, []string{"serve"}, nil, &stdout, &stderr)
+	_ = cli.Run(ctx, cfg, []string{"serve", "--no-master-key"}, nil, &stdout, &stderr)
 	if _, statErr := os.Stat(cfg.DSN); statErr != nil {
 		t.Errorf("plain serve should still open/create the store at %s: stat err = %v", cfg.DSN, statErr)
 	}

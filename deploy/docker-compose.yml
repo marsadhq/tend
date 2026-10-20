@@ -8,8 +8,9 @@
 #   docker compose up -d
 #
 # The dashboard becomes available at http://localhost:8080/login
-# TEND_MASTER_KEY is REQUIRED for the dashboard + secrets subsystem.
-# Without it, serve starts in public-only mode ("dashboard off (no master key)").
+# TEND_MASTER_KEY is REQUIRED: serve refuses to start without it (alerts,
+# the dashboard and secrets all depend on it), so `docker compose up` fails
+# until .env provides it.
 #
 # To change the host port, set TEND_PORT in your .env (or shell) before `up`:
 #   TEND_PORT=9090 docker compose up -d
@@ -34,11 +35,11 @@ services:
       - "${TEND_PORT:-8080}:8080"
 
     environment:
-      # REQUIRED for the dashboard and secrets subsystem.
-      # Supply via a .env file in this directory:
+      # REQUIRED. Supply via a .env file in this directory:
       #   TEND_MASTER_KEY=$(head -c 32 /dev/urandom | base64)
-      # If unset, tend runs in public-only mode (no dashboard, no /login).
-      TEND_MASTER_KEY: "${TEND_MASTER_KEY:-}"
+      # If unset, compose refuses to start the stack (and tend serve itself
+      # refuses to start without it).
+      TEND_MASTER_KEY: "${TEND_MASTER_KEY:?set TEND_MASTER_KEY in deploy/.env (head -c 32 /dev/urandom | base64)}"
 
       # SQLite database path inside the container.
       # Matches the image default; listed here for clarity.
