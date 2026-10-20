@@ -24,7 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/secrets"
 )

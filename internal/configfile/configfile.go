@@ -18,7 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"

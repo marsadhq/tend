@@ -60,7 +60,6 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | Package | Responsibility |
 | --- | --- |
 | `internal/core` | Cross-cutting domain types shared by everything: `Org` (tenant) and the generic `Event` record (the event-pipeline spine). |
-| `internal/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
@@ -72,6 +71,14 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, shared by `notify` and `jobs` so secret-bearing URLs stay out of logs and run output. |
 | `internal/config` | Environment-driven process configuration (driver, DSN, master key). `TEND_DB` has no default; an unset value leaves the DSN empty and `cli.Run` refuses to open a database. |
 | `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, delivery worker, and retention sweep together. |
+
+Code the Marsad tools share comes from the
+[`github.com/marsadhq/kit`](https://github.com/marsadhq/kit) module, pinned in
+`go.mod`; Tend keeps its own domain and imports these:
+
+| Package | What Tend uses it for |
+| --- | --- |
+| `kit/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 
 ---
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/configfile"
 	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/secrets"

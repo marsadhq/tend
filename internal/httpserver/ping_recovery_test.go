@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/httpserver"

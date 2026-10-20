@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/marsadhq/tend/internal/clock"
+	"github.com/marsadhq/kit/clock"
 )
 
 // rateLimiterIdleTTL bounds how long an idle bucket is kept before gc drops
