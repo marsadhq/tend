@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -157,7 +158,7 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		return cmdRule(ctx, st, org.ID, args[1:], stdout, stderr)
 
 	case "heartbeat":
-		return cmdHeartbeat(ctx, st, org.ID, args[1:], stdout, stderr)
+		return cmdHeartbeat(ctx, st, org.ID, args[1:], stdin, stdout, stderr)
 
 	case "doctor":
 		return cmdDoctor(ctx, st, cfg, org, args[1:], stdout, stderr)
@@ -1333,9 +1334,9 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 	return nil
 }
 
-func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
+func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url|history|rm> [flags])")
+		return fmt.Errorf("heartbeat: subcommand required (usage: tend heartbeat <add|list|show|ping-url|ping-key|history|rm> [flags])")
 	}
 	switch args[0] {
 	case "add":
@@ -1350,6 +1351,8 @@ func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []strin
 		return cmdHeartbeatHistory(ctx, st, orgID, args[1:], stdout, stderr)
 	case "rm":
 		return cmdHeartbeatRemove(ctx, st, orgID, args[1:], stdout, stderr)
+	case "ping-key":
+		return cmdHeartbeatPingKey(ctx, st, orgID, args[1:], stdin, stdout, stderr)
 	default:
 		return fmt.Errorf("heartbeat: unknown subcommand %q", args[0])
 	}
@@ -1371,6 +1374,97 @@ func cmdHeartbeatPingURL(ctx context.Context, st store.Store, orgID int64, args 
 	}
 	fmt.Fprintf(stdout, "%s/ping/%s\n", baseURL(), hb.Token)
 	return nil
+}
+
+// cmdHeartbeatPingKey shows or changes the org's ping key, which turns on the
+// slug form of the ping API, /ping/<ping-key>/<heartbeat-name> (as in
+// Healthchecks). -new generates a key, -set reads one from stdin (to keep a
+// Healthchecks project's slug URLs working), -clear turns the slug form off.
+// Like a ping token the key is a credential, printed here on the trusted
+// local surface only.
+func cmdHeartbeatPingKey(ctx context.Context, st store.Store, orgID int64, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("heartbeat ping-key", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	gen := fs.Bool("new", false, "generate a new ping key (the old one, if any, stops working)")
+	set := fs.Bool("set", false, "read the ping key from stdin, e.g. a Healthchecks project's")
+	clearKey := fs.Bool("clear", false, "remove the ping key: slug ping URLs stop working")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("heartbeat ping-key: unexpected argument %q (usage: tend heartbeat ping-key [-new | -set | -clear])", fs.Arg(0))
+	}
+	n := 0
+	for _, b := range []bool{*gen, *set, *clearKey} {
+		if b {
+			n++
+		}
+	}
+	if n > 1 {
+		return fmt.Errorf("heartbeat ping-key: pass at most one of -new, -set and -clear")
+	}
+	var key string
+	switch {
+	case *gen:
+		var err error
+		if key, err = newPingKey(); err != nil {
+			return fmt.Errorf("heartbeat ping-key: %w", err)
+		}
+	case *set:
+		raw, err := io.ReadAll(io.LimitReader(stdin, 4096))
+		if err != nil {
+			return fmt.Errorf("heartbeat ping-key: read stdin: %w", err)
+		}
+		key = strings.TrimSpace(string(raw))
+		if !validPingKey(key) {
+			return fmt.Errorf("heartbeat ping-key: a ping key is 1 to 128 letters, digits, '-' or '_' (read from stdin)")
+		}
+	}
+	if *gen || *set || *clearKey {
+		if err := st.SetOrgPingKey(ctx, orgID, key); err != nil {
+			return fmt.Errorf("heartbeat ping-key: %w", err)
+		}
+		if *clearKey {
+			fmt.Fprintln(stdout, "ping key removed; slug ping URLs no longer work")
+			return nil
+		}
+	} else {
+		var err error
+		if key, err = st.GetOrgPingKey(ctx, orgID); err != nil {
+			return fmt.Errorf("heartbeat ping-key: %w", err)
+		}
+		if key == "" {
+			fmt.Fprintln(stdout, "no ping key: slug ping URLs are off (create one with tend heartbeat ping-key -new, or adopt a Healthchecks project's with -set)")
+			return nil
+		}
+	}
+	fmt.Fprintf(stdout, "ping key: %s\n", key)
+	fmt.Fprintf(stdout, "slug URLs: %s/ping/%s/<heartbeat-name>[/start|/fail|/log|/<exit-status>] (?create=1 creates a missing one)\n", baseURL(), key)
+	return nil
+}
+
+// newPingKey returns a random ping key: 16 bytes, base64url without
+// padding, 22 characters like a Healthchecks ping key.
+func newPingKey() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate ping key: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// validPingKey reports whether key can be a ping key: one path segment of 1
+// to 128 letters, digits, '-' and '_' (what Healthchecks' keys are made of).
+func validPingKey(key string) bool {
+	if key == "" || len(key) > 128 {
+		return false
+	}
+	for _, c := range key {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // cmdHeartbeatShow prints a heartbeat's details, including the recoverable
@@ -1425,6 +1519,9 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 		fmt.Fprintf(stdout, "result:    %s\n", line)
 	}
 	fmt.Fprintf(stdout, "ping url:  %s/ping/%s\n", baseURL(), hb.Token)
+	if key, err := st.GetOrgPingKey(ctx, orgID); err == nil && key != "" {
+		fmt.Fprintf(stdout, "slug url:  %s/ping/%s/%s\n", baseURL(), key, url.PathEscape(hb.Name))
+	}
 	if result != nil {
 		if tail := heartbeat.OutputTail(result.Body); tail != "" {
 			fmt.Fprintln(stdout, "output:")
@@ -1794,6 +1891,7 @@ Commands:
   heartbeat add ...   create/update a heartbeat (prints the ping URL)
   heartbeat list      list heartbeats
   heartbeat show <n>  show a heartbeat: status, run, last result and output
+  heartbeat ping-key [-new|-set|-clear]  the org's ping key for slug URLs
   heartbeat history <n> [-body]  its pings and transitions, newest first
   doctor              diagnose config/DB/connectivity
   user add [flags]    create a user (admin) - password read from stdin

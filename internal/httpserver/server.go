@@ -39,6 +39,9 @@ type Server struct {
 	// on the same minute is not throttled for it.
 	pingMissLimiter  *httpx.RateLimiter
 	pingTokenLimiter *httpx.RateLimiter
+	// pingCreateLimiter bounds the heartbeats slug pings with ?create=1 may
+	// create, per org.
+	pingCreateLimiter *httpx.RateLimiter
 }
 
 // New constructs a Server. dispatch may be nil (e.g. in tests or when no
@@ -67,7 +70,8 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 		// Known tokens: a burst of 10, then 1/s per heartbeat. A heartbeat
 		// pings once per period, so this only stops a runaway loop (or a
 		// leaked token) from writing to the database flat out.
-		pingTokenLimiter: httpx.NewRateLimiter(clk, pingTokenRate, pingTokenBurst),
+		pingTokenLimiter:  httpx.NewRateLimiter(clk, pingTokenRate, pingTokenBurst),
+		pingCreateLimiter: httpx.NewRateLimiter(clk, pingCreateRate, pingCreateBurst),
 	}
 }
 

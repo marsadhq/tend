@@ -26,6 +26,12 @@ import (
 //	/ping/<token>/<1..255>        failure with that exit status
 //	/ping/<token>/log             a log entry; changes nothing
 //
+// and, once the org has a ping key (tend heartbeat ping-key), the same
+// actions by heartbeat name:
+//
+//	/ping/<ping-key>/<slug>[/start|/fail|/log|/<exit-status>]
+//
+// where <slug> is the heartbeat's name; ?create=1 creates a missing one.
 // HEAD, GET and POST all work. A POST body is logged with the ping, up to
 // PingBodyLimit bytes, and ?rid=<uuid> ties a start to its completion.
 
@@ -49,11 +55,29 @@ const (
 // request (see handlePing), so this is what stops it from running forever.
 const pingWriteTimeout = 10 * time.Second
 
-// pingRequest is one ping, parsed from its URL.
+// pingRequest is one ping, parsed from its URL: by token, or by the org's
+// ping key and the heartbeat's name (the slug form).
 type pingRequest struct {
-	token string // the heartbeat's ping token
-	in    heartbeat.PingInput
+	token     string // the heartbeat's ping token; "" for the slug form
+	key, slug string // the slug form
+	create    bool   // ?create=1: create the slug's heartbeat when missing
+	in        heartbeat.PingInput
 }
+
+// Auto-created heartbeats (slug pings with ?create=1) get Healthchecks'
+// defaults: a ping a day, an hour's grace.
+const (
+	autoCreatePeriod = 86400
+	autoCreateGrace  = 3600
+)
+
+// Ping-created heartbeats per org: a burst of 20, then one a minute. A ping
+// key is a credential, so this is not about guessing, only about a script
+// gone wrong (a slug with a date in it) filling the heartbeat list.
+const (
+	pingCreateRate  = 1.0 / 60
+	pingCreateBurst = 20
+)
 
 // errPingURL and errPingRID are a ping URL Healthchecks answers 400 for.
 var (
@@ -67,22 +91,46 @@ var errPingNotFound = errors.New("not found")
 // parsePing reads the ping a request makes from its path below /ping/ and its
 // query. The body is read separately (readPingBody), once the ping is known
 // to be well formed.
+//
+// /ping/<a>/<b> is a token with an action when <b> is an action (start, fail,
+// log, or an exit status), and otherwise the slug form, key <a> and slug <b>.
+// A heartbeat named like an action is therefore reached by slug only with an
+// action of its own (/ping/<key>/<name>/0 for a success).
 func parsePing(path string, query map[string][]string) (pingRequest, error) {
 	path = strings.TrimSuffix(path, "/")
 	segs := strings.Split(path, "/")
-	if path == "" || len(segs) > 2 {
+	if path == "" || len(segs) > 3 {
 		return pingRequest{}, errPingNotFound
 	}
-	req := pingRequest{token: normalizeToken(segs[0]), in: heartbeat.PingInput{Kind: heartbeat.PingSuccess}}
-	if len(segs) == 2 {
+	req := pingRequest{in: heartbeat.PingInput{Kind: heartbeat.PingSuccess}}
+	switch len(segs) {
+	case 1:
+		req.token = normalizeToken(segs[0])
+	case 2:
 		in, ok, err := pingAction(segs[1])
+		if err != nil {
+			return pingRequest{}, err
+		}
+		if ok {
+			req.token, req.in = normalizeToken(segs[0]), in
+		} else {
+			req.key, req.slug = segs[0], segs[1]
+		}
+	case 3:
+		in, ok, err := pingAction(segs[2])
 		if err != nil {
 			return pingRequest{}, err
 		}
 		if !ok {
 			return pingRequest{}, errPingNotFound
 		}
-		req.in = in
+		req.key, req.slug, req.in = segs[0], segs[1], in
+	}
+	if req.key != "" && req.slug == "" {
+		return pingRequest{}, errPingNotFound
+	}
+	if req.key != "" {
+		req.create = len(query["create"]) > 0 && query["create"][0] == "1"
 	}
 	if rids, ok := query["rid"]; ok {
 		rid, ok := canonicalUUID(rids[0])
@@ -141,6 +189,22 @@ func canonicalUUID(s string) (string, bool) {
 		}
 	}
 	return strings.ToLower(s), true
+}
+
+// validSlug reports whether s may name a heartbeat a slug ping creates:
+// Healthchecks' slug alphabet (lower-case letters, digits, '-' and '_'), at
+// most 100 characters.
+func validSlug(s string) bool {
+	if s == "" || len(s) > 100 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeToken returns a ping token as it is stored. A token in the shape
@@ -262,22 +326,45 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := s.clk.Now()
-	missKey, tokenKey := clientIP(r)+"|ping-miss", "ping-token|"+req.token
+	missKey := clientIP(r) + "|ping-miss"
 	if !s.pingMissLimiter.Has(missKey, now) {
 		httpx.TooManyRequests(w, s.pingMissLimiter)
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pingWriteTimeout)
+	defer cancel()
+
+	// The slug form resolves to the heartbeat's token first, creating the
+	// heartbeat on ?create=1; from there both forms are the same ping.
+	status, created := http.StatusOK, false
+	if req.key != "" {
+		token, made, code, msg := s.resolveSlug(ctx, req, now)
+		if code == http.StatusNotFound {
+			s.pingMissLimiter.Allow(missKey, now)
+		}
+		if code == http.StatusTooManyRequests {
+			httpx.TooManyRequests(w, s.pingCreateLimiter)
+			return
+		}
+		if code != 0 {
+			pingReply(w, code, msg)
+			return
+		}
+		req.token, created = token, made
+		if created {
+			status = http.StatusCreated
+		}
+	}
+	tokenKey := "ping-token|" + req.token
 	if !s.pingTokenLimiter.Has(tokenKey, now) {
 		httpx.TooManyRequests(w, s.pingTokenLimiter)
 		return
 	}
-	if req.in.Body, err = readPingBody(r, req.token); err != nil {
+	if req.in.Body, err = readPingBody(r, req.token, req.key); err != nil {
 		pingReply(w, http.StatusBadRequest, "could not read the request body")
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pingWriteTimeout)
-	defer cancel()
 	res, err := s.store.RecordHeartbeatPing(ctx, req.token, req.in, now)
 	if errors.Is(err, store.ErrNotFound) {
 		s.pingMissLimiter.Allow(missKey, now)
@@ -295,7 +382,61 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	if res.Event != nil && s.dispatch != nil {
 		s.dispatch(ctx, *res.Event)
 	}
-	pingReply(w, http.StatusOK, "OK")
+	if created {
+		pingReply(w, status, "Created")
+		return
+	}
+	pingReply(w, status, "OK")
+}
+
+// resolveSlug finds the token of the heartbeat a slug ping names: the
+// heartbeat called req.slug in the org whose ping key is req.key, created with
+// the Healthchecks defaults when it is missing and req.create is set. code is
+// 0 on success, otherwise the status to answer with msg (404 when the key or
+// the heartbeat does not exist, 400 for a slug that cannot be created, 429
+// when the org is creating heartbeats too fast, 500 on a database error).
+func (s *Server) resolveSlug(ctx context.Context, req pingRequest, now time.Time) (token string, created bool, code int, msg string) {
+	orgID, err := s.store.OrgByPingKey(ctx, req.key)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", false, http.StatusNotFound, "not found"
+	}
+	if err != nil {
+		s.log.Error("ping: resolve ping key failed", "err", err)
+		return "", false, http.StatusInternalServerError, "internal error"
+	}
+	hb, err := s.store.GetHeartbeatByName(ctx, orgID, req.slug)
+	if err == nil {
+		return hb.Token, false, 0, ""
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		s.log.Error("ping: resolve slug failed", "err", err)
+		return "", false, http.StatusInternalServerError, "internal error"
+	}
+	if !req.create {
+		return "", false, http.StatusNotFound, "not found"
+	}
+	if !validSlug(req.slug) {
+		return "", false, http.StatusBadRequest, errPingURL.Error()
+	}
+	createKey := "ping-create|" + strconv.FormatInt(orgID, 10)
+	if !s.pingCreateLimiter.Allow(createKey, now) {
+		return "", false, http.StatusTooManyRequests, ""
+	}
+	fresh, err := heartbeat.NewToken()
+	if err != nil {
+		return "", false, http.StatusInternalServerError, "internal error"
+	}
+	// CreateHeartbeat upserts by name, so two creating pings racing on one
+	// slug end up with the same heartbeat and token.
+	_, token, err = s.store.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+		OrgID: orgID, Name: req.slug, Token: fresh, PeriodSeconds: autoCreatePeriod, GraceSeconds: autoCreateGrace,
+	})
+	if err != nil {
+		s.log.Error("ping: create heartbeat for slug failed", "err", err)
+		return "", false, http.StatusInternalServerError, "internal error"
+	}
+	s.log.Info("ping: created heartbeat from a slug ping", "heartbeat", req.slug, "org", orgID)
+	return token, true, 0, ""
 }
 
 // tokenHint returns a short, non-sensitive prefix of a ping token for logs, so

@@ -59,6 +59,13 @@ type Store interface {
 
 	// tenancy
 	BootstrapDefaultOrg(ctx context.Context) (core.Org, error) // idempotent: returns existing or creates "default"
+	// The org's ping key turns on the slug form of the ping API,
+	// /ping/<ping-key>/<heartbeat-name>. SetOrgPingKey sets it ("" clears it;
+	// a key another org holds is refused), GetOrgPingKey returns it ("" when
+	// none), and OrgByPingKey resolves one to its org (ErrNotFound if none).
+	SetOrgPingKey(ctx context.Context, orgID int64, key string) error
+	GetOrgPingKey(ctx context.Context, orgID int64) (string, error)
+	OrgByPingKey(ctx context.Context, key string) (int64, error)
 
 	// jobs
 	CreateJob(ctx context.Context, j jobs.Job) (int64, error)                     // returns new job ID
