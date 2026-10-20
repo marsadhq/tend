@@ -292,7 +292,7 @@ func renderMissed(ev core.Event) (string, string) {
 	case ok && d.Reason == heartbeat.ReasonOverran:
 		grace := time.Duration(d.GraceSeconds) * time.Second
 		return "Heartbeat missed: " + name + " (run did not finish)",
-			fmt.Sprintf("%s started a run at %s that did not finish within its grace of %s",
+			fmt.Sprintf("%s started a run at %s that did not finish within %s",
 				name, d.StartedAt.UTC().Format(time.RFC3339), grace)
 	default:
 		return "Heartbeat missed: " + name, name

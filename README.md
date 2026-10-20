@@ -139,7 +139,7 @@ Tend answers the [Healthchecks ping API](https://healthchecks.io/docs/http_api/)
 | `…/start`, `…/fail`, `…/log`, `…/<0-255>`, `?rid=<uuid>` | the same suffixes and query on `/ping/<token>` |
 | `https://hc-ping.com/<ping-key>/<slug>[/…]`, `?create=1` | `<TEND_BASE_URL>/ping/<ping-key>/<heartbeat-name>[/…]`, `?create=1`, once the org has a ping key (`tend heartbeat ping-key -new`, or `-set` to adopt the project's) |
 
-**Supported:** success, `/start` (a run that does not finish within the grace takes the heartbeat down), `/fail` and exit statuses 1 to 255 (down at once, alerting as `heartbeat.missed` with the subject `Heartbeat failed: <name> (exit 3)` and the tail of the output), `/0`, `/log`, `?rid=` (durations, concurrent runs), the request body as the ping's log (up to 100 kB, shown by `tend heartbeat history -body`, `tend heartbeat show`, the dashboard and `GET /api/heartbeats/{id}/pings`), HEAD, GET and POST, slug URLs with `?create=1`, and Healthchecks' `OK`/`Created` replies and `Ping-Body-Limit` header.
+**Supported:** success, `/start` (a run that does not finish within the grace, or within the period when the grace is 0, takes the heartbeat down), `/fail` and exit statuses 1 to 255 (down at once, alerting as `heartbeat.missed` with the subject `Heartbeat failed: <name> (exit 3)` and the tail of the output), `/0`, `/log`, `?rid=` (durations, concurrent runs), the request body as the ping's log (up to 100 kB, shown by `tend heartbeat history -body`, `tend heartbeat show`, the dashboard and `GET /api/heartbeats/{id}/pings`), HEAD, GET and POST, slug URLs with `?create=1`, and Healthchecks' `OK`/`Created` replies and `Ping-Body-Limit` header.
 
 **Not the same:** an unknown token is `404 not found` and a rate-limited ping `429` with `Retry-After` (hosted Healthchecks answers `200 OK (not found)` / `200 OK (rate limited)`); a heartbeat is armed from its creation, before its first ping; there are no cron schedules (an imported cron check gets an approximating period and a warning), no pause, no keyword filters, and no Management API.
 
@@ -267,7 +267,7 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 |---|---|---|
 | `run.failed` | a run failed, timed out, or was reaped (the precise status is in the payload) | `{"run_id","job_id","job_name","status","exit_code"}` |
 | `run.recovered` | a run succeeded and the job's previous finished run had not | same as `run.failed` |
-| `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping, a run it started (`/start`) did not finish within its grace, or it reported a failure (`/fail`, an exit status of 1 to 255); the subject says which, e.g. `Heartbeat failed: db-backup (exit 3)`, and a failure's body ends with the tail of its logged output | the heartbeat name |
+| `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping, a run it started (`/start`) did not finish within its grace (its period when the grace is 0), or it reported a failure (`/fail`, an exit status of 1 to 255); the subject says which, e.g. `Heartbeat failed: db-backup (exit 3)`, and a failure's body ends with the tail of its logged output | the heartbeat name |
 | `heartbeat.recovered` | a ping arrived for a heartbeat that was down | the heartbeat name |
 | `job.removed` | a job was deleted (`tend job rm`) | `{"job_id","job_name"}` |
 | `heartbeat.removed` | a heartbeat was deleted (`tend heartbeat rm`) | the heartbeat name |
@@ -293,7 +293,7 @@ Secrets in a channel's config (tokens, keys, webhook URLs) can come from `{{ sec
 
 ### Alert on a missed heartbeat
 
-A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. The job can say more with the [Healthchecks-compatible](#coming-from-healthchecksio) suffixes: `/start` when it begins (it is then reported if it does not finish within the grace), `/fail` or `/<exit-status>` when it ends (a failure is reported at once), `/log` for a note, with its output as the POST body; `tend exec` does all of that for any command. Route both events to a channel with a rule:
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. The job can say more with the [Healthchecks-compatible](#coming-from-healthchecksio) suffixes: `/start` when it begins (it is then reported if it does not finish within the grace, or within the period when the grace is 0), `/fail` or `/<exit-status>` when it ends (a failure is reported at once), `/log` for a note, with its output as the POST body; `tend exec` does all of that for any command. Route both events to a channel with a rule:
 
 ```yaml
 notifications:

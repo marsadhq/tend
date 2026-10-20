@@ -80,7 +80,7 @@ func TestHeartbeatOverranSaysSo(t *testing.T) {
 	if m.Subject != "Heartbeat missed: sync (run did not finish)" {
 		t.Fatalf("subject = %q", m.Subject)
 	}
-	if m.Body != "sync started a run at 2026-10-20T10:00:00Z that did not finish within its grace of 5m0s" {
+	if m.Body != "sync started a run at 2026-10-20T10:00:00Z that did not finish within 5m0s" {
 		t.Fatalf("body = %q", m.Body)
 	}
 }
