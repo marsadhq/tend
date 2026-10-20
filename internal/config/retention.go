@@ -14,11 +14,17 @@ type Retention struct {
 	Events     time.Duration // events, except those a pending delivery still needs
 	JobRuns    time.Duration // finished job runs; pending and running runs are never pruned
 	Deliveries time.Duration // delivered and failed deliveries; pending ones are never pruned
+
+	// jobRunsByDefault records that JobRuns is the default because
+	// TEND_RETENTION_RUNS_DAYS is unset, so String can point out that the
+	// default changed.
+	jobRunsByDefault bool
 }
 
 // Retention defaults, in days. Events are the alert record (a month); job runs
-// are the run history behind the dashboard (a quarter); finalized deliveries
-// only matter while debugging a recent notification problem (a week).
+// are the run history behind the dashboard (a quarter; v0.3.0 raised it from
+// the month earlier versions kept); finalized deliveries only matter while
+// debugging a recent notification problem (a week).
 const (
 	DefaultEventRetentionDays    = 30
 	DefaultJobRunRetentionDays   = 90
@@ -52,6 +58,9 @@ func LoadRetention() (Retention, error) {
 		{EnvDeliveryRetentionDays, DefaultDeliveryRetentionDays, &r.Deliveries},
 	} {
 		days := w.def
+		if w.env == EnvJobRunRetentionDays && strings.TrimSpace(os.Getenv(w.env)) == "" {
+			r.jobRunsByDefault = true
+		}
 		if v := strings.TrimSpace(os.Getenv(w.env)); v != "" {
 			n, err := strconv.Atoi(v)
 			if err != nil || n < 0 || n > maxRetentionDays {
@@ -64,8 +73,11 @@ func LoadRetention() (Retention, error) {
 	return r, nil
 }
 
-// String renders the windows for the serve banner, e.g.
-// "events 30d, job runs 90d, deliveries 7d".
+// String renders the windows for the serve banner and doctor, e.g.
+// "events 30d, job runs 90d (default, up from 30d before v0.3.0), deliveries
+// 7d". The note about the job-run default stays while that default is in
+// effect, so an upgrade that suddenly keeps three times as much run history
+// says so where the operator looks.
 func (r Retention) String() string {
 	f := func(d time.Duration) string {
 		if d == 0 {
@@ -73,5 +85,9 @@ func (r Retention) String() string {
 		}
 		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 	}
-	return fmt.Sprintf("events %s, job runs %s, deliveries %s", f(r.Events), f(r.JobRuns), f(r.Deliveries))
+	runs := f(r.JobRuns)
+	if r.jobRunsByDefault {
+		runs += fmt.Sprintf(" (default, up from 30d before v0.3.0; set %s to change)", EnvJobRunRetentionDays)
+	}
+	return fmt.Sprintf("events %s, job runs %s, deliveries %s", f(r.Events), runs, f(r.Deliveries))
 }
