@@ -16,7 +16,7 @@ func TestMessageForRunFailed(t *testing.T) {
 		Type:    "run.failed",
 		Payload: `{"run_id":3,"job_id":2,"job_name":"nightly","status":"failed","exit_code":9}`,
 	}
-	m := messageFor(ev)
+	m := messageFor(ev, "primary")
 	if w, ok := m.Webhook.(event.TendWebhook); !ok || w.Event == nil || w.Event.Type != "run.failed" {
 		t.Fatalf("Event not carried through to the webhook body: %+v", m.Webhook)
 	}
@@ -29,7 +29,7 @@ func TestMessageForRunFailed(t *testing.T) {
 
 	// A run.failed with an unparseable payload must not panic and must still
 	// produce a sensible subject.
-	m2 := messageFor(core.Event{Type: "run.failed", Payload: "not json"})
+	m2 := messageFor(core.Event{Type: "run.failed", Payload: "not json"}, "primary")
 	if m2.Subject == "" {
 		t.Fatal("empty subject for unparseable run.failed payload")
 	}
@@ -38,17 +38,17 @@ func TestMessageForRunFailed(t *testing.T) {
 // TestMessageForHeartbeat asserts heartbeat messages include the heartbeat name
 // (carried as the plain-string payload).
 func TestMessageForHeartbeat(t *testing.T) {
-	missed := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup"})
+	missed := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup"}, "primary")
 	if !strings.Contains(missed.Subject, "db-backup") {
 		t.Fatalf("missed subject should mention heartbeat name: %q", missed.Subject)
 	}
-	recovered := messageFor(core.Event{Type: "heartbeat.recovered", Payload: "db-backup"})
+	recovered := messageFor(core.Event{Type: "heartbeat.recovered", Payload: "db-backup"}, "primary")
 	if !strings.Contains(recovered.Subject, "db-backup") {
 		t.Fatalf("recovered subject should mention heartbeat name: %q", recovered.Subject)
 	}
 
 	// Unknown type falls back to the type as subject.
-	other := messageFor(core.Event{Type: "weird.event", Payload: "x"})
+	other := messageFor(core.Event{Type: "weird.event", Payload: "x"}, "primary")
 	if other.Subject != "weird.event" {
 		t.Fatalf("default subject: got %q want %q", other.Subject, "weird.event")
 	}
@@ -83,14 +83,14 @@ func TestMessageForRunRecovered(t *testing.T) {
 	m := messageFor(core.Event{
 		Type:    "run.recovered",
 		Payload: `{"run_id":4,"job_id":2,"job_name":"nightly","status":"succeeded","exit_code":0}`,
-	})
+	}, "primary")
 	if m.Subject != "Job recovered: nightly" {
 		t.Fatalf("subject = %q, want %q", m.Subject, "Job recovered: nightly")
 	}
 	if !strings.Contains(m.Body, "succeeded") {
 		t.Fatalf("body should mention the status: %q", m.Body)
 	}
-	if m2 := messageFor(core.Event{Type: "run.recovered", Payload: "junk"}); m2.Subject != "Job recovered" {
+	if m2 := messageFor(core.Event{Type: "run.recovered", Payload: "junk"}, "primary"); m2.Subject != "Job recovered" {
 		t.Fatalf("unparseable payload subject = %q, want %q", m2.Subject, "Job recovered")
 	}
 	if !Alertable("run.recovered") || Alertable("run.succeeded") {
@@ -101,11 +101,11 @@ func TestMessageForRunRecovered(t *testing.T) {
 // TestMessageForRemovals asserts job.removed and heartbeat.removed name what
 // was deleted and are alertable.
 func TestMessageForRemovals(t *testing.T) {
-	job := messageFor(core.Event{Type: "job.removed", Payload: `{"job_id":7,"job_name":"nightly"}`})
+	job := messageFor(core.Event{Type: "job.removed", Payload: `{"job_id":7,"job_name":"nightly"}`}, "primary")
 	if job.Subject != "Job removed: nightly" {
 		t.Fatalf("job.removed subject = %q", job.Subject)
 	}
-	hb := messageFor(core.Event{Type: "heartbeat.removed", Payload: "db-backup"})
+	hb := messageFor(core.Event{Type: "heartbeat.removed", Payload: "db-backup"}, "primary")
 	if hb.Subject != "Heartbeat removed: db-backup" {
 		t.Fatalf("heartbeat.removed subject = %q", hb.Subject)
 	}
@@ -122,14 +122,14 @@ func TestMessageForRemovals(t *testing.T) {
 // TestMessageForNotificationFailed asserts the failure report names the event
 // type that was not delivered.
 func TestMessageForNotificationFailed(t *testing.T) {
-	m := messageFor(core.Event{Type: "notification.failed", Payload: "run.failed"})
+	m := messageFor(core.Event{Type: "notification.failed", Payload: "run.failed"}, "primary")
 	if m.Subject != "Alert delivery failed: run.failed" {
 		t.Fatalf("subject = %q", m.Subject)
 	}
 	if !strings.Contains(m.Body, "run.failed") {
 		t.Fatalf("body should name the undelivered event type: %q", m.Body)
 	}
-	if m2 := messageFor(core.Event{Type: "notification.failed"}); m2.Subject != "Alert delivery failed" {
+	if m2 := messageFor(core.Event{Type: "notification.failed"}, "primary"); m2.Subject != "Alert delivery failed" {
 		t.Fatalf("empty payload subject = %q", m2.Subject)
 	}
 }

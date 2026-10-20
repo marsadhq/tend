@@ -66,7 +66,7 @@ func TestGivenUpDeliveryIsReportedOnce(t *testing.T) {
 		}
 
 		w := notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return failingProvider{}, nil },
-			slog.New(slog.NewTextHandler(io.Discard, nil)))
+			"primary", slog.New(slog.NewTextHandler(io.Discard, nil)))
 		w.MaxAge = 0 // every failed attempt is final
 		if _, err := w.DrainOnce(ctx); err != nil {
 			t.Fatalf("DrainOnce: %v", err)

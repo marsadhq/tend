@@ -3,6 +3,7 @@ package notify
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/marsadhq/kit/event"
@@ -81,14 +82,101 @@ func EventJobID(ev core.Event) int64 {
 
 // messageFor renders the Message for ev: a subject and body tailored per event
 // type, and the webhook body Tend has always posted (event.TendWebhook: the
-// subject, the body and the originating event under "event").
-func messageFor(ev core.Event) kitnotify.Message {
+// subject, the body and the originating event under "event"), with the event's
+// marsad.event/v1 envelope added under "marsad" when it has one (see
+// envelope). instance names this installation in the envelope's source.
+func messageFor(ev core.Event, instance string) kitnotify.Message {
 	subject, body := render(ev)
+	env := envelope(ev, subject, body, instance)
 	return kitnotify.Message{
 		Subject: subject,
 		Body:    body,
-		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev)},
+		Event:   env,
+		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev), Marsad: env},
 	}
+}
+
+// envelopeKind is how one event type maps onto the V1 envelope.
+type envelopeKind struct {
+	subject  string // "job", "heartbeat" or "notifier"
+	severity event.Severity
+	status   event.Status
+}
+
+// envelopeKinds maps every alertable event type onto V1, as kit/event
+// documents Tend's mapping (see event.TendFixture) and its golden fixtures
+// pin it.
+var envelopeKinds = map[string]envelopeKind{
+	"run.failed":            {"job", event.SeverityCritical, event.StatusFiring},
+	"run.recovered":         {"job", event.SeverityCritical, event.StatusResolved},
+	"heartbeat.missed":      {"heartbeat", event.SeverityCritical, event.StatusFiring},
+	"heartbeat.recovered":   {"heartbeat", event.SeverityCritical, event.StatusResolved},
+	"job.removed":           {"job", event.SeverityInfo, event.StatusResolved},
+	"heartbeat.removed":     {"heartbeat", event.SeverityInfo, event.StatusResolved},
+	EventNotificationFailed: {"notifier", event.SeverityWarning, event.StatusFiring},
+}
+
+// envelope is ev as a marsad.event/v1 envelope: source {tend, instance}, the
+// event's row id, its type as the kind, the job (from the payload's job_id and
+// job_name), the heartbeat (its name, which is its identity) or Tend's
+// notifier as the subject, the severity and status of envelopeKinds, the
+// rendered subject and body as title and body, and CreatedAt as occurred_at.
+// dedup_key is the event's DedupKey, or "<type>:<payload>" without one,
+// followed by "@" and CreatedAt in unix nanoseconds, the identity Ward already
+// derives from the legacy event; sequence is event.SequenceAt(CreatedAt).
+//
+// It is nil when ev cannot make a valid envelope (a type with no mapping, a
+// run payload without a job_id, an unnamed heartbeat, no CreatedAt): the
+// webhook then posts the legacy body alone, as it always has, rather than
+// failing the delivery over the addition.
+func envelope(ev core.Event, title, body, instance string) *event.V1 {
+	k, ok := envelopeKinds[ev.Type]
+	if !ok {
+		return nil
+	}
+	var subject event.Subject
+	var data []byte
+	switch k.subject {
+	case "job":
+		var p struct {
+			JobID   int64  `json:"job_id"`
+			JobName string `json:"job_name"`
+		}
+		if json.Unmarshal([]byte(ev.Payload), &p) != nil || p.JobID <= 0 {
+			return nil
+		}
+		subject = event.Subject{Type: "job", ID: strconv.FormatInt(p.JobID, 10), Name: p.JobName}
+		data = []byte(ev.Payload)
+	case "heartbeat":
+		subject = event.Subject{Type: "heartbeat", ID: ev.Payload, Name: ev.Payload}
+		data, _ = json.Marshal(map[string]string{"heartbeat": ev.Payload})
+	case "notifier":
+		subject = event.Subject{Type: "notifier", ID: "notify", Name: "notify"}
+		data, _ = json.Marshal(map[string]string{"undelivered": ev.Payload})
+	}
+	base := ev.DedupKey
+	if base == "" {
+		base = ev.Type + ":" + ev.Payload
+	}
+	env := event.V1{
+		Schema:     event.SchemaV1,
+		ID:         strconv.FormatInt(ev.ID, 10),
+		Source:     event.Source{Tool: "tend", Instance: instance},
+		Kind:       ev.Type,
+		Subject:    subject,
+		Severity:   k.severity,
+		Status:     k.status,
+		DedupKey:   fmt.Sprintf("%s@%d", base, ev.CreatedAt.UnixNano()),
+		Sequence:   event.SequenceAt(ev.CreatedAt),
+		OccurredAt: ev.CreatedAt,
+		Title:      title,
+		Body:       body,
+		Data:       json.RawMessage(data),
+	}
+	if env.Validate() != nil {
+		return nil
+	}
+	return &env
 }
 
 // tendEvent is ev as the webhook body carries it.

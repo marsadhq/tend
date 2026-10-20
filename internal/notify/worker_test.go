@@ -121,7 +121,7 @@ func newTestWorker(t *testing.T, fs *fakeWorkerStore, p kitnotify.Provider) *Wor
 		t.Fatalf("encrypt blob: %v", err)
 	}
 	fs.blob = blob
-	w := NewWorker(fs, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil }, discardLogger())
+	w := NewWorker(fs, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil }, "primary", discardLogger())
 	return w
 }
 
