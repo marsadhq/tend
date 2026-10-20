@@ -409,3 +409,30 @@ func TestReconcileRefusesRulesThatNeverFire(t *testing.T) {
 		t.Fatalf("a refused reconcile wrote %d rules, want 0", len(rules))
 	}
 }
+
+// TestParseUnknownChannelTypeNamesTheValidOnes: the error for a channel type
+// Tend does not know lists every type it does, telegram included.
+func TestParseUnknownChannelTypeNamesTheValidOnes(t *testing.T) {
+	yaml := `
+notifications:
+  channels:
+    - name: pager
+      type: carrier-pigeon
+      config: {url: "https://example.invalid/h"}
+`
+	_, err := configfile.Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("Parse accepted an unknown channel type")
+	}
+	for _, want := range []string{`"pager"`, `"carrier-pigeon"`, "webhook", "slack", "discord", "smtp", "telegram"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+	for _, typ := range []string{"webhook", "slack", "discord", "smtp", "telegram"} {
+		ok := strings.Replace(yaml, "carrier-pigeon", typ, 1)
+		if _, err := configfile.Parse([]byte(ok)); err != nil {
+			t.Errorf("Parse refused a %s channel: %v", typ, err)
+		}
+	}
+}
