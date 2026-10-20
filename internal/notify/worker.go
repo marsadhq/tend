@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
-	"github.com/marsadhq/tend/internal/secrets"
 )
 
 // Delivery state values, stored in deliveries.state.

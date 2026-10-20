@@ -91,7 +91,7 @@ latest release to receive security fixes.
 
 If you're auditing tend, these areas are the most security-relevant:
 
-- **Secrets at rest**: AES-256-GCM `Box` (`internal/secrets`); channel config
+- **Secrets at rest**: AES-256-GCM `Box` (`kit/secrets`); channel config
   and stored secret values are encrypted; secret plaintext is never persisted in
   job rows and has no API/YAML write path.
 - **The master key**: a base64-encoded 32-byte key that feeds both the secrets

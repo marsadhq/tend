@@ -62,7 +62,6 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/core` | Cross-cutting domain types shared by everything: `Org` (tenant) and the generic `Event` record (the event-pipeline spine). |
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
-| `internal/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 | `internal/auth` | Cryptographic identity primitives: argon2id passwords, API tokens, signed session cookies, CSRF; the `Principal`, `User`, `APIToken`, `Membership` types. |
 | `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP/Telegram), rules, the `Alertable` filter, and the `Worker` that drains the durable delivery queue. |
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
@@ -79,6 +78,7 @@ Code the Marsad tools share comes from the
 | Package | What Tend uses it for |
 | --- | --- |
 | `kit/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
+| `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 
 ---
 
@@ -378,7 +378,7 @@ careful.
   (`tend-session-v1`) and no salt (deterministic), so restarts don't invalidate
   outstanding sessions. The same master key feeds the secrets `Box`. One secret,
   domain-separated by HKDF, underpins both.
-- **Secrets: AES-256-GCM `Box`.** `secrets.Box` (`internal/secrets`) encrypts with
+- **Secrets: AES-256-GCM `Box`.** `secrets.Box` (`kit/secrets`) encrypts with
   AES-256-GCM and a fresh random nonce per call (prepended to the ciphertext); the
   master key is a base64-encoded 32-byte value. Channel config and stored secret
   values are encrypted at rest.

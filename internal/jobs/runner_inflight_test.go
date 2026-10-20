@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
-	"github.com/marsadhq/tend/internal/secrets"
 	"github.com/marsadhq/tend/internal/store"
 )
 
