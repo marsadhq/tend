@@ -247,15 +247,7 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 
 // runOnceShell runs the shell branch of runOnce.
 func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]string, attempt int, started time.Time) RunResult {
-	cmd := exec.CommandContext(cctx, "sh", "-c", j.Command)
-	// Make the shell the leader of its own process group and SIGKILL the whole
-	// group on cancellation, so children the job forks are killed too.
-	configureProcessGroup(cmd)
-	// Backstop: bound Wait even if I/O pipes linger after the group is killed.
-	cmd.WaitDelay = killGraceDelay
-	// Overlay job env vars on top of the inherited OS environment so that
-	// commands like "sleep" (found via PATH) continue to work.
-	cmd.Env = append(os.Environ(), toEnvSlice(env)...)
+	cmd := shellCommand(cctx, j.Command, env)
 
 	buf := &cappedBuffer{max: maxOutputBytes}
 	cmd.Stdout = buf
@@ -269,23 +261,45 @@ func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]stri
 		Started: started,
 		Ended:   time.Now(),
 	}
+	res.Status, res.ExitCode = shellOutcome(cctx, err)
+	return res
+}
 
+// shellCommand builds the command every shell-backed step runs: a shell job's
+// command, an expiry job's expiry_command and a drill's restore, checks and
+// cleanup. command is run by `sh -c` exactly as written; Tend never splices a
+// value into it (what a step needs to know, such as a drill's scratch
+// directory, reaches it through env).
+func shellCommand(ctx context.Context, command string, env map[string]string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Make the shell the leader of its own process group and SIGKILL the whole
+	// group on cancellation, so children the job forks are killed too.
+	configureProcessGroup(cmd)
+	// Backstop: bound Wait even if I/O pipes linger after the group is killed.
+	cmd.WaitDelay = killGraceDelay
+	// Overlay job env vars on top of the inherited OS environment so that
+	// commands like "sleep" (found via PATH) continue to work.
+	cmd.Env = append(os.Environ(), toEnvSlice(env)...)
+	return cmd
+}
+
+// shellOutcome maps what cmd.Run returned for a command run under ctx to a run
+// status and exit code: timed out when ctx's deadline passed, succeeded on a
+// zero exit, otherwise failed with the exit code (-1 when the command did not
+// get as far as exiting, e.g. sh could not be started).
+func shellOutcome(ctx context.Context, err error) (RunStatus, int) {
 	switch {
-	case cctx.Err() == context.DeadlineExceeded:
-		res.Status = StatusTimedOut
+	case ctx.Err() == context.DeadlineExceeded:
+		return StatusTimedOut, 0
 	case err == nil:
-		res.Status = StatusSucceeded
-		res.ExitCode = 0
+		return StatusSucceeded, 0
 	default:
-		res.Status = StatusFailed
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			res.ExitCode = ee.ExitCode()
-		} else {
-			res.ExitCode = -1
+			return StatusFailed, ee.ExitCode()
 		}
+		return StatusFailed, -1
 	}
-	return res
 }
 
 // runOnceHTTP runs the HTTP branch of runOnce.
