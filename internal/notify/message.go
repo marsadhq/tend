@@ -3,31 +3,62 @@ package notify
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/marsadhq/tend/internal/core"
 )
 
-// alertable is the set of event types that may trigger notifications.
-// Non-alert lifecycle events (run.started, run.succeeded) are absent, so
-// emitters can fire on every event and let this filter drop them.
-// notification.failed is alertable so that a channel that stopped working can
-// be reported through another one; the worker's loop guard keeps it from
-// feeding itself: giving up on the delivery of a notification.failed records
-// nothing further.
-var alertable = map[string]bool{
-	"run.failed":          true, // timeouts surface as run.failed (status in payload)
-	"run.recovered":       true, // a success after a run that did not succeed
-	"heartbeat.missed":    true,
-	"heartbeat.recovered": true,
-	"job.removed":         true,
-	"heartbeat.removed":   true,
-	"notification.failed": true, // see the loop guard in Worker.deliverOne
+// alertableTypes lists, in the order they are documented, the event types
+// that may trigger notifications. Non-alert lifecycle events (run.started,
+// run.succeeded) are absent, so emitters can fire on every event and let this
+// filter drop them. notification.failed is alertable so that a channel that
+// stopped working can be reported through another one; the worker's loop
+// guard keeps it from feeding itself: giving up on the delivery of a
+// notification.failed records nothing further.
+var alertableTypes = []string{
+	"run.failed",    // timeouts surface as run.failed (status in payload)
+	"run.recovered", // a success after a run that did not succeed
+	"heartbeat.missed",
+	"heartbeat.recovered",
+	"job.removed",
+	"heartbeat.removed",
+	EventNotificationFailed, // see the loop guard in Worker.deliverOne
 }
+
+// alertable is alertableTypes as a set.
+var alertable = func() map[string]bool {
+	m := make(map[string]bool, len(alertableTypes))
+	for _, t := range alertableTypes {
+		m[t] = true
+	}
+	return m
+}()
 
 // Alertable reports whether events of type t may trigger notifications. The
 // store consults it when enqueueing deliveries transactionally with an event
 // insert.
 func Alertable(t string) bool { return alertable[t] }
+
+// AlertableTypes returns the event types a rule can route, in documentation
+// order. The slice is a copy.
+func AlertableTypes() []string { return append([]string(nil), alertableTypes...) }
+
+// ValidateRuleEvent returns an error unless a notification rule for event
+// type t can ever fire. Only alertable events are delivered, so a rule for
+// any other type (run.succeeded, a typo) would be accepted and then do
+// nothing at all; the error names the types that do work.
+func ValidateRuleEvent(t string) error {
+	if Alertable(t) {
+		return nil
+	}
+	valid := strings.Join(alertableTypes, ", ")
+	switch t {
+	case "run.succeeded", "run.started":
+		return fmt.Errorf("event %q never triggers a notification (use run.recovered to hear when a failing job succeeds again); valid events: %s", t, valid)
+	default:
+		return fmt.Errorf("unknown event %q; valid events: %s", t, valid)
+	}
+}
 
 // EventJobID extracts the job_id from a run.* event's JSON payload, or 0 when
 // the payload is absent, not JSON, or carries no job_id (e.g. heartbeat events

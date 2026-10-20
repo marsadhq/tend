@@ -1117,7 +1117,7 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 	fs := flag.NewFlagSet("rule add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	channelName := fs.String("channel", "", "channel name to route to (required)")
-	event := fs.String("event", "", "event type, e.g. run.failed (required)")
+	event := fs.String("event", "", "event type (required): "+strings.Join(notify.AlertableTypes(), ", "))
 	jobName := fs.String("job", "", "job name to scope to (optional; omit for all jobs)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1127,6 +1127,9 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 	}
 	if *event == "" {
 		return fmt.Errorf("rule add: -event is required")
+	}
+	if err := notify.ValidateRuleEvent(*event); err != nil {
+		return fmt.Errorf("rule add: %w", err)
 	}
 
 	// Resolve channel name -> id.
@@ -1215,6 +1218,10 @@ func cmdRuleList(ctx context.Context, st store.Store, orgID int64, args []string
 		enabled := "yes"
 		if !r.Enabled {
 			enabled = "no"
+		}
+		if !notify.Alertable(r.EventType) {
+			// A rule stored before event types were checked; it never fires.
+			enabled += " (never fires: not an alertable event)"
 		}
 		fmt.Fprintf(stdout, "%-24s  %-20s  %-10s  %s\n", chName, r.EventType, jobCol, enabled)
 	}

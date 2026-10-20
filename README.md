@@ -240,7 +240,7 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 | `heartbeat.removed` | a heartbeat was deleted (`tend heartbeat rm`) | the heartbeat name |
 | `notification.failed` | a delivery was given up after 24 hours of failures | the type of the event that was not delivered |
 
-`run.started` and `run.succeeded` are recorded (dashboard, `GET /api/events`) but never notify. A `notification.failed` whose own delivery is given up is dropped rather than reported again, so route it to a different channel than the ones it reports on.
+`run.started` and `run.succeeded` are recorded (dashboard, `GET /api/events`) but never notify, so `tend rule add` and `tend sync` refuse a rule for them, or for any type not in the table, and list the valid ones. (`tend rule list` flags a rule stored by an older version that can never fire.) A `notification.failed` whose own delivery is given up is dropped rather than reported again, so route it to a different channel than the ones it reports on.
 
 Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
 
@@ -303,7 +303,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend secret set <key>` | Store a secret; value read from stdin. Requires `TEND_MASTER_KEY`. |
 | `tend channel add -name <n> -type <t>` | Create/update a channel; JSON config read from stdin. Requires `TEND_MASTER_KEY`. |
 | `tend channel list` | List channels (no config/credentials shown). |
-| `tend rule add -channel <n> -event <e> [-job <n>]` | Create/update a notification rule. |
+| `tend rule add -channel <n> -event <e> [-job <n>]` | Create/update a notification rule. `-event` must be one of the [alertable event types](#alerting). |
 | `tend rule list` | List rules. |
 | `tend heartbeat add -name <n> -period <s> [-grace <s>]` | Create/update a heartbeat; prints the ping URL. |
 | `tend heartbeat list` | List heartbeats and their current status. |

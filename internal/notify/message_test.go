@@ -132,3 +132,25 @@ func TestMessageForNotificationFailed(t *testing.T) {
 		t.Fatalf("empty payload subject = %q", m2.Subject)
 	}
 }
+
+// TestValidateRuleEvent pins which event types a rule may name.
+func TestValidateRuleEvent(t *testing.T) {
+	for _, ev := range AlertableTypes() {
+		if err := ValidateRuleEvent(ev); err != nil {
+			t.Errorf("ValidateRuleEvent(%q) = %v, want nil", ev, err)
+		}
+	}
+	for _, ev := range []string{"run.succeeded", "run.started", "", "RUN.FAILED", "notification.sent"} {
+		err := ValidateRuleEvent(ev)
+		if err == nil {
+			t.Errorf("ValidateRuleEvent(%q) = nil, want an error", ev)
+			continue
+		}
+		if !strings.Contains(err.Error(), "heartbeat.missed") {
+			t.Errorf("ValidateRuleEvent(%q) error %q does not list the valid events", ev, err)
+		}
+	}
+	if got := len(AlertableTypes()); got != 7 {
+		t.Errorf("AlertableTypes() has %d entries, want 7", got)
+	}
+}

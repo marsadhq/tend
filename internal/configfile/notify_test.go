@@ -341,3 +341,71 @@ func TestReconcileUnknownChannelRule(t *testing.T) {
 		t.Errorf("error %q does not name the unknown channel", err.Error())
 	}
 }
+
+// TestParseRefusesRulesThatNeverFire: only alertable events are ever
+// delivered, so a rule for anything else used to be accepted and then do
+// nothing. Parse refuses it, naming the rule and the valid events.
+func TestParseRefusesRulesThatNeverFire(t *testing.T) {
+	for _, ev := range []string{"run.succeeded", "run.started", "run.faild"} {
+		t.Run(ev, func(t *testing.T) {
+			yaml := `
+notifications:
+  channels:
+    - name: ops
+      type: webhook
+      config: {url: "https://example.invalid/h"}
+  rules:
+    - channel: ops
+      events: [run.failed, ` + ev + `]
+`
+			_, err := configfile.Parse([]byte(yaml))
+			if err == nil {
+				t.Fatalf("Parse accepted a rule for %s", ev)
+			}
+			for _, want := range []string{ev, `"ops"`, "run.recovered", "notification.failed"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %s", err, want)
+				}
+			}
+		})
+	}
+	for _, ev := range []string{"run.failed", "run.recovered", "heartbeat.missed", "heartbeat.recovered", "job.removed", "heartbeat.removed", "notification.failed"} {
+		yaml := `
+notifications:
+  channels:
+    - name: ops
+      type: webhook
+      config: {url: "https://example.invalid/h"}
+  rules:
+    - channel: ops
+      events: [` + ev + `]
+`
+		if _, err := configfile.Parse([]byte(yaml)); err != nil {
+			t.Errorf("Parse refused a rule for alertable %s: %v", ev, err)
+		}
+	}
+}
+
+// TestReconcileRefusesRulesThatNeverFire: a Config built in code is checked
+// too, before any rule is written.
+func TestReconcileRefusesRulesThatNeverFire(t *testing.T) {
+	st, orgID := reconcileTestStore(t)
+	box := newBox(t)
+	ctx := context.Background()
+
+	cfg := configfile.Config{
+		Channels: []configfile.ChannelSpec{{Name: "ops", Type: "webhook", Config: map[string]any{"url": "https://example.invalid/h"}}},
+		Rules:    []configfile.RuleSpec{{Channel: "ops", Events: []string{"run.failed", "run.succeeded"}}},
+	}
+	_, err := configfile.Reconcile(ctx, st, orgID, clock.NewFake(time.Now()), box, cfg, true)
+	if err == nil || !strings.Contains(err.Error(), "run.succeeded") {
+		t.Fatalf("Reconcile = %v, want a refusal naming run.succeeded", err)
+	}
+	rules, err := st.ListRules(ctx, orgID)
+	if err != nil {
+		t.Fatalf("ListRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("a refused reconcile wrote %d rules, want 0", len(rules))
+	}
+}

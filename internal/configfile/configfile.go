@@ -191,6 +191,9 @@ func Parse(data []byte) (Config, error) {
 				if strings.TrimSpace(ev) == "" {
 					return Config{}, fmt.Errorf("configfile: rule for channel %q: event must not be empty", r.Channel)
 				}
+				if err := notify.ValidateRuleEvent(ev); err != nil {
+					return Config{}, fmt.Errorf("configfile: rule[%d] for channel %q: %w", i, r.Channel, err)
+				}
 			}
 			cfg.Rules = append(cfg.Rules, RuleSpec{
 				Channel: r.Channel,
@@ -539,6 +542,16 @@ func reconcileRules(ctx context.Context, s ReconcileStore, orgID int64, rules []
 	byName := make(map[string]int64, len(channels))
 	for _, ch := range channels {
 		byName[ch.Name] = ch.ID
+	}
+
+	// Checked before anything is written, so a bad event type (Parse catches
+	// these too, but a Config can be built in code) leaves no partial rules.
+	for _, r := range rules {
+		for _, ev := range r.Events {
+			if err := notify.ValidateRuleEvent(ev); err != nil {
+				return 0, fmt.Errorf("reconcile: rule for channel %q: %w", r.Channel, err)
+			}
+		}
 	}
 
 	count := 0
