@@ -189,6 +189,11 @@ type Store interface {
 	// re-sync keeps the same ping URL. status starts 'new' on insert and is
 	// preserved on conflict; period/grace are always updated to the config values.
 	CreateHeartbeat(ctx context.Context, hb heartbeat.Heartbeat) (id int64, token string, err error)
+	// CreateHeartbeatIfAbsent inserts hb (status 'new') unless the org already
+	// has a heartbeat of that name, which it leaves exactly as it is. It
+	// returns the token now in effect and whether hb was created. A slug
+	// ping's ?create=1 uses it, so it can never reset an existing heartbeat.
+	CreateHeartbeatIfAbsent(ctx context.Context, hb heartbeat.Heartbeat) (token string, created bool, err error)
 	// ListHeartbeats returns all heartbeats for an org ordered by ID.
 	ListHeartbeats(ctx context.Context, orgID int64) ([]heartbeat.Heartbeat, error)
 	// GetHeartbeatByName returns the heartbeat named name for orgID, or
