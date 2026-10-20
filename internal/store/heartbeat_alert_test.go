@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,6 +172,135 @@ func TestSetHeartbeatStatusIfAndEmitWritesNothingWhenGuardRejects(t *testing.T) 
 			}
 			if got := eventsOfType(t, ctx, s, org.ID, "heartbeat.missed"); len(got) != 0 {
 				t.Fatalf("heartbeat.missed events = %d, want 0", len(got))
+			}
+		})
+	}
+}
+
+// TestRecordPingRecordsItsRecovery pins that the ping that brings a down
+// heartbeat back up also records heartbeat.recovered and its delivery, in the
+// store and in the same transaction. The event used to be written by the HTTP
+// handler afterwards, so it could be lost after the heartbeat was already up.
+func TestRecordPingRecordsItsRecovery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	for _, b := range backends(t) {
+		b := b
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			orgID := seedHeartbeat(t, ctx, s, b.name, "nightly", "tok-down", "down")
+			chID := seedAlertChannel(t, ctx, s, orgID, "ops", "heartbeat.recovered")
+
+			gotOrg, name, recovered, err := s.RecordPing(ctx, "tok-down", now)
+			if err != nil {
+				t.Fatalf("RecordPing: %v", err)
+			}
+			if !recovered || name != "nightly" || gotOrg != orgID {
+				t.Fatalf("RecordPing = (%d, %q, %v), want (%d, nightly, true)", gotOrg, name, recovered, orgID)
+			}
+			evs := eventsOfType(t, ctx, s, orgID, "heartbeat.recovered")
+			if len(evs) != 1 {
+				t.Fatalf("heartbeat.recovered events = %d, want 1", len(evs))
+			}
+			if evs[0].Payload != "nightly" || evs[0].Source != "heartbeat" || evs[0].DedupKey != "" {
+				t.Fatalf("recovered event = %+v, want payload nightly, source heartbeat, no dedup key", evs[0])
+			}
+			if n := pendingDeliveries(t, ctx, s, b.name, chID); n != 1 {
+				t.Fatalf("pending deliveries = %d, want 1", n)
+			}
+
+			// A second ping on the now-up heartbeat is not a recovery.
+			if _, _, recovered, err := s.RecordPing(ctx, "tok-down", now.Add(time.Minute)); err != nil || recovered {
+				t.Fatalf("second ping: recovered=%v err=%v, want false/nil", recovered, err)
+			}
+			if evs := eventsOfType(t, ctx, s, orgID, "heartbeat.recovered"); len(evs) != 1 {
+				t.Fatalf("heartbeat.recovered events after a second ping = %d, want 1", len(evs))
+			}
+		})
+	}
+}
+
+// TestRecordPingConcurrentRecoveryIsRecordedOnce fires many pings at one down
+// heartbeat at once: exactly one of them may report the recovery, and exactly
+// one heartbeat.recovered may be stored.
+func TestRecordPingConcurrentRecoveryIsRecordedOnce(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	for _, b := range backends(t) {
+		b := b
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			orgID := seedHeartbeat(t, ctx, s, b.name, "fleet", "tok-fleet", "down")
+
+			const pings = 16
+			var (
+				wg        sync.WaitGroup
+				mu        sync.Mutex
+				recovered int
+				errs      []error
+			)
+			start := make(chan struct{})
+			for i := 0; i < pings; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					_, _, rec, err := s.RecordPing(ctx, "tok-fleet", now.Add(time.Duration(i)*time.Millisecond))
+					mu.Lock()
+					defer mu.Unlock()
+					if err != nil {
+						errs = append(errs, err)
+					}
+					if rec {
+						recovered++
+					}
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+
+			if len(errs) > 0 {
+				t.Fatalf("RecordPing errors: %v", errs)
+			}
+			if recovered != 1 {
+				t.Fatalf("pings reporting a recovery = %d, want exactly 1", recovered)
+			}
+			if evs := eventsOfType(t, ctx, s, orgID, "heartbeat.recovered"); len(evs) != 1 {
+				t.Fatalf("heartbeat.recovered events = %d, want exactly 1", len(evs))
+			}
+		})
+	}
+}
+
+// TestRecordPingRecoveryIsAllOrNothing pins that when the recovery event
+// cannot be written the ping is not recorded either: the heartbeat stays down,
+// and the next ping recovers it with its event.
+func TestRecordPingRecoveryIsAllOrNothing(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+	for _, b := range backends(t) {
+		b := b
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			orgID := seedHeartbeat(t, ctx, s, b.name, "nightly", "tok-aon", "down")
+
+			restore := breakEvents(t, ctx, s)
+			if _, _, _, err := s.RecordPing(ctx, "tok-aon", now); err == nil {
+				t.Fatal("RecordPing with events broken: err = nil, want the write to fail")
+			}
+			if status, _ := readHeartbeat(t, ctx, s, b.name, "tok-aon"); status != "down" {
+				t.Fatalf("status after a failed recovery = %q, want down", status)
+			}
+			restore()
+
+			if _, _, recovered, err := s.RecordPing(ctx, "tok-aon", now); err != nil || !recovered {
+				t.Fatalf("RecordPing: recovered=%v err=%v, want true/nil", recovered, err)
+			}
+			if evs := eventsOfType(t, ctx, s, orgID, "heartbeat.recovered"); len(evs) != 1 {
+				t.Fatalf("heartbeat.recovered events = %d, want 1", len(evs))
 			}
 		})
 	}

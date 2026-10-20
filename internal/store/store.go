@@ -173,10 +173,12 @@ type Store interface {
 	// RecordPing records a dead-man's-switch ping for the heartbeat identified by
 	// the globally-unique token: it stamps last_seen_at and sets status to 'up'.
 	// It returns ErrNotFound if no heartbeat owns the token. recovered is true iff
-	// the heartbeat was 'down' before this ping (a down->up transition); a ping on
-	// a 'new' or already-'up' heartbeat is not a recovery. The returned orgID and
-	// name let the caller emit a heartbeat.recovered event without depending on a
-	// Heartbeat type (which package heartbeat defines later).
+	// this ping moved the heartbeat from 'down' to 'up' (decided by
+	// compare-and-set, so of concurrent pings exactly one recovers it); a ping on
+	// a 'new' or already-'up' heartbeat is not a recovery. On a recovery the
+	// heartbeat.recovered event and its deliveries are appended in the same
+	// transaction. orgID and name identify the heartbeat for the caller's
+	// dispatch nudge.
 	RecordPing(ctx context.Context, token string, now time.Time) (orgID int64, name string, recovered bool, err error)
 	// DueHeartbeats returns the watched heartbeats whose period+grace deadline has
 	// strictly passed at now. The deadline is computed in Go (dialect-agnostic):
