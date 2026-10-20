@@ -13,9 +13,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/marsadhq/tend/internal/clock"
 	"github.com/marsadhq/tend/internal/core"
+	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
 
@@ -150,21 +152,25 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// handlePing records a dead-man's-switch ping. On a down->up recovery it emits
-// a heartbeat.recovered event; EmitEvent enqueues the matched notification
-// deliveries transactionally, and the dispatch func only nudges the delivery
+// pingWriteTimeout bounds recording one ping. The write runs detached from the
+// request (see handlePing), so this is what stops it from running forever.
+const pingWriteTimeout = 10 * time.Second
+
+// handlePing records a dead-man's-switch ping. On a down->up recovery the store
+// appends heartbeat.recovered, with the deliveries its rules match, in the same
+// transaction as the status change; the dispatch func only nudges the delivery
 // worker. Nothing here blocks on a slow destination, so the ping response is
-// never held hostage by a down webhook receiver, and a client that times out
-// and cancels r.Context() can no longer make the recovered notification vanish
-// (F3): the enqueued delivery survives and is drained asynchronously.
+// never held hostage by a down webhook receiver.
 //
-// Ordering caveat: the status flip + event emit happen as two store calls. A
-// crash between RecordPing's commit and EmitEvent would lose the recovered
-// event (the heartbeat would still be correctly 'up'). This is acceptable for
-// v1 and mirrors the heartbeat.missed path in the watcher.
+// The write is detached from the request's context: once a ping has arrived it
+// is recorded in full even if the client times out or disconnects meanwhile,
+// so a recovery can no longer be committed without its event, or skipped
+// because the caller went away. pingWriteTimeout bounds it instead.
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	orgID, name, recovered, err := s.store.RecordPing(r.Context(), token, s.clk.Now())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pingWriteTimeout)
+	defer cancel()
+	orgID, name, recovered, err := s.store.RecordPing(ctx, token, s.clk.Now())
 	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -177,22 +183,8 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if recovered {
-		// Payload is the plain heartbeat NAME: notify.EventJobID treats non-JSON
-		// as job 0, and messageFor uses it for the subject.
-		ev := core.Event{
-			OrgID:   orgID,
-			Type:    "heartbeat.recovered",
-			Source:  "heartbeat",
-			Payload: name,
-		}
-		if _, err := s.store.EmitEvent(r.Context(), ev); err != nil {
-			// Log the heartbeat name (not the token credential).
-			s.log.Error("emit heartbeat.recovered failed", "heartbeat", name, "err", err)
-		}
-		if s.dispatch != nil {
-			s.dispatch(r.Context(), ev)
-		}
+	if recovered && s.dispatch != nil {
+		s.dispatch(ctx, heartbeat.RecoveredEvent(orgID, name))
 	}
 
 	w.WriteHeader(http.StatusOK)

@@ -1031,9 +1031,12 @@ func (s *PostgresStore) ListHeartbeats(ctx context.Context, orgID int64) ([]hear
 
 // RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
 // identified by token, returning whether this was a down->up recovery along with
-// the heartbeat's org and name. It runs in a transaction so the status read and
-// the update are consistent. ErrNotFound is returned when no heartbeat owns the
-// token. Mirrors the SQLite backend.
+// the heartbeat's org and name, and on a recovery appends heartbeat.recovered in
+// the same transaction. Mirrors the SQLite backend. Under READ COMMITTED a
+// second ping racing on the same down row waits for the first one's row lock,
+// then re-checks status = 'down', no longer matches, and records a plain ping,
+// so exactly one recovery is written. ErrNotFound when no heartbeat owns the
+// token.
 func (s *PostgresStore) RecordPing(ctx context.Context, token string, now time.Time) (int64, string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1042,29 +1045,32 @@ func (s *PostgresStore) RecordPing(ctx context.Context, token string, now time.T
 	defer tx.Rollback() //nolint:errcheck
 
 	var (
-		orgID  int64
-		name   string
-		status string
+		orgID     int64
+		name      string
+		recovered = true
+		seen      = formatTime(now)
 	)
-	// FOR UPDATE locks the row for the tx so two concurrent pings can't both
-	// observe 'down' and each emit a duplicate heartbeat.recovered. (SQLite is
-	// already serialized by MaxOpenConns(1).)
 	err = tx.QueryRowContext(ctx,
-		`SELECT org_id, name, status FROM heartbeats WHERE token = $1 FOR UPDATE`, token,
-	).Scan(&orgID, &name, &status)
+		`UPDATE heartbeats SET last_seen_at = $1, status = 'up' WHERE token = $2 AND status = 'down'
+		 RETURNING org_id, name`, seen, token,
+	).Scan(&orgID, &name)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", false, ErrNotFound
+		recovered = false
+		err = tx.QueryRowContext(ctx,
+			`UPDATE heartbeats SET last_seen_at = $1, status = 'up' WHERE token = $2 RETURNING org_id, name`,
+			seen, token,
+		).Scan(&orgID, &name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", false, ErrNotFound
+		}
 	}
 	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping select: %w", err)
-	}
-	recovered := status == "down"
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE heartbeats SET last_seen_at = $1, status = 'up' WHERE token = $2`,
-		formatTime(now), token,
-	); err != nil {
 		return 0, "", false, fmt.Errorf("record ping update: %w", err)
+	}
+	if recovered {
+		if _, err := pgEmitEventTx(ctx, tx, heartbeat.RecoveredEvent(orgID, name)); err != nil {
+			return 0, "", false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, "", false, fmt.Errorf("record ping commit: %w", err)

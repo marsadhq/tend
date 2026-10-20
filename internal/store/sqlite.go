@@ -1385,9 +1385,15 @@ func (s *SQLiteStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) erro
 
 // RecordPing stamps last_seen_at and sets status to 'up' for the heartbeat
 // identified by token, returning whether this was a down->up recovery along with
-// the heartbeat's org and name. It runs in a transaction so the status read and
-// the update are consistent. ErrNotFound is returned when no heartbeat owns the
-// token.
+// the heartbeat's org and name. ErrNotFound is returned when no heartbeat owns
+// the token.
+//
+// A recovery is decided by compare-and-set, not by reading the status first:
+// the first UPDATE only matches a row that is still 'down', so of any number of
+// pings racing on a down heartbeat exactly one sees its row change and reports
+// the recovery. That ping also appends heartbeat.recovered, with the deliveries
+// its rules match, in the SAME transaction, so the heartbeat can no longer come
+// back 'up' while its recovery alert is lost. A failure writes neither.
 func (s *SQLiteStore) RecordPing(ctx context.Context, token string, now time.Time) (int64, string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1396,26 +1402,32 @@ func (s *SQLiteStore) RecordPing(ctx context.Context, token string, now time.Tim
 	defer tx.Rollback() //nolint:errcheck
 
 	var (
-		orgID  int64
-		name   string
-		status string
+		orgID     int64
+		name      string
+		recovered = true
+		seen      = formatTime(now)
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT org_id, name, status FROM heartbeats WHERE token = ?`, token,
-	).Scan(&orgID, &name, &status)
+		`UPDATE heartbeats SET last_seen_at = ?, status = 'up' WHERE token = ? AND status = 'down'
+		 RETURNING org_id, name`, seen, token,
+	).Scan(&orgID, &name)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", false, ErrNotFound
+		recovered = false
+		err = tx.QueryRowContext(ctx,
+			`UPDATE heartbeats SET last_seen_at = ?, status = 'up' WHERE token = ? RETURNING org_id, name`,
+			seen, token,
+		).Scan(&orgID, &name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", false, ErrNotFound
+		}
 	}
 	if err != nil {
-		return 0, "", false, fmt.Errorf("record ping select: %w", err)
-	}
-	recovered := status == "down"
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE heartbeats SET last_seen_at = ?, status = 'up' WHERE token = ?`,
-		formatTime(now), token,
-	); err != nil {
 		return 0, "", false, fmt.Errorf("record ping update: %w", err)
+	}
+	if recovered {
+		if _, err := emitEventTx(ctx, tx, heartbeat.RecoveredEvent(orgID, name)); err != nil {
+			return 0, "", false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, "", false, fmt.Errorf("record ping commit: %w", err)
