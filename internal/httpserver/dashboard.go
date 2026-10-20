@@ -13,6 +13,7 @@ import (
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/jobs"
+	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/store"
 )
 
@@ -51,7 +52,7 @@ var dashboardPages = parseDashboardPages()
 
 // pageFiles enumerates the content templates that each compose with base.html.
 var pageFiles = []string{"jobs.html", "job_detail.html", "run_detail.html",
-	"heartbeats.html", "events.html"}
+	"heartbeats.html", "heartbeat_detail.html", "events.html"}
 
 // parseDashboardPages parses base.html together with each page file into its
 // own isolated template set so the per-page {{define "content"}} blocks do not
@@ -178,12 +179,36 @@ type heartbeatsPage struct {
 // can never reach the page even via a template typo. It carries only non-secret
 // display fields (name, status, period/grace, last-seen).
 type heartbeatRow struct {
+	ID          int64
 	Name        string
 	Status      string // "new" | "up" | "down"
 	StatusClass string
 	Period      string
 	Grace       string
 	LastSeen    string
+}
+
+// heartbeatDetailPage backs a heartbeat's page: its state, its recent pings
+// and its transitions. Like heartbeatRow it carries no token.
+type heartbeatDetailPage struct {
+	pageData
+	Heartbeat   heartbeatRow
+	Running     string // when the run being timed started, "" when none
+	Pings       []pingRow
+	Transitions []eventRow
+}
+
+// pingRow is one entry of a heartbeat's ping log. Body is what the pinging
+// script sent, attacker-influenced text, rendered only through auto-escaping.
+type pingRow struct {
+	Kind     string
+	Class    string
+	Exit     string // "exit 3", "" when the ping reported none
+	Duration string // the run's duration, "" when not paired with a start
+	RID      string // the first group of the run id, "" when none
+	Body     string
+	BodySize string
+	When     string
 }
 
 // eventsPage backs the events/alerts list page.
@@ -199,6 +224,7 @@ type eventRow struct {
 	Type    string
 	Source  string
 	Payload string
+	Subject string // what an alert for the event says, e.g. "Heartbeat failed: x (exit 3)"
 	Created string
 	IsAlert bool   // run.failed or heartbeat.* - surfaced prominently
 	Class   string // pill CSS class for the event type
@@ -345,6 +371,7 @@ func toHeartbeatRow(h heartbeat.Heartbeat) heartbeatRow {
 	// NOTE: h.Token is deliberately NOT copied into the row - it must never reach
 	// the page.
 	return heartbeatRow{
+		ID:          h.ID,
 		Name:        h.Name,
 		Status:      h.Status,
 		StatusClass: heartbeatStatusClass(h.Status),
@@ -352,6 +379,37 @@ func toHeartbeatRow(h heartbeat.Heartbeat) heartbeatRow {
 		Grace:       secondsLabel(h.GraceSeconds),
 		LastSeen:    fmtTime(h.LastSeenAt),
 	}
+}
+
+// pingKindClass maps a ping kind to its pill CSS class.
+func pingKindClass(kind string) string {
+	switch kind {
+	case heartbeat.PingSuccess:
+		return "st-ok"
+	case heartbeat.PingFail:
+		return "st-fail"
+	case heartbeat.PingStart:
+		return "st-run"
+	default:
+		return "pill-none"
+	}
+}
+
+func toPingRow(p heartbeat.Ping) pingRow {
+	row := pingRow{Kind: p.Kind, Class: pingKindClass(p.Kind), Body: p.Body, When: fmtTime(p.CreatedAt)}
+	if p.ExitStatus != nil {
+		row.Exit = "exit " + strconv.Itoa(*p.ExitStatus)
+	}
+	if p.Duration != nil {
+		row.Duration = p.Duration.String()
+	}
+	if row.RID = p.RID; len(row.RID) > 8 {
+		row.RID = row.RID[:8]
+	}
+	if p.Body != "" {
+		row.BodySize = strconv.Itoa(len(p.Body)) + " B"
+	}
+	return row
 }
 
 // eventStatusClass maps an event type to a pill CSS class, mirroring the run
@@ -378,10 +436,12 @@ func isAlertEvent(eventType string) bool {
 }
 
 func toEventRow(e core.Event) eventRow {
+	subject, _ := notify.Render(e)
 	return eventRow{
 		Type:    e.Type,
 		Source:  e.Source,
 		Payload: e.Payload,
+		Subject: subject,
 		Created: fmtTime(e.CreatedAt),
 		IsAlert: isAlertEvent(e.Type),
 		Class:   eventStatusClass(e.Type),
@@ -525,6 +585,61 @@ func (s *Server) handleHeartbeatsPage(w http.ResponseWriter, r *http.Request) {
 		pageData:   s.pageData(r, "Heartbeats", "heartbeats"),
 		Heartbeats: rows,
 	})
+}
+
+// dashboardPingLimit bounds the pings shown on a heartbeat's page.
+const dashboardPingLimit = 50
+
+// handleHeartbeatDetailPage serves GET /heartbeats/{id}: the heartbeat, its
+// recent pings with their logged bodies, and its transitions. GetHeartbeat
+// is org-scoped, so a foreign or absent id is a 404. No token reaches the page.
+func (s *Server) handleHeartbeatDetailPage(w http.ResponseWriter, r *http.Request) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	id, ok := dashID(r)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	hb, err := s.store.GetHeartbeat(r.Context(), p.OrgID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		s.log.Error("dashboard: get heartbeat failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	pings, err := s.store.ListHeartbeatPings(r.Context(), p.OrgID, id, dashboardPingLimit)
+	if err != nil {
+		s.log.Error("dashboard: list heartbeat pings failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	evs, err := s.store.ListHeartbeatEvents(r.Context(), p.OrgID, hb.Name, dashboardEventLimit)
+	if err != nil {
+		s.log.Error("dashboard: list heartbeat events failed", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	page := heartbeatDetailPage{
+		pageData:  s.pageData(r, hb.Name, "heartbeats"),
+		Heartbeat: toHeartbeatRow(hb),
+	}
+	if !hb.StartedAt.IsZero() {
+		page.Running = fmtTime(hb.StartedAt)
+	}
+	for _, ping := range pings {
+		page.Pings = append(page.Pings, toPingRow(ping))
+	}
+	for _, e := range evs {
+		page.Transitions = append(page.Transitions, toEventRow(e))
+	}
+	s.render(w, "heartbeat_detail.html", page)
 }
 
 // handleEventsPage serves GET /events: recent org events (newest first), with
@@ -734,6 +849,7 @@ func (s *Server) registerDashboardRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /jobs/{id}", s.handleJobDetailPage)
 	mux.HandleFunc("GET /runs/{id}", s.handleRunDetailPage)
 	mux.HandleFunc("GET /heartbeats", s.handleHeartbeatsPage)
+	mux.HandleFunc("GET /heartbeats/{id}", s.handleHeartbeatDetailPage)
 	mux.HandleFunc("GET /events", s.handleEventsPage)
 
 	// Dashboard-owned htmx action endpoints (HTML row fragment, NOT JSON). These

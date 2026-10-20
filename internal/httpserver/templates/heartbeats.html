@@ -23,8 +23,8 @@
   </thead>
   <tbody>
     {{range .Heartbeats}}
-    <tr>
-      <td class="cell-name">{{.Name}}</td>
+    <tr class="row-link" data-href="/heartbeats/{{.ID}}">
+      <td class="cell-name"><a href="/heartbeats/{{.ID}}">{{.Name}}</a></td>
       <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
       <td class="cell-mono cell-muted">{{.Period}}</td>
       <td class="cell-mono cell-muted">{{.Grace}}</td>

@@ -212,6 +212,10 @@ type heartbeatDTO struct {
 	PeriodSeconds int       `json:"period_seconds"`
 	GraceSeconds  int       `json:"grace_seconds"`
 	CreatedAt     time.Time `json:"created_at"`
+	// StartedAt and StartedRID describe the run being timed (/start), when
+	// there is one.
+	StartedAt  time.Time `json:"started_at,omitzero"`
+	StartedRID string    `json:"started_rid,omitempty"`
 }
 
 func fromHeartbeat(h heartbeat.Heartbeat) heartbeatDTO {
@@ -223,7 +227,29 @@ func fromHeartbeat(h heartbeat.Heartbeat) heartbeatDTO {
 		PeriodSeconds: h.PeriodSeconds,
 		GraceSeconds:  h.GraceSeconds,
 		CreatedAt:     h.CreatedAt,
+		StartedAt:     h.StartedAt,
+		StartedRID:    h.StartedRID,
 	}
+}
+
+// pingDTO is the wire shape of one entry of a heartbeat's ping log.
+type pingDTO struct {
+	ID         int64     `json:"id"`
+	Kind       string    `json:"kind"`
+	ExitStatus *int      `json:"exit_status,omitempty"`
+	RID        string    `json:"rid,omitempty"`
+	DurationMS *int64    `json:"duration_ms,omitempty"`
+	Body       string    `json:"body,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func fromPing(p heartbeat.Ping) pingDTO {
+	dto := pingDTO{ID: p.ID, Kind: p.Kind, ExitStatus: p.ExitStatus, RID: p.RID, Body: p.Body, CreatedAt: p.CreatedAt}
+	if p.Duration != nil {
+		ms := p.Duration.Milliseconds()
+		dto.DurationMS = &ms
+	}
+	return dto
 }
 
 // eventDTO is the wire shape of an event. The stored Payload is a string that is
@@ -235,6 +261,10 @@ type eventDTO struct {
 	Source    string          `json:"source"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
+	// Detail says more about what happened, when the event has one (why a
+	// heartbeat went down: a failure ping's exit status and output tail, or
+	// a run that did not finish).
+	Detail json.RawMessage `json:"detail,omitempty"`
 }
 
 func fromEvent(e core.Event) eventDTO {
@@ -244,6 +274,7 @@ func fromEvent(e core.Event) eventDTO {
 		Source:    e.Source,
 		Payload:   jsonPayload(e.Payload),
 		CreatedAt: e.CreatedAt,
+		Detail:    jsonPayload(e.Detail),
 	}
 }
 
@@ -501,6 +532,41 @@ func (s *Server) handleHeartbeatHistory(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, out)
 }
 
+// handleHeartbeatPings serves GET /api/heartbeats/{id}/pings: the heartbeat's
+// ping log, newest first (?limit=), with each ping's kind, exit status, rid,
+// run duration and logged body. Never the token.
+func (s *Server) handleHeartbeatPings(w http.ResponseWriter, r *http.Request) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok {
+		s.apiError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		s.apiError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := s.store.GetHeartbeat(r.Context(), p.OrgID, id); errors.Is(err, store.ErrNotFound) {
+		s.apiError(w, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		s.log.Error("api: heartbeat pings: get heartbeat failed", "err", err)
+		s.apiError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	pings, err := s.store.ListHeartbeatPings(r.Context(), p.OrgID, id, parseLimit(r))
+	if err != nil {
+		s.log.Error("api: list heartbeat pings failed", "err", err)
+		s.apiError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	out := make([]pingDTO, 0, len(pings))
+	for _, ping := range pings {
+		out = append(out, fromPing(ping))
+	}
+	s.writeJSON(w, http.StatusOK, out)
+}
+
 // handleHeartbeatsNotCreatable answers POST /api/heartbeats with an explicit 405
 // and a JSON hint. Heartbeats are config-as-code (CLI or YAML sync), so there is
 // no create API; without this handler the mux returns a bodyless 405 that reads
@@ -692,6 +758,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/heartbeats", s.handleListHeartbeats)
 	mux.HandleFunc("GET /api/heartbeats/{id}", s.handleGetHeartbeat)
 	mux.HandleFunc("GET /api/heartbeats/{id}/history", s.handleHeartbeatHistory)
+	mux.HandleFunc("GET /api/heartbeats/{id}/pings", s.handleHeartbeatPings)
 	mux.HandleFunc("POST /api/heartbeats", s.handleHeartbeatsNotCreatable)
 	mux.HandleFunc("GET /api/events", s.handleListEvents)
 	mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
