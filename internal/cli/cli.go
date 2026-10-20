@@ -1733,7 +1733,9 @@ Usage:
 
 Runs these components until interrupted (Ctrl-C):
   - the job runner (executes due jobs; fails runs left running past their timeout)
-  - the HTTP server (heartbeat ping + healthz; dashboard/API)
+  - the HTTP server: the heartbeat ping API at /ping/<token>, compatible
+    with Healthchecks' (/start, /fail, /log, /<exit-status>, ?rid=, a POST
+    body of up to 100 kB is logged), /healthz, and the dashboard/API
   - the heartbeat watcher (flags missed dead-man's-switch pings)
   - the notification delivery worker
   - a daily retention sweep (prunes old events, job runs, and deliveries,
