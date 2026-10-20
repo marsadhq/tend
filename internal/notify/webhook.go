@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/marsadhq/tend/internal/urlredact"
+	"github.com/marsadhq/kit/urlredact"
 )
 
 // httpClient is the shared HTTP client for all HTTP-based providers. The
