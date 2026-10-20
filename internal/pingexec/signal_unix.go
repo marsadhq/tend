@@ -18,3 +18,12 @@ func killedBy(state *os.ProcessState) (int, bool) {
 	}
 	return int(ws.Signal()), true
 }
+
+// signalExitCode is the exit status a shell gives a command the signal sig
+// stopped: 128 + its number.
+func signalExitCode(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
+}

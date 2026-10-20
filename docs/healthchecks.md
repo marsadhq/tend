@@ -156,7 +156,9 @@ tail as the body, and exits with the command's status: 128 plus the signal
 number when a signal killed it, 127 when the command was not found, 126 when
 it could not be started. Both pings carry the same random `?rid=`. Signals
 `tend exec` receives (interrupt, terminate, hang-up, quit) are passed to the
-command, and the completion ping still goes out.
+command; one that arrives while the start ping is still going out (a slow
+server) abandons that ping and the command is not started at all. The
+completion ping goes out either way.
 
 A ping that fails is retried on network errors, 5xx and 429 (`--retries`,
 default 5; backoff from 1 second, doubling to 30, or the server's
