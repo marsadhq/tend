@@ -136,6 +136,10 @@ type Store interface {
 	PruneEvents(ctx context.Context, before time.Time) (int64, error)
 	PruneJobRuns(ctx context.Context, before time.Time) (int64, error)
 	PruneDeliveries(ctx context.Context, before time.Time) (int64, error)
+	// PruneHeartbeatPings removes heartbeat ping log entries. (Each heartbeat
+	// also keeps only its newest MaxPingsPerHeartbeat entries, trimmed as
+	// pings arrive.)
+	PruneHeartbeatPings(ctx context.Context, before time.Time) (int64, error)
 	// ReclaimSpace gives the space pruning freed back to the file system when
 	// there is enough of it to matter, and returns the bytes the database
 	// shrank by. SQLite compacts (once switching a small file to incremental

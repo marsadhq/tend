@@ -163,6 +163,14 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 		res.OrgID, res.HeartbeatID, in.Kind, exit, in.RID, duration, nullIfEmpty(t.text(in.Body)), seen); err != nil {
 		return heartbeat.PingResult{}, fmt.Errorf("record ping log: %w", err)
 	}
+	// Keep the heartbeat's newest maxPingsPerHeartbeat entries: the window
+	// of the retention sweep bounds the log by age, this by size, so a
+	// client pinging flat out cannot fill the disk between two sweeps.
+	if _, err := t.exec(ctx, `DELETE FROM heartbeat_pings WHERE heartbeat_id = ? AND id <= (
+		SELECT id FROM heartbeat_pings WHERE heartbeat_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?)`,
+		res.HeartbeatID, res.HeartbeatID, maxPingsPerHeartbeat); err != nil {
+		return heartbeat.PingResult{}, fmt.Errorf("record ping: trim the ping log: %w", err)
+	}
 	if event != nil {
 		if _, err := t.emit(ctx, *event); err != nil {
 			return heartbeat.PingResult{}, err
@@ -174,6 +182,13 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 	}
 	return res, nil
 }
+
+// MaxPingsPerHeartbeat is how many ping log entries a heartbeat keeps: older
+// ones are dropped as new pings arrive, whatever the retention window.
+const MaxPingsPerHeartbeat = 1000
+
+// maxPingsPerHeartbeat is MaxPingsPerHeartbeat, a var so tests can lower it.
+var maxPingsPerHeartbeat = MaxPingsPerHeartbeat
 
 // runDuration is the duration, in milliseconds, of the run a success or
 // failure completes, or NULL. As in Healthchecks it pairs the completion with
@@ -331,4 +346,26 @@ func (s *SQLiteStore) MarkHeartbeatDownAndEmit(ctx context.Context, observed hea
 // ev; see Store.MarkHeartbeatDownAndEmit.
 func (s *PostgresStore) MarkHeartbeatDownAndEmit(ctx context.Context, observed heartbeat.Heartbeat, ev core.Event) (bool, error) {
 	return markHeartbeatDown(ctx, s.db, dialectPostgres, observed, ev)
+}
+
+// pruneHeartbeatPings is PruneHeartbeatPings for both backends.
+func pruneHeartbeatPings(ctx context.Context, db *sql.DB, d dialect, before time.Time) (int64, error) {
+	res, err := db.ExecContext(ctx, rebind(d, `DELETE FROM heartbeat_pings WHERE created_at < ?`), formatTime(before))
+	if err != nil {
+		return 0, fmt.Errorf("prune heartbeat pings: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// PruneHeartbeatPings hard-deletes ping log entries created strictly before
+// the cutoff and returns the rows removed.
+func (s *SQLiteStore) PruneHeartbeatPings(ctx context.Context, before time.Time) (int64, error) {
+	return pruneHeartbeatPings(ctx, s.db, dialectSQLite, before)
+}
+
+// PruneHeartbeatPings hard-deletes ping log entries created strictly before
+// the cutoff and returns the rows removed.
+func (s *PostgresStore) PruneHeartbeatPings(ctx context.Context, before time.Time) (int64, error) {
+	return pruneHeartbeatPings(ctx, s.db, dialectPostgres, before)
 }

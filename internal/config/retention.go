@@ -14,6 +14,7 @@ type Retention struct {
 	Events     time.Duration // events, except those a pending delivery still needs
 	JobRuns    time.Duration // finished job runs; pending and running runs are never pruned
 	Deliveries time.Duration // delivered and failed deliveries; pending ones are never pruned
+	Pings      time.Duration // heartbeat ping log entries (each heartbeat also keeps only its newest 1000)
 
 	// jobRunsByDefault records that JobRuns is the default because
 	// TEND_RETENTION_RUNS_DAYS is unset, so String can point out that the
@@ -24,11 +25,13 @@ type Retention struct {
 // Retention defaults, in days. Events are the alert record (a month); job runs
 // are the run history behind the dashboard (a quarter; v0.3.0 raised it from
 // the month earlier versions kept); finalized deliveries only matter while
-// debugging a recent notification problem (a week).
+// debugging a recent notification problem (a week); a heartbeat's ping log is
+// kept as long as the events it explains (a month).
 const (
 	DefaultEventRetentionDays    = 30
 	DefaultJobRunRetentionDays   = 90
 	DefaultDeliveryRetentionDays = 7
+	DefaultPingRetentionDays     = 30
 )
 
 // maxRetentionDays bounds a window so the cutoff arithmetic cannot overflow.
@@ -40,6 +43,7 @@ const (
 	EnvEventRetentionDays    = "TEND_RETENTION_EVENTS_DAYS"
 	EnvJobRunRetentionDays   = "TEND_RETENTION_RUNS_DAYS"
 	EnvDeliveryRetentionDays = "TEND_RETENTION_DELIVERIES_DAYS"
+	EnvPingRetentionDays     = "TEND_RETENTION_PINGS_DAYS"
 )
 
 // LoadRetention reads the retention windows from the environment, falling back
@@ -56,6 +60,7 @@ func LoadRetention() (Retention, error) {
 		{EnvEventRetentionDays, DefaultEventRetentionDays, &r.Events},
 		{EnvJobRunRetentionDays, DefaultJobRunRetentionDays, &r.JobRuns},
 		{EnvDeliveryRetentionDays, DefaultDeliveryRetentionDays, &r.Deliveries},
+		{EnvPingRetentionDays, DefaultPingRetentionDays, &r.Pings},
 	} {
 		days := w.def
 		if w.env == EnvJobRunRetentionDays && strings.TrimSpace(os.Getenv(w.env)) == "" {
@@ -75,7 +80,7 @@ func LoadRetention() (Retention, error) {
 
 // String renders the windows for the serve banner and doctor, e.g.
 // "events 30d, job runs 90d (default, up from 30d before v0.3.0), deliveries
-// 7d". The note about the job-run default stays while that default is in
+// 7d, heartbeat pings 30d". The note about the job-run default stays while that default is in
 // effect, so an upgrade that suddenly keeps three times as much run history
 // says so where the operator looks.
 func (r Retention) String() string {
@@ -89,5 +94,5 @@ func (r Retention) String() string {
 	if r.jobRunsByDefault {
 		runs += fmt.Sprintf(" (default, up from 30d before v0.3.0; set %s to change)", EnvJobRunRetentionDays)
 	}
-	return fmt.Sprintf("events %s, job runs %s, deliveries %s", f(r.Events), runs, f(r.Deliveries))
+	return fmt.Sprintf("events %s, job runs %s, deliveries %s, heartbeat pings %s", f(r.Events), runs, f(r.Deliveries), f(r.Pings))
 }

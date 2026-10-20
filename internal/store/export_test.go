@@ -38,3 +38,11 @@ func SetReclaimSteps(pages int, budget time.Duration, hook func()) (restore func
 	incrementalVacuumPages, reclaimBudget, reclaimStepHook = pages, budget, hook
 	return func() { incrementalVacuumPages, reclaimBudget, reclaimStepHook = oldPages, oldBudget, oldHook }
 }
+
+// SetMaxPingsPerHeartbeat lowers the per-heartbeat ping log cap for a test and
+// returns a func that restores it.
+func SetMaxPingsPerHeartbeat(n int) (restore func()) {
+	old := maxPingsPerHeartbeat
+	maxPingsPerHeartbeat = n
+	return func() { maxPingsPerHeartbeat = old }
+}

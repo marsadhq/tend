@@ -12,15 +12,16 @@ func TestLoadRetentionDefaults(t *testing.T) {
 	t.Setenv(EnvEventRetentionDays, "")
 	t.Setenv(EnvJobRunRetentionDays, "")
 	t.Setenv(EnvDeliveryRetentionDays, "")
+	t.Setenv(EnvPingRetentionDays, "")
 	r, err := LoadRetention()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Events != 30*day || r.JobRuns != 90*day || r.Deliveries != 7*day {
-		t.Fatalf("defaults = %+v, want 30d/90d/7d", r)
+	if r.Events != 30*day || r.JobRuns != 90*day || r.Deliveries != 7*day || r.Pings != 30*day {
+		t.Fatalf("defaults = %+v, want 30d/90d/7d/30d", r)
 	}
 	// The job-run default went from 30 to 90 days in v0.3.0; the banner says so.
-	if got, want := r.String(), "events 30d, job runs 90d (default, up from 30d before v0.3.0; set TEND_RETENTION_RUNS_DAYS to change), deliveries 7d"; got != want {
+	if got, want := r.String(), "events 30d, job runs 90d (default, up from 30d before v0.3.0; set TEND_RETENTION_RUNS_DAYS to change), deliveries 7d, heartbeat pings 30d"; got != want {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
@@ -52,5 +53,24 @@ func TestLoadRetentionRejectsBadValues(t *testing.T) {
 				t.Fatalf("LoadRetention with %s=%q: err = %v, want an error naming the variable", EnvJobRunRetentionDays, v, err)
 			}
 		})
+	}
+}
+
+func TestLoadRetentionPings(t *testing.T) {
+	t.Setenv(EnvPingRetentionDays, "3")
+	r, err := LoadRetention()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Pings != 3*day {
+		t.Fatalf("Pings = %v, want 3 days", r.Pings)
+	}
+	t.Setenv(EnvPingRetentionDays, "0")
+	if r, err = LoadRetention(); err != nil || r.Pings != 0 || !strings.Contains(r.String(), "heartbeat pings kept forever") {
+		t.Fatalf("0 days: %+v, %v; want kept forever", r, err)
+	}
+	t.Setenv(EnvPingRetentionDays, "x")
+	if _, err := LoadRetention(); err == nil || !strings.Contains(err.Error(), EnvPingRetentionDays) {
+		t.Fatalf("bad value: err = %v, want an error naming %s", err, EnvPingRetentionDays)
 	}
 }
