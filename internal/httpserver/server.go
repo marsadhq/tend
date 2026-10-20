@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/kit/httpx"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
@@ -31,16 +32,15 @@ type Server struct {
 	auth     *AuthConfig // nil disables login/API/dashboard (M2 public-only behavior)
 
 	// loginLimiter is a per-(IP,endpoint) token bucket guarding POST /login
-	// against brute force, defense-in-depth beyond argon2 cost. See
-	// ratelimit.go.
-	loginLimiter *rateLimiter
+	// against brute force, defense-in-depth beyond argon2 cost.
+	loginLimiter *httpx.RateLimiter
 	// pingMissLimiter and pingTokenLimiter guard /ping/{token}; see
 	// handlePing. Misses (unknown tokens) are counted per client address,
 	// which is what stops token guessing; pings for a real heartbeat are
 	// counted per token, never per address, so a host running many heartbeats
 	// on the same minute is not throttled for it.
-	pingMissLimiter  *rateLimiter
-	pingTokenLimiter *rateLimiter
+	pingMissLimiter  *httpx.RateLimiter
+	pingTokenLimiter *httpx.RateLimiter
 }
 
 // New constructs a Server. dispatch may be nil (e.g. in tests or when no
@@ -59,17 +59,17 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 		auth:     auth,
 		// 1/s burst-5: slows online credential guessing hard; a human login is
 		// well within a 5-request burst.
-		loginLimiter: newRateLimiter(clk, 1, 5),
+		loginLimiter: httpx.NewRateLimiter(clk, 1, 5),
 		// Unknown tokens: a burst of 30, then 1/s per client address. A token
 		// is 128 random bits, so this is about load, not odds: an address
 		// that keeps guessing is refused before its requests reach the
 		// database, whatever token it sends next, so rotating tokens does not
 		// evade it.
-		pingMissLimiter: newRateLimiter(clk, pingMissRate, pingMissBurst),
+		pingMissLimiter: httpx.NewRateLimiter(clk, pingMissRate, pingMissBurst),
 		// Known tokens: a burst of 10, then 1/s per heartbeat. A heartbeat
 		// pings once per period, so this only stops a runaway loop (or a
 		// leaked token) from writing to the database flat out.
-		pingTokenLimiter: newRateLimiter(clk, pingTokenRate, pingTokenBurst),
+		pingTokenLimiter: httpx.NewRateLimiter(clk, pingTokenRate, pingTokenBurst),
 	}
 }
 
@@ -87,7 +87,8 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 // cookie-auth CSRF requirement. When auth is nil, ONLY the two public routes
 // above are registered.
 //
-// Every route, in both modes, is wrapped in securityHeaders.
+// Every route, in both modes, is wrapped in httpx.SecurityHeaders (CSP and
+// friends; see httpx.ContentSecurityPolicy).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -98,14 +99,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ping/{token}", s.handlePing)
 
 	if s.auth == nil {
-		return securityHeaders(mux)
+		return httpx.SecurityHeaders(mux)
 	}
 
 	// --- public auth surface (NOT gated; these inherently bypass requireAuth) ---
 	mux.HandleFunc("GET /login", s.handleLoginForm)
 	// Only the credential-checking POST is rate-limited; GET /login (the form)
 	// is cheap and unauthenticated-but-harmless.
-	mux.HandleFunc("POST /login", s.rateLimit(s.loginLimiter, "login", s.handleLoginSubmit))
+	mux.HandleFunc("POST /login", s.loginLimiter.Limit("login", clientIP, s.handleLoginSubmit))
 
 	// /static/ serves the embedded UI assets (htmx.min.js, row-nav.js, app.css,
 	// and the icons). It is NOT gated by auth: these are non-sensitive browser
@@ -133,33 +134,7 @@ func (s *Server) Handler() http.Handler {
 	s.registerDashboardRoutes(authed)
 	mux.Handle("/", s.requireAuth(authed))
 
-	return securityHeaders(mux)
-}
-
-// securityHeaders sets defensive response headers on every route. The CSP is
-// deliberately strict: the dashboard loads only same-origin /static/ assets
-// (htmx.min.js, row-nav.js, app.css) and uses no inline scripts, so 'self'
-// suffices with no 'unsafe-inline' for scripts. htmx attributes are HTML
-// attributes, not inline <script>, so they are unaffected by script-src.
-// style-src is 'self' as well: htmx would otherwise inject an inline <style>
-// for its request indicator at load, so the base template turns that off
-// (htmx-config includeIndicatorStyles=false; the dashboard has no indicator).
-//
-// HSTS is intentionally omitted: serve speaks plain HTTP by default (TLS is
-// terminated at a reverse proxy per README), and emitting HSTS over plain
-// HTTP is either ignored or, once cached, can lock a browser to HTTPS against
-// an HTTP-only deploy.
-func securityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self'; style-src 'self'; "+
-				"img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
-		next.ServeHTTP(w, r)
-	})
+	return httpx.SecurityHeaders(mux)
 }
 
 // Ping limits; see the limiters in New.
@@ -185,11 +160,11 @@ const pingWriteTimeout = 10 * time.Second
 // so a recovery can no longer be committed without its event, or skipped
 // because the caller went away. pingWriteTimeout bounds it instead.
 //
-// Rate limiting happens here rather than in the rateLimit wrapper, because it
-// depends on whether the token is real. Before the database is touched, a
-// request is refused (429 with Retry-After) when its client address has used
-// up its budget of unknown tokens, or its token its own ping budget. A miss
-// then costs the address one unit; a real ping costs its token one, and
+// Rate limiting happens here rather than in a RateLimiter.Limit wrapper,
+// because it depends on whether the token is real. Before the database is
+// touched, a request is refused (429 with Retry-After) when its client address
+// has used up its budget of unknown tokens, or its token its own ping budget.
+// A miss then costs the address one unit; a real ping costs its token one, and
 // nothing per address. Pings from one host for many heartbeats, all on the
 // same minute, therefore never crowd each other out, while an address that
 // keeps guessing tokens is cut off whatever it sends next.
@@ -198,11 +173,11 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	now := s.clk.Now()
 	missKey, tokenKey := clientIP(r)+"|ping-miss", "ping-token|"+token
 	if !s.pingMissLimiter.Has(missKey, now) {
-		tooManyRequests(w, s.pingMissLimiter)
+		httpx.TooManyRequests(w, s.pingMissLimiter)
 		return
 	}
 	if !s.pingTokenLimiter.Has(tokenKey, now) {
-		tooManyRequests(w, s.pingTokenLimiter)
+		httpx.TooManyRequests(w, s.pingTokenLimiter)
 		return
 	}
 
