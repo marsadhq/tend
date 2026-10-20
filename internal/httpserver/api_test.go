@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"
@@ -347,7 +348,7 @@ func TestAPIListChannelsNoSecretMaterial(t *testing.T) {
 	as := seedAuth(t, ts)
 	const secretBlob = "ENCRYPTED-CONFIG-CIPHERTEXT-BLOB"
 	if _, err := ts.store.CreateChannel(context.Background(),
-		notify.Channel{OrgID: ts.orgID, Name: "ops", Kind: notify.Slack}, secretBlob); err != nil {
+		notify.Channel{OrgID: ts.orgID, Name: "ops", Kind: kitnotify.Slack}, secretBlob); err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
 	h := newAuthServer(t, ts.store, authConfig(false)).Handler()
@@ -382,7 +383,7 @@ func TestAPIListRules(t *testing.T) {
 	ts := newStore(t)
 	as := seedAuth(t, ts)
 	chID, err := ts.store.CreateChannel(context.Background(),
-		notify.Channel{OrgID: ts.orgID, Name: "ops", Kind: notify.Slack}, "blob")
+		notify.Channel{OrgID: ts.orgID, Name: "ops", Kind: kitnotify.Slack}, "blob")
 	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}

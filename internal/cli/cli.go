@@ -24,6 +24,7 @@ import (
 	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/kit/httpx"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/config"
@@ -394,7 +395,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var dispatch func(context.Context, core.Event)
 	var worker *notify.Worker
 	if box != nil {
-		worker = notify.NewWorker(st, box, notify.BuildProvider, logger)
+		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, logger)
 		worker.Hold = opts.deliveryHold
 		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
@@ -894,7 +895,7 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// makes the overlap safe. Without a master key the channel configs cannot
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
-		w := notify.NewWorker(st, box, notify.BuildProvider, logger)
+		w := notify.NewWorker(st, box, kitnotify.BuildProvider, logger)
 		if hold, err := config.LoadDeliveryHold(); err != nil {
 			fmt.Fprintf(stderr, "run: warning: %v; using the default\n", err)
 		} else {
@@ -1071,8 +1072,8 @@ func cmdChannelAdd(ctx context.Context, st store.Store, box *secrets.Box, orgID 
 	if *typ == "" {
 		return fmt.Errorf("channel add: -type is required (webhook, slack, discord, smtp, or telegram)")
 	}
-	switch notify.ChannelType(*typ) {
-	case notify.Webhook, notify.Slack, notify.Discord, notify.SMTP, notify.Telegram:
+	switch kitnotify.ChannelType(*typ) {
+	case kitnotify.Webhook, kitnotify.Slack, kitnotify.Discord, kitnotify.SMTP, kitnotify.Telegram:
 	default:
 		return fmt.Errorf("channel add: unknown type %q (must be webhook, slack, discord, smtp, or telegram)", *typ)
 	}
@@ -1094,7 +1095,7 @@ func cmdChannelAdd(ctx context.Context, st store.Store, box *secrets.Box, orgID 
 	id, err := notify.CreateChannel(ctx, st, box, notify.Channel{
 		OrgID: orgID,
 		Name:  *name,
-		Kind:  notify.ChannelType(*typ),
+		Kind:  kitnotify.ChannelType(*typ),
 	}, cfg)
 	if err != nil {
 		return fmt.Errorf("channel add: %w", err)

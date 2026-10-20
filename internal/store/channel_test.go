@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/store"
@@ -42,7 +43,7 @@ func TestChannelRoundTripEncryptsConfig(t *testing.T) {
 
 			cfg := []byte(`{"webhook_url":"https://hooks.example/abc"}`)
 			id, err := notify.CreateChannel(ctx, s, box,
-				notify.Channel{OrgID: org.ID, Kind: notify.Slack, Name: "ops"}, cfg)
+				notify.Channel{OrgID: org.ID, Kind: kitnotify.Slack, Name: "ops"}, cfg)
 			if err != nil {
 				t.Fatalf("CreateChannel: %v", err)
 			}
@@ -58,8 +59,8 @@ func TestChannelRoundTripEncryptsConfig(t *testing.T) {
 			if ch.Name != "ops" {
 				t.Fatalf("name: got %q want %q", ch.Name, "ops")
 			}
-			if ch.Kind != notify.Slack {
-				t.Fatalf("kind: got %q want %q", ch.Kind, notify.Slack)
+			if ch.Kind != kitnotify.Slack {
+				t.Fatalf("kind: got %q want %q", ch.Kind, kitnotify.Slack)
 			}
 			if ch.ID != id {
 				t.Fatalf("id: got %d want %d", ch.ID, id)
@@ -97,7 +98,7 @@ func TestChannelRoundTripEncryptsConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListChannels: %v", err)
 			}
-			if len(list) != 1 || list[0].ID != id || list[0].Name != "ops" || list[0].Kind != notify.Slack {
+			if len(list) != 1 || list[0].ID != id || list[0].Name != "ops" || list[0].Kind != kitnotify.Slack {
 				t.Fatalf("ListChannels: %+v", list)
 			}
 
@@ -113,7 +114,7 @@ func TestChannelRoundTripEncryptsConfig(t *testing.T) {
 			// Upsert by (org, name): same name, new kind/config, same id.
 			cfg2 := []byte(`{"webhook_url":"https://hooks.example/xyz","other":true}`)
 			id2, err := notify.CreateChannel(ctx, s, box,
-				notify.Channel{OrgID: org.ID, Kind: notify.Webhook, Name: "ops"}, cfg2)
+				notify.Channel{OrgID: org.ID, Kind: kitnotify.Webhook, Name: "ops"}, cfg2)
 			if err != nil {
 				t.Fatalf("CreateChannel upsert: %v", err)
 			}
@@ -124,8 +125,8 @@ func TestChannelRoundTripEncryptsConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetChannelDecrypted after upsert: %v", err)
 			}
-			if ch2.Kind != notify.Webhook {
-				t.Fatalf("upsert kind: got %q want %q", ch2.Kind, notify.Webhook)
+			if ch2.Kind != kitnotify.Webhook {
+				t.Fatalf("upsert kind: got %q want %q", ch2.Kind, kitnotify.Webhook)
 			}
 			if string(got2) != string(cfg2) {
 				t.Fatalf("upsert config: got %q want %q", got2, cfg2)

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsadhq/kit/event"
 	"github.com/marsadhq/tend/internal/core"
 )
 
@@ -16,8 +17,8 @@ func TestMessageForRunFailed(t *testing.T) {
 		Payload: `{"run_id":3,"job_id":2,"job_name":"nightly","status":"failed","exit_code":9}`,
 	}
 	m := messageFor(ev)
-	if m.Event.Type != "run.failed" {
-		t.Fatalf("Event not carried through: %+v", m.Event)
+	if w, ok := m.Webhook.(event.TendWebhook); !ok || w.Event == nil || w.Event.Type != "run.failed" {
+		t.Fatalf("Event not carried through to the webhook body: %+v", m.Webhook)
 	}
 	if !strings.Contains(m.Subject, "nightly") {
 		t.Fatalf("subject should mention job name: %q", m.Subject)

@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" driver for the raw handle
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/config"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/jobs"
@@ -149,7 +150,7 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			}
 			backdate("events", evID, 400*24*time.Hour) // events kept forever below
 
-			chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: org.ID, Name: "ops", Kind: notify.Webhook}, "blob")
+			chID, err := s.CreateChannel(ctx, notify.Channel{OrgID: org.ID, Name: "ops", Kind: kitnotify.Webhook}, "blob")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -159,7 +160,7 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			if _, err := s.EmitEvent(ctx, core.Event{OrgID: org.ID, Type: "run.failed", Source: "test"}); err != nil {
 				t.Fatal(err)
 			}
-			ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Minute), time.Minute, notify.DefaultHold, 10)
+			ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Minute), time.Minute, kitnotify.DefaultHold, 10)
 			if err != nil || len(ds) != 1 {
 				t.Fatalf("ClaimDueDeliveries = %v, %v", ds, err)
 			}

@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/marsadhq/kit/clock"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/jobs"
@@ -117,11 +118,11 @@ type jobSpec struct {
 
 // validChannelTypes enumerates the channel kinds the config may declare.
 var validChannelTypes = map[string]bool{
-	string(notify.Webhook):  true,
-	string(notify.Slack):    true,
-	string(notify.Discord):  true,
-	string(notify.SMTP):     true,
-	string(notify.Telegram): true,
+	string(kitnotify.Webhook):  true,
+	string(kitnotify.Slack):    true,
+	string(kitnotify.Discord):  true,
+	string(kitnotify.SMTP):     true,
+	string(kitnotify.Telegram): true,
 }
 
 // -------------------------------------------------------------------
@@ -528,7 +529,7 @@ func reconcileChannel(ctx context.Context, s ReconcileStore, orgID int64, box *s
 	if _, err := notify.CreateChannel(ctx, s, box, notify.Channel{
 		OrgID: orgID,
 		Name:  c.Name,
-		Kind:  notify.ChannelType(c.Type),
+		Kind:  kitnotify.ChannelType(c.Type),
 	}, configJSON); err != nil {
 		return fmt.Errorf("reconcile: channel %q: %w", c.Name, err)
 	}

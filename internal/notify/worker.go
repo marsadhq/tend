@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
 )
@@ -66,216 +67,97 @@ type WorkerStore interface {
 // delivery of a notification.failed never records another one (loop guard).
 const EventNotificationFailed = "notification.failed"
 
-// DefaultHold is Worker.Hold's default (and the default of serve's
-// TEND_DELIVERY_HOLD_MINUTES): long enough to ride out a short outage of the
-// destination in order, short enough that one notification it keeps failing
-// does not silence the channel for the day it takes to give it up.
-const DefaultHold = 15 * time.Minute
-
-// claimBatch bounds how many due deliveries one drain pass claims at a time.
-const claimBatch = 32
-
-// Worker drains the durable deliveries queue: claim due rows, send each via
-// its channel's provider, and either finalize (delivered), reschedule with
-// capped exponential backoff, or - when the destination refused it for good
-// (IsPermanent) or once a delivery is older than MaxAge - give up and record
-// notification.failed so a dropped alert is never silent.
+// Worker is kit's durable delivery worker over Tend's deliveries: it claims
+// due rows, sends each through its channel's provider, and either finalizes
+// it (delivered), reschedules it with capped exponential backoff, or - when
+// the destination refused it for good (kitnotify.IsPermanent) or once it is
+// older than MaxAge - gives it up and records notification.failed, so a
+// dropped alert is never silent.
 //
 // Delivery is asynchronous by design: emitters only enqueue (transactionally
 // with the event insert) and optionally Nudge the worker, so a slow or down
 // destination can never block a runner worker, an HTTP response, or the
 // heartbeat watcher.
-type Worker struct {
-	store WorkerStore
-	box   *secrets.Box
-	build func(ChannelType, []byte) (Provider, error)
-	log   *slog.Logger
-	now   func() time.Time // injectable so backoff/give-up tests don't sleep
+type Worker = kitnotify.Worker[Delivery]
 
-	// Interval is the poll cadence between drain passes; default 2s.
-	Interval time.Duration
-	// Lease is how long a claim holds before the delivery becomes due again;
-	// it must exceed the slowest single send (HTTP sends time out after 10s,
-	// SMTP sends after smtpTimeout, 30s). Default 1m.
-	Lease time.Duration
-	// MaxAge is how long a delivery may keep failing before the worker gives
-	// up and emits notification.failed. Default 24h.
-	MaxAge time.Duration
-	// BackoffCap caps the exponential retry backoff. Default 5m.
-	BackoffCap time.Duration
-	// Hold is how long a failing delivery may hold back the later ones on its
-	// channel, counted from its first attempt; after that they go out while it
-	// keeps retrying. 0 turns per-channel ordering off. Default DefaultHold.
-	Hold time.Duration
-
-	nudge chan struct{}
-}
-
-// NewWorker builds a delivery worker with the production defaults.
-func NewWorker(s WorkerStore, box *secrets.Box, build func(ChannelType, []byte) (Provider, error), log *slog.Logger) *Worker {
-	return &Worker{
-		store:      s,
-		box:        box,
-		build:      build,
-		log:        log,
-		now:        time.Now,
-		Interval:   2 * time.Second,
-		Lease:      time.Minute,
-		MaxAge:     24 * time.Hour,
-		BackoffCap: 5 * time.Minute,
-		Hold:       DefaultHold,
-		nudge:      make(chan struct{}, 1),
+// NewWorker builds the delivery worker over s with the production defaults:
+// a 2s poll, a 1m lease, give-up after 24h, backoff capped at 5m and a
+// kitnotify.DefaultHold (15m) per-channel hold. build makes a channel's
+// provider from its kind and decrypted config (kitnotify.BuildProvider in
+// production).
+func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), log *slog.Logger) *Worker {
+	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build), log)
+	w.LogAttrs = func(d kitnotify.Delivery[Delivery]) []any {
+		return []any{"channel", d.Item.ChannelID, "event", d.Item.Event.Type}
 	}
+	return w
 }
 
-// Nudge wakes the worker for a prompt drain pass after an emitter enqueued a
-// delivery. It never blocks: a nudge while one is already pending is a no-op
-// (the pending pass will see the new row anyway).
-func (w *Worker) Nudge() {
-	select {
-	case w.nudge <- struct{}{}:
-	default:
+// queue is kitnotify.Queue over Tend's deliveries table.
+type queue struct{ s WorkerStore }
+
+// Claim claims due deliveries (see WorkerStore.ClaimDueDeliveries).
+func (q queue) Claim(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]kitnotify.Delivery[Delivery], error) {
+	ds, err := q.s.ClaimDueDeliveries(ctx, now, lease, hold, limit)
+	if err != nil {
+		return nil, err
 	}
-}
-
-// Run drains the queue until ctx is cancelled, waking every Interval or on a
-// Nudge. Drain errors are logged, never fatal: the next pass retries.
-func (w *Worker) Run(ctx context.Context) {
-	t := time.NewTicker(w.Interval)
-	defer t.Stop()
-	for {
-		if _, err := w.DrainOnce(ctx); err != nil && ctx.Err() == nil {
-			w.log.Error("notify: drain deliveries", "err", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		case <-w.nudge:
-		}
+	out := make([]kitnotify.Delivery[Delivery], len(ds))
+	for i, d := range ds {
+		out[i] = kitnotify.Delivery[Delivery]{ID: d.ID, Attempts: d.Attempts, CreatedAt: d.CreatedAt, Item: d}
 	}
+	return out, nil
 }
 
-// DrainOnce claims and processes every currently-due delivery, returning the
-// number successfully delivered. It stops early (without error) when ctx is
-// cancelled mid-batch; claimed-but-unsent deliveries simply become due again
-// after the lease.
-func (w *Worker) DrainOnce(ctx context.Context) (int, error) {
-	delivered := 0
-	for {
-		if ctx.Err() != nil {
-			return delivered, nil
-		}
-		ds, err := w.store.ClaimDueDeliveries(ctx, w.now(), w.Lease, w.Hold, claimBatch)
+// MarkSent finalizes d as delivered.
+func (q queue) MarkSent(ctx context.Context, d kitnotify.Delivery[Delivery]) error {
+	return q.s.MarkDeliveryDelivered(ctx, d.ID)
+}
+
+// Retry reschedules d to at.
+func (q queue) Retry(ctx context.Context, d kitnotify.Delivery[Delivery], at time.Time) error {
+	return q.s.RescheduleDelivery(ctx, d.ID, at)
+}
+
+// GiveUp finalizes d as failed and, in the same transaction, records
+// notification.failed naming the type of the event that was not delivered
+// (no secret, no output).
+//
+// Loop guard: a notification.failed that cannot be delivered is finalized
+// and dropped. Recording another notification.failed for it could start a
+// chain of them, one per failing channel and day.
+func (q queue) GiveUp(ctx context.Context, d kitnotify.Delivery[Delivery], _ error) error {
+	if d.Item.Event.Type == EventNotificationFailed {
+		return q.s.FailDelivery(ctx, d.ID)
+	}
+	return q.s.FailDeliveryAndEmit(ctx, d.ID, core.Event{
+		OrgID:   d.Item.OrgID,
+		Type:    EventNotificationFailed,
+		Source:  "notify",
+		Payload: d.Item.Event.Type,
+	})
+}
+
+// sender returns the worker's send step: load and decrypt the channel's
+// config, build its provider, and send the rendered event. Its errors are
+// logged, so they never carry the config blob or decrypted secrets (provider
+// errors name only a destination's host).
+func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error)) kitnotify.SendFunc[Delivery] {
+	return func(ctx context.Context, kd kitnotify.Delivery[Delivery]) error {
+		d := kd.Item
+		ch, blob, err := s.GetChannel(ctx, d.OrgID, d.ChannelID)
 		if err != nil {
-			return delivered, err
+			return fmt.Errorf("load channel %d: %w", d.ChannelID, err)
 		}
-		if len(ds) == 0 {
-			return delivered, nil
+		cfg, err := box.Decrypt(blob)
+		if err != nil {
+			// Never include the blob or decrypted config - only the channel id.
+			return fmt.Errorf("decrypt channel %d config: %w", d.ChannelID, err)
 		}
-		for _, d := range ds {
-			if ctx.Err() != nil {
-				return delivered, nil
-			}
-			if w.deliverOne(ctx, d) {
-				delivered++
-			}
+		p, err := build(ch.Kind, cfg)
+		if err != nil {
+			return fmt.Errorf("build provider for channel %d: %w", d.ChannelID, err)
 		}
+		return p.Send(ctx, messageFor(d.Event))
 	}
-}
-
-// deliverOne attempts a single claimed delivery and finalizes/reschedules it.
-// It returns true only when the send succeeded.
-func (w *Worker) deliverOne(ctx context.Context, d Delivery) bool {
-	err := w.send(ctx, d)
-	if err == nil {
-		if merr := w.store.MarkDeliveryDelivered(ctx, d.ID); merr != nil {
-			// The send DID happen; a lease-expiry redelivery is possible
-			// (at-least-once). Log so the duplicate is explicable.
-			w.log.Error("notify: mark delivered", "delivery", d.ID, "err", merr)
-		}
-		return true
-	}
-	if ctx.Err() != nil {
-		return false // shutdown mid-send: the lease expiry retries, not a failure
-	}
-
-	// Give up when the destination refused this notification for good (a
-	// 4xx answer, an SMTP 5xx reply: retrying cannot help, and on an ordered
-	// channel it would hold back every later alert), or once the delivery has
-	// been failing for MaxAge.
-	rejected := IsPermanent(err)
-	if rejected || w.now().Sub(d.CreatedAt) >= w.MaxAge {
-		// Errors from send never include channel secrets (postJSON redacts the
-		// URL; decrypt errors carry no blob), so logging err here is safe.
-		reason := "retried for too long"
-		if rejected {
-			reason = "rejected by the destination"
-		}
-		w.log.Error("notify: delivery failed permanently", "reason", reason,
-			"delivery", d.ID, "channel", d.ChannelID, "event", d.Event.Type, "attempts", d.Attempts, "err", err)
-		// Loop guard: a notification.failed that cannot be delivered is
-		// logged and dropped. Recording another notification.failed for it
-		// could start a chain of them, one per failing channel and day.
-		if d.Event.Type == EventNotificationFailed {
-			if ferr := w.store.FailDelivery(ctx, d.ID); ferr != nil {
-				w.log.Error("notify: fail delivery", "delivery", d.ID, "err", ferr)
-			}
-			return false
-		}
-		// The emitted payload is only the failed event TYPE - no secret, no
-		// output.
-		ev := core.Event{
-			OrgID:   d.OrgID,
-			Type:    EventNotificationFailed,
-			Source:  "notify",
-			Payload: d.Event.Type,
-		}
-		if ferr := w.store.FailDeliveryAndEmit(ctx, d.ID, ev); ferr != nil {
-			// Nothing was written: the delivery is still pending and is given
-			// up again, with its notification.failed, after the lease.
-			w.log.Error("notify: fail delivery", "delivery", d.ID, "err", ferr)
-		}
-		return false
-	}
-
-	w.log.Warn("notify: delivery attempt failed",
-		"delivery", d.ID, "channel", d.ChannelID, "event", d.Event.Type, "attempt", d.Attempts, "err", err)
-	if rerr := w.store.RescheduleDelivery(ctx, d.ID, w.now().Add(w.backoff(d.Attempts))); rerr != nil {
-		w.log.Error("notify: reschedule delivery", "delivery", d.ID, "err", rerr)
-	}
-	return false
-}
-
-// send loads + decrypts the channel config, builds the provider, and performs
-// one send attempt. Returned errors are safe to log: they never carry the
-// config blob or decrypted secrets.
-func (w *Worker) send(ctx context.Context, d Delivery) error {
-	ch, blob, err := w.store.GetChannel(ctx, d.OrgID, d.ChannelID)
-	if err != nil {
-		return fmt.Errorf("load channel %d: %w", d.ChannelID, err)
-	}
-	cfg, err := w.box.Decrypt(blob)
-	if err != nil {
-		// Never include the blob or decrypted config - only the channel id.
-		return fmt.Errorf("decrypt channel %d config: %w", d.ChannelID, err)
-	}
-	p, err := w.build(ch.Kind, cfg)
-	if err != nil {
-		return fmt.Errorf("build provider for channel %d: %w", d.ChannelID, err)
-	}
-	return p.Send(ctx, messageFor(d.Event))
-}
-
-// backoff returns the wait before the next attempt after `attempts` tries:
-// 1s, 2s, 4s, ... doubling up to BackoffCap.
-func (w *Worker) backoff(attempts int) time.Duration {
-	d := time.Second
-	for i := 1; i < attempts && d < w.BackoffCap; i++ {
-		d *= 2
-	}
-	if d > w.BackoffCap {
-		d = w.BackoffCap
-	}
-	return d
 }

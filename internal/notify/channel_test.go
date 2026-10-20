@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/notify"
 )
@@ -51,7 +52,7 @@ func TestCreateChannelEncryptsConfig(t *testing.T) {
 
 	cfg := []byte(`{"webhook_url":"https://hooks.example/abc"}`)
 	id, err := notify.CreateChannel(ctx, fake, box,
-		notify.Channel{OrgID: 7, Kind: notify.Slack, Name: "ops"}, cfg)
+		notify.Channel{OrgID: 7, Kind: kitnotify.Slack, Name: "ops"}, cfg)
 	if err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestGetChannelDecrypted(t *testing.T) {
 
 	cfg := []byte(`{"k":"v"}`)
 	if _, err := notify.CreateChannel(ctx, fake, box,
-		notify.Channel{OrgID: 7, Kind: notify.Discord, Name: "ch"}, cfg); err != nil {
+		notify.Channel{OrgID: 7, Kind: kitnotify.Discord, Name: "ch"}, cfg); err != nil {
 		t.Fatalf("CreateChannel: %v", err)
 	}
 
@@ -89,7 +90,7 @@ func TestGetChannelDecrypted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChannelDecrypted: %v", err)
 	}
-	if ch.Name != "ch" || ch.Kind != notify.Discord {
+	if ch.Name != "ch" || ch.Kind != kitnotify.Discord {
 		t.Fatalf("channel: %+v", ch)
 	}
 	if string(got) != string(cfg) {
