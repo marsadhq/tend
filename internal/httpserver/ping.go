@@ -204,43 +204,110 @@ func normalizeToken(token string) string {
 // readPingBody returns the body of a ping as it is logged: at most
 // PingBodyLimit bytes of it, made plain text the way captured job output is
 // (NUL bytes dropped, invalid UTF-8 replaced with U+FFFD), with every
-// credential in creds (the ping's own token) replaced by "***" so a script
-// that echoes its ping URL does not put it on the dashboard, and cut on a
-// character boundary with PingBodyTruncated when it was longer. The order is
-// that of a job's output: clean, then redact, then cap.
+// credential in creds (the ping's token, its ping key) replaced by "***" so a
+// script that echoes its ping URL does not put it on the dashboard, and cut on
+// a character boundary with PingBodyTruncated when it was longer.
+//
+// The order is that of a job's output: clean, then redact, then cap, so the
+// cap never cuts a credential in two before redaction could see it whole. To
+// that end a little more than PingBodyLimit is read; where even that cut
+// falls inside a credential, what is left of it at the end of the text is
+// dropped too. A UUID-shaped token is matched in either letter case, as it is
+// when the ping is looked up.
 func readPingBody(r *http.Request, creds ...string) (string, error) {
 	if r.Body == nil || r.Method != http.MethodPost {
 		return "", nil
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, PingBodyLimit+1))
+	slack := utf8.UTFMax
+	for _, c := range creds {
+		slack = max(slack, len(c)+utf8.UTFMax)
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, int64(PingBodyLimit+slack+1)))
 	if err != nil {
 		return "", err
 	}
-	truncated := len(raw) > PingBodyLimit
-	if truncated {
-		raw = trimPartialRune(raw[:PingBodyLimit])
+	cutRaw := len(raw) > PingBodyLimit+slack
+	if cutRaw {
+		raw = trimPartialRune(raw[:PingBodyLimit+slack])
 	}
 	s := string(raw)
 	if !utf8.ValidString(s) || strings.Contains(s, "\x00") {
 		s = strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "\uFFFD")
 	}
-	for _, c := range creds {
-		if c != "" {
-			s = strings.ReplaceAll(s, c, "***")
-		}
+	if cutRaw {
+		s = dropCredentialPrefix(s, creds)
 	}
+	for _, c := range creds {
+		s = redactCredential(s, c)
+	}
+	truncated := cutRaw
 	if len(s) > PingBodyLimit {
 		truncated = true
 		cut := PingBodyLimit
 		for cut > 0 && !utf8.RuneStart(s[cut]) {
 			cut--
 		}
-		s = s[:cut]
+		s = dropCredentialPrefix(s[:cut], creds)
 	}
 	if truncated {
 		s += PingBodyTruncated
 	}
 	return s, nil
+}
+
+// redactCredential replaces every occurrence of cred in s with "***": exactly
+// for a key or a hex token, in either letter case for a UUID-shaped token.
+func redactCredential(s, cred string) string {
+	if cred == "" {
+		return s
+	}
+	if _, isUUID := heartbeat.CanonicalUUID(cred); !isUUID {
+		return strings.ReplaceAll(s, cred, "***")
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if i+len(cred) <= len(s) && asciiEqualFold(s[i:i+len(cred)], cred) {
+			b.WriteString("***")
+			i += len(cred)
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// asciiEqualFold reports whether a and b, of equal length, are equal ignoring
+// the case of ASCII letters.
+func asciiEqualFold(a, b string) bool {
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// dropCredentialPrefix removes from the end of s the start of a credential a
+// cut left there: the longest suffix of s that begins one of creds (in either
+// letter case, which covers UUID tokens and costs nothing else).
+func dropCredentialPrefix(s string, creds []string) string {
+	for _, c := range creds {
+		for n := min(len(c)-1, len(s)); n > 0; n-- {
+			if asciiEqualFold(s[len(s)-n:], c[:n]) {
+				s = s[:len(s)-n]
+				break
+			}
+		}
+	}
+	return s
 }
 
 // trimPartialRune drops a trailing, unfinished UTF-8 sequence from b, which a

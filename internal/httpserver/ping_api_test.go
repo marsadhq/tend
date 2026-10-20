@@ -251,7 +251,7 @@ func TestPingAPIRunIDs(t *testing.T) {
 // on a character boundary; a GET has none.
 func TestPingAPIBody(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s store.Store) {
-		p := newPingAPI(t, s, "tok-body")
+		p := newPingAPI(t, s, "0123456789abcdef0123456789abcdef")
 		wantOK(t, p.do(http.MethodPost, p.token+"/log", "line 1\nline 2\n"), "log")
 		if got := p.log(t)[0].Body; got != "line 1\nline 2\n" {
 			t.Fatalf("body = %q", got)
@@ -274,6 +274,14 @@ func TestPingAPIBody(t *testing.T) {
 			t.Fatalf("capped body: %d bytes, marker %v; want %d (or one less) and the marker", len(body), marker, httpserver.PingBodyLimit)
 		}
 
+		// A token cut in two by the cap is not left half in the log.
+		p = newPingAPIKeep(t, p)
+		straddle := strings.Repeat("x", httpserver.PingBodyLimit-10) + p.token + strings.Repeat("y", 50)
+		wantOK(t, p.do(http.MethodPost, p.token+"/log", straddle), "token across the cap")
+		if got := p.log(t)[0].Body; strings.Contains(got, p.token[:8]) || !strings.HasSuffix(got, httpserver.PingBodyTruncated) {
+			t.Fatalf("a token straddling the cap left %q in the log", got[len(got)-60:])
+		}
+
 		wantOK(t, p.do(http.MethodGet, p.token+"/log", ""), "no body")
 		if got := p.log(t)[0].Body; got != "" {
 			t.Fatalf("GET logged body %q, want none", got)
@@ -288,9 +296,12 @@ func TestPingAPIUUIDToken(t *testing.T) {
 		const uuid = "5bf66975-d4c7-4bf5-bcc8-b8d8a82ea278"
 		p := newPingAPI(t, s, uuid)
 		wantOK(t, p.do(http.MethodGet, uuid, ""), "lower case")
-		wantOK(t, p.do(http.MethodGet, strings.ToUpper(uuid)+"/start", ""), "upper case")
+		wantOK(t, p.do(http.MethodPost, strings.ToUpper(uuid)+"/start", "curl https://tend/ping/"+strings.ToUpper(uuid)), "upper case")
 		if n := len(p.log(t)); n != 2 {
 			t.Fatalf("logged %d pings, want 2", n)
+		}
+		if got := p.log(t)[0].Body; got != "curl https://tend/ping/***" {
+			t.Fatalf("an upper-case UUID token was not redacted: %q", got)
 		}
 	})
 }
