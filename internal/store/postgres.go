@@ -449,9 +449,10 @@ func (s *PostgresStore) FinishRun(ctx context.Context, runID int64, status jobs.
 
 // FinishRunAndEmit atomically records the terminal run state AND appends the
 // terminal lifecycle event in a single transaction, preventing a lost terminal
-// event if EmitEvent would fail after FinishRun committed. Like FinishRun it
-// returns jobs.ErrRunNotRunning, writing neither, when the run is no longer
-// 'running'.
+// event if EmitEvent would fail after FinishRun committed. A run that
+// succeeded after the job's previous finished run did not also gets
+// run.recovered, in the same transaction. Like FinishRun it returns
+// jobs.ErrRunNotRunning, writing neither, when the run is no longer 'running'.
 func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -469,6 +470,17 @@ func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, statu
 	id, err := pgEmitEventTx(ctx, tx, ev)
 	if err != nil {
 		return 0, err
+	}
+	if status == jobs.StatusSucceeded {
+		prev, found, err := previousRunStatusTx(ctx, tx, runID, "$1")
+		if err != nil {
+			return 0, err
+		}
+		if found && prev != jobs.StatusSucceeded {
+			if _, err := pgEmitEventTx(ctx, tx, jobs.RecoveredEvent(ev, runID)); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("finish run and emit commit: %w", err)

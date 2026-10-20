@@ -90,9 +90,11 @@ type RunnerStore interface {
 	// FinishRunAndEmit atomically records the terminal run state (including the
 	// final attempt count) AND the terminal lifecycle event in one transaction
 	// (prevents lost terminal event on EmitEvent failure after FinishRun
-	// committed). Returns the new event ID, or ErrRunNotRunning, having written
-	// neither, when the run is no longer 'running', or ErrRunGone when there
-	// is no such run.
+	// committed). When a run succeeds and the job's previous finished run had
+	// not, the same transaction also records run.recovered (RecoveredEvent).
+	// Returns the new event ID, or ErrRunNotRunning, having written neither,
+	// when the run is no longer 'running', or ErrRunGone when there is no such
+	// run.
 	FinishRunAndEmit(ctx context.Context, runID int64, status RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error)
 	GetSecret(ctx context.Context, orgID int64, name string) (string, error)
 	EmitEvent(ctx context.Context, e core.Event) (int64, error)
@@ -176,7 +178,9 @@ type Runner struct {
 	// and the notification rules, which events become deliveries
 	// (run.succeeded never does), so the runner does not need to know the
 	// alerting policy. The best-effort run.started event is NOT a terminal
-	// event and is never fired here.
+	// event and is never fired here. Neither is run.recovered: the store
+	// records it next to run.succeeded, and the sink call for the terminal
+	// event is the nudge that gets its deliveries sent.
 	//
 	// jobs deliberately keeps this a plain func over core.Event (not a notify
 	// type) so package jobs never imports notify - avoiding an import cycle.
@@ -414,7 +418,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	// terminal event (run.succeeded / run.failed) is guaranteed atomic via
 	// FinishRunAndEmit. Consumers that need to detect a missing start event can
 	// infer it from the terminal event's run_id.
-	if err := r.emit(ctx, run, job, "run.started", StatusRunning, 0); err != nil && ctx.Err() == nil {
+	if err := r.emit(ctx, run, job, EventRunStarted, StatusRunning, 0); err != nil && ctx.Err() == nil {
 		// Non-fatal: continue to execution. The started event is advisory; the
 		// terminal event written by FinishRunAndEmit is what pipeline consumers
 		// rely on. Worth a line all the same: it is the first sign of a store
@@ -428,7 +432,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		// is sanitised by resolveEnv (no secret material). Finish + emit atomically
 		// so the run.failed event is never lost.
 		out := "secret resolution failed: " + err.Error()
-		termEv, evErr := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
+		termEv, evErr := r.buildEvent(run, job, EventRunFailed, StatusFailed, -1)
 		if evErr != nil {
 			// Run is left in 'running'; recovered at next restart.
 			r.logError(ctx, "runner: build terminal event", evErr, "run", run.ID, "job", job.Name)
@@ -446,9 +450,9 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 	// The precise status is preserved in the payload's "status" field so
 	// consumers can distinguish timed_out from failed without breaking the
 	// type vocabulary.
-	termType := "run.failed"
+	termType := EventRunFailed
 	if res.Status == StatusSucceeded {
-		termType = "run.succeeded"
+		termType = EventRunSucceeded
 	}
 
 	termEv, err := r.buildEvent(run, job, termType, res.Status, res.ExitCode)
@@ -619,7 +623,7 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 				continue // still within its window; the executor will finish it
 			}
 		}
-		termEv, err := r.buildEvent(run, job, "run.failed", StatusFailed, -1)
+		termEv, err := r.buildEvent(run, job, EventRunFailed, StatusFailed, -1)
 		if err != nil {
 			record(run, "build event", err)
 			continue

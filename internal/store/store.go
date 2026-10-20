@@ -79,7 +79,9 @@ type Store interface {
 	// FinishRunAndEmit atomically records the terminal run state (including the
 	// final attempt count) AND appends the terminal lifecycle event in a single
 	// transaction. This prevents the lost-event scenario where FinishRun commits
-	// but EmitEvent fails. Returns the new event ID. Like FinishRun it returns
+	// but EmitEvent fails. When the run succeeded and the job's previous
+	// finished run (the one that ended last) did not, run.recovered is appended
+	// in the same transaction too. Returns the new (terminal) event ID. Like FinishRun it returns
 	// jobs.ErrRunNotRunning, writing neither the state nor the event, when the
 	// run is no longer 'running', and ErrNotFound and jobs.ErrRunGone for an
 	// absent id.
