@@ -444,3 +444,38 @@ func (s *PostgresStore) GetOrgPingKey(ctx context.Context, orgID int64) (string,
 func (s *PostgresStore) OrgByPingKey(ctx context.Context, key string) (int64, error) {
 	return orgByPingKey(ctx, s.db, dialectPostgres, key)
 }
+
+// createHeartbeatIfAbsent is CreateHeartbeatIfAbsent for both backends.
+func createHeartbeatIfAbsent(ctx context.Context, db *sql.DB, d dialect, hb heartbeat.Heartbeat) (string, bool, error) {
+	var token string
+	err := db.QueryRowContext(ctx, rebind(d, `INSERT INTO heartbeats
+		(org_id, name, token, period_seconds, grace_seconds, status, last_seen_at, created_at)
+		VALUES (?, ?, ?, ?, ?, 'new', NULL, ?)
+		ON CONFLICT (org_id, name) DO NOTHING
+		RETURNING token`),
+		hb.OrgID, hb.Name, hb.Token, hb.PeriodSeconds, hb.GraceSeconds, nowStr()).Scan(&token)
+	if err == nil {
+		return token, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, fmt.Errorf("create heartbeat if absent: %w", err)
+	}
+	var existing sql.NullString
+	if err := db.QueryRowContext(ctx, rebind(d, `SELECT token FROM heartbeats WHERE org_id = ? AND name = ?`),
+		hb.OrgID, hb.Name).Scan(&existing); err != nil {
+		return "", false, fmt.Errorf("create heartbeat if absent: read the existing one: %w", err)
+	}
+	return existing.String, false, nil
+}
+
+// CreateHeartbeatIfAbsent creates hb unless its name is taken; see
+// Store.CreateHeartbeatIfAbsent.
+func (s *SQLiteStore) CreateHeartbeatIfAbsent(ctx context.Context, hb heartbeat.Heartbeat) (string, bool, error) {
+	return createHeartbeatIfAbsent(ctx, s.db, dialectSQLite, hb)
+}
+
+// CreateHeartbeatIfAbsent creates hb unless its name is taken; see
+// Store.CreateHeartbeatIfAbsent.
+func (s *PostgresStore) CreateHeartbeatIfAbsent(ctx context.Context, hb heartbeat.Heartbeat) (string, bool, error) {
+	return createHeartbeatIfAbsent(ctx, s.db, dialectPostgres, hb)
+}

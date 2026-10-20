@@ -477,17 +477,20 @@ func (s *Server) resolveSlug(ctx context.Context, req pingRequest, now time.Time
 	if err != nil {
 		return "", false, http.StatusInternalServerError, "internal error"
 	}
-	// CreateHeartbeat upserts by name, so two creating pings racing on one
-	// slug end up with the same heartbeat and token.
-	_, token, err = s.store.CreateHeartbeat(ctx, heartbeat.Heartbeat{
+	// Insert-only: two creating pings racing on one slug end up with the
+	// same heartbeat and token, and one created meanwhile by other means
+	// keeps its period and grace.
+	token, created, err = s.store.CreateHeartbeatIfAbsent(ctx, heartbeat.Heartbeat{
 		OrgID: orgID, Name: req.slug, Token: fresh, PeriodSeconds: autoCreatePeriod, GraceSeconds: autoCreateGrace,
 	})
 	if err != nil {
 		s.log.Error("ping: create heartbeat for slug failed", "err", err)
 		return "", false, http.StatusInternalServerError, "internal error"
 	}
-	s.log.Info("ping: created heartbeat from a slug ping", "heartbeat", req.slug, "org", orgID)
-	return token, true, 0, ""
+	if created {
+		s.log.Info("ping: created heartbeat from a slug ping", "heartbeat", req.slug, "org", orgID)
+	}
+	return token, created, 0, ""
 }
 
 // tokenHint returns a short, non-sensitive prefix of a ping token for logs, so

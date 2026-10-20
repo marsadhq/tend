@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
 
@@ -64,4 +65,32 @@ func insertOrg(t *testing.T, ctx context.Context, s store.Store, name string) in
 		t.Fatalf("read org id: %v", err)
 	}
 	return id
+}
+
+// TestCreateHeartbeatIfAbsent: the slug ping's ?create=1 path creates a
+// heartbeat only when its name is free; an existing one keeps its token,
+// period and grace.
+func TestCreateHeartbeatIfAbsent(t *testing.T) {
+	ctx := context.Background()
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		tok, created, err := s.CreateHeartbeatIfAbsent(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "made", Token: "tok-made", PeriodSeconds: 86400, GraceSeconds: 3600})
+		if err != nil || !created || tok != "tok-made" {
+			t.Fatalf("first create = %q, %v, %v; want tok-made, created", tok, created, err)
+		}
+		if _, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "kept", Token: "tok-kept", PeriodSeconds: 60, GraceSeconds: 5}); err != nil {
+			t.Fatal(err)
+		}
+		tok, created, err = s.CreateHeartbeatIfAbsent(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "kept", Token: "tok-other", PeriodSeconds: 86400, GraceSeconds: 3600})
+		if err != nil || created || tok != "tok-kept" {
+			t.Fatalf("create over an existing one = %q, %v, %v; want its token, not created", tok, created, err)
+		}
+		hb, err := s.GetHeartbeatByName(ctx, org.ID, "kept")
+		if err != nil || hb.PeriodSeconds != 60 || hb.GraceSeconds != 5 {
+			t.Fatalf("existing heartbeat after = %+v, %v; want period 60 and grace 5 kept", hb, err)
+		}
+	})
 }
