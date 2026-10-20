@@ -33,7 +33,7 @@ type fakeWorkerStore struct {
 	emitted     []core.Event
 }
 
-func (f *fakeWorkerStore) ClaimDueDeliveries(_ context.Context, _ time.Time, _ time.Duration, _ int) ([]Delivery, error) {
+func (f *fakeWorkerStore) ClaimDueDeliveries(_ context.Context, _ time.Time, _, _ time.Duration, _ int) ([]Delivery, error) {
 	ds := f.due
 	f.due = nil
 	for i := range ds {

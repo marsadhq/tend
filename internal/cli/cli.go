@@ -97,6 +97,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		if opts.retention, err = config.LoadRetention(); err != nil {
 			return fmt.Errorf("serve: %w", err)
 		}
+		if opts.deliveryHold, err = config.LoadDeliveryHold(); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
 		serveOpts = opts
 	}
 
@@ -188,6 +191,9 @@ type serveOptions struct {
 	noMasterKey bool
 	// retention is the history the daily sweep keeps (TEND_RETENTION_*).
 	retention config.Retention
+	// deliveryHold bounds how long a failing notification holds back its
+	// channel (TEND_DELIVERY_HOLD_MINUTES).
+	deliveryHold time.Duration
 }
 
 // parseServeFlags parses serve's flags.
@@ -397,6 +403,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var worker *notify.Worker
 	if box != nil {
 		worker = notify.NewWorker(st, box, notify.BuildProvider, logger)
+		worker.Hold = opts.deliveryHold
 		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
 
@@ -895,6 +902,11 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
 		w := notify.NewWorker(st, box, notify.BuildProvider, logger)
+		if hold, err := config.LoadDeliveryHold(); err != nil {
+			fmt.Fprintf(stderr, "run: warning: %v; using the default\n", err)
+		} else {
+			w.Hold = hold
+		}
 		if _, err := w.DrainOnce(ctx); err != nil {
 			fmt.Fprintf(stderr, "run: warning: notification delivery: %v\n", err)
 		}
@@ -1318,6 +1330,11 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 		fmt.Fprintf(stdout, "retention:  invalid, serve will refuse to start: %v\n", err)
 	} else {
 		fmt.Fprintf(stdout, "retention:  %s\n", ret)
+	}
+	if hold, err := config.LoadDeliveryHold(); err != nil {
+		fmt.Fprintf(stdout, "delivery hold: invalid, serve will refuse to start: %v\n", err)
+	} else {
+		fmt.Fprintf(stdout, "delivery hold: %s per channel\n", hold)
 	}
 	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
 	return nil
@@ -1747,6 +1764,8 @@ Environment:
   TEND_RETENTION_EVENTS_DAYS      days of events to keep (default 30; 0 = forever)
   TEND_RETENTION_RUNS_DAYS        days of finished job runs to keep (default 90; 0 = forever)
   TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
+  TEND_DELIVERY_HOLD_MINUTES      how long a failing notification may hold back the
+                                  later ones on its channel (default 15; 0 = no ordering)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity

@@ -148,7 +148,7 @@ type Store interface {
 	// for alertable event types with matching enabled rules whose channel
 	// exists; the notify.Worker drains them. See notify.WorkerStore for the
 	// claim/lease semantics.
-	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error)
+	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]notify.Delivery, error)
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
 	FailDelivery(ctx context.Context, id int64) error

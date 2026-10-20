@@ -43,7 +43,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		emit(heartbeat.RecoveredEvent(org.ID, "nightly"))                                            // x, second
 
 		now := time.Now().Add(time.Second)
-		first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, 10)
+		first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -58,12 +58,12 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		if err := s.MarkDeliveryDelivered(ctx, first[1].ID); err != nil {
 			t.Fatalf("MarkDeliveryDelivered: %v", err)
 		}
-		if got, err := s.ClaimDueDeliveries(ctx, now, time.Minute, 10); err != nil || len(got) != 0 {
+		if got, err := s.ClaimDueDeliveries(ctx, now, time.Minute, notify.DefaultHold, 10); err != nil || len(got) != 0 {
 			t.Fatalf("claim while x's head backs off = %v (err %v), want nothing: recovered must wait for missed", claimed(got), err)
 		}
 
 		// Its retry comes due: the missed delivery goes again, still alone.
-		retry, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, 10)
+		retry, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		}
 
 		// Only now may the recovered delivery go.
-		next, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, 10)
+		next, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -88,7 +88,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		if err := s.FailDelivery(ctx, next[0].ID); err != nil {
 			t.Fatalf("FailDelivery: %v", err)
 		}
-		after, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, 10)
+		after, err := s.ClaimDueDeliveries(ctx, now.Add(2*time.Second), time.Minute, notify.DefaultHold, 10)
 		if err != nil || len(after) != 1 || after[0].Event.Payload != "weekly" {
 			t.Fatalf("claim after a give-up = %v (err %v), want the weekly miss", claimed(after), err)
 		}

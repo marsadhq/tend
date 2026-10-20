@@ -40,10 +40,11 @@ type WorkerStore interface {
 	// ClaimDueDeliveries atomically claims up to limit pending deliveries whose
 	// next_attempt_at <= now: attempts is incremented and next_attempt_at is
 	// pushed to now+lease, so a crashed worker's claims become due again after
-	// the lease (at-least-once, no stuck 'sending' state). Only the oldest
-	// pending delivery of each channel is claimable, so a channel receives its
-	// notifications in order, one at a time.
-	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]Delivery, error)
+	// the lease (at-least-once, no stuck 'sending' state). A pending delivery
+	// holds back the later ones on its channel, so a channel receives its
+	// notifications in order, one at a time, but only until it was first
+	// attempted more than hold ago; hold <= 0 turns ordering off.
+	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]Delivery, error)
 	// MarkDeliveryDelivered finalizes a delivery as delivered.
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	// RescheduleDelivery sets the next attempt time of a still-pending delivery.
@@ -64,6 +65,12 @@ type WorkerStore interface {
 // It is alertable, so it can be routed to another channel; giving up on the
 // delivery of a notification.failed never records another one (loop guard).
 const EventNotificationFailed = "notification.failed"
+
+// DefaultHold is Worker.Hold's default (and the default of serve's
+// TEND_DELIVERY_HOLD_MINUTES): long enough to ride out a short outage of the
+// destination in order, short enough that one notification it keeps failing
+// does not silence the channel for the day it takes to give it up.
+const DefaultHold = 15 * time.Minute
 
 // claimBatch bounds how many due deliveries one drain pass claims at a time.
 const claimBatch = 32
@@ -96,6 +103,10 @@ type Worker struct {
 	MaxAge time.Duration
 	// BackoffCap caps the exponential retry backoff. Default 5m.
 	BackoffCap time.Duration
+	// Hold is how long a failing delivery may hold back the later ones on its
+	// channel, counted from its first attempt; after that they go out while it
+	// keeps retrying. 0 turns per-channel ordering off. Default DefaultHold.
+	Hold time.Duration
 
 	nudge chan struct{}
 }
@@ -112,6 +123,7 @@ func NewWorker(s WorkerStore, box *secrets.Box, build func(ChannelType, []byte) 
 		Lease:      time.Minute,
 		MaxAge:     24 * time.Hour,
 		BackoffCap: 5 * time.Minute,
+		Hold:       DefaultHold,
 		nudge:      make(chan struct{}, 1),
 	}
 }
@@ -154,7 +166,7 @@ func (w *Worker) DrainOnce(ctx context.Context) (int, error) {
 		if ctx.Err() != nil {
 			return delivered, nil
 		}
-		ds, err := w.store.ClaimDueDeliveries(ctx, w.now(), w.Lease, claimBatch)
+		ds, err := w.store.ClaimDueDeliveries(ctx, w.now(), w.Lease, w.Hold, claimBatch)
 		if err != nil {
 			return delivered, err
 		}
