@@ -178,8 +178,9 @@ func TestServeRefusesAnInvalidRetentionWindow(t *testing.T) {
 func TestServeBannerShowsRetention(t *testing.T) {
 	t.Setenv("TEND_RETENTION_EVENTS_DAYS", "0")
 	_, stdout := startServe(t, keyedConfig(t))
-	if banner := stdout.String(); !strings.Contains(banner, "retention events kept forever, job runs 90d, deliveries 7d") {
-		t.Errorf("banner = %q, want the retention windows", banner)
+	want := "retention events kept forever, job runs 90d (default, up from 30d before v0.3.0; set TEND_RETENTION_RUNS_DAYS to change), deliveries 7d"
+	if banner := stdout.String(); !strings.Contains(banner, want) {
+		t.Errorf("banner = %q, want %q", banner, want)
 	}
 }
 
