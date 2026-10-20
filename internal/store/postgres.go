@@ -544,14 +544,19 @@ func (s *PostgresStore) ReapStaleRun(ctx context.Context, runID int64, output st
 	return true, nil
 }
 
-// RequeueOrphanedRuns resets every run still in 'running' back to 'pending',
-// clearing claimed_by and started_at. The single-instance runner has no peer
-// workers, so any 'running' row found at startup was orphaned by a crash;
-// re-queueing it re-runs the work (at-least-once). Returns rows affected.
+// RequeueOrphanedRuns resets every run still in 'running' that serve's own
+// runner claimed back to 'pending', clearing claimed_by and started_at. serve
+// is single-instance, so such a run found at its startup was orphaned by a
+// crash; re-queueing it re-runs the work (at-least-once). A run claimed by a
+// one-off `tend run` (claimed_by starting with jobs.ManualClaimantPrefix) is
+// left alone: that process may still be executing it, and requeueing it would
+// run the job twice. If the process died instead, the reaper fails the run
+// once its time limit has passed. Returns rows affected.
 func (s *PostgresStore) RequeueOrphanedRuns(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE job_runs SET status = $1, claimed_by = NULL, started_at = NULL WHERE status = $2`,
-		string(jobs.StatusPending), string(jobs.StatusRunning))
+		`UPDATE job_runs SET status = $1, claimed_by = NULL, started_at = NULL
+		 WHERE status = $2 AND (claimed_by IS NULL OR claimed_by NOT LIKE $3)`,
+		string(jobs.StatusPending), string(jobs.StatusRunning), jobs.ManualClaimantPrefix+"%")
 	if err != nil {
 		return 0, fmt.Errorf("requeue orphaned runs: %w", err)
 	}

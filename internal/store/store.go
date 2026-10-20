@@ -95,7 +95,7 @@ type Store interface {
 	FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error)
 	GetRun(ctx context.Context, orgID, runID int64) (jobs.Run, error)                // run detail incl. Output; ErrNotFound for a foreign/absent id
 	ListRuns(ctx context.Context, orgID, jobID int64, limit int) ([]jobs.Run, error) // newest first
-	RequeueOrphanedRuns(ctx context.Context) (int64, error)                          // reset 'running' runs -> 'pending' (crash recovery); returns rows affected
+	RequeueOrphanedRuns(ctx context.Context) (int64, error)                          // reset serve's 'running' runs -> 'pending' (crash recovery), never a `tend run`'s; returns rows affected
 	ListRunningRuns(ctx context.Context) ([]jobs.Run, error)                         // all 'running' runs (all orgs), for the reaper sweep
 	// ReapStaleRun atomically fails a run still in 'running' and appends ev in the
 	// same transaction (mirrors FinishRunAndEmit). false = run already terminal.
