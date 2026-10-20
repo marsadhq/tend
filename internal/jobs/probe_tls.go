@@ -146,7 +146,7 @@ func (e *Executor) runOnceTLS(ctx context.Context, j Job, attempt int, started t
 	if err := ValidateSpec(TLS, &s); err != nil {
 		return probeErrorResult(ctx, attempt, started, err)
 	}
-	addr := net.JoinHostPort(s.Host, strconv.Itoa(s.tlsPort()))
+	addr := net.JoinHostPort(s.Host, strconv.Itoa(s.TLSPort()))
 	name := s.tlsName()
 	var roots *x509.CertPool
 	if s.CAFile != "" {
@@ -181,8 +181,9 @@ func (e *Executor) runOnceTLS(ctx context.Context, j Job, attempt int, started t
 		name, humanDays(na.Sub(now)), dateText(na), warnText(s.WarnDays)))
 }
 
-// tlsPort is the port a tls probe connects to.
-func (s Spec) tlsPort() int {
+// TLSPort is the port a tls probe connects to: Port, or the default for its
+// STARTTLS protocol.
+func (s Spec) TLSPort() int {
 	if s.Port > 0 {
 		return s.Port
 	}

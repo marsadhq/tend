@@ -3,8 +3,10 @@ package httpserver
 import (
 	"embed"
 	"errors"
+	"fmt"
 	"html/template"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -264,16 +266,48 @@ func scheduleOf(j jobs.Job) string {
 	}
 }
 
-// targetOf returns a non-secret target hint for the job (http jobs only).
+// targetOf returns a non-secret target hint for the job: what an http job
+// calls, what a probe watches, what a drill restores. Shell jobs have none.
 func targetOf(j jobs.Job) string {
-	if j.Type != jobs.HTTP {
+	if j.Type == jobs.HTTP {
+		method := j.HTTPMethod
+		if method == "" {
+			method = "GET"
+		}
+		return method + " " + j.HTTPURL
+	}
+	if j.Spec == nil {
 		return ""
 	}
-	method := j.HTTPMethod
-	if method == "" {
-		method = "GET"
+	s := *j.Spec
+	warns := fmt.Sprintf(" (warns %d days before)", s.WarnDays)
+	if s.WarnDays == 0 {
+		warns = " (warns once expired)"
 	}
-	return method + " " + j.HTTPURL
+	switch j.Type {
+	case jobs.TLS:
+		target := net.JoinHostPort(s.Host, strconv.Itoa(s.TLSPort()))
+		if s.StartTLS != "" {
+			target += " (STARTTLS " + s.StartTLS + ")"
+		}
+		return target
+	case jobs.Domain:
+		return s.Domain + warns
+	case jobs.Expiry:
+		if s.ExpiryCommand != "" {
+			return "date from: " + s.ExpiryCommand
+		}
+		return s.ExpiresAt.UTC().Format(time.RFC3339) + warns
+	case jobs.Drill:
+		switch len(s.Checks) {
+		case 0:
+			return s.Restore + " (no checks)"
+		case 1:
+			return s.Restore + " (1 check)"
+		}
+		return fmt.Sprintf("%s (%d checks)", s.Restore, len(s.Checks))
+	}
+	return ""
 }
 
 // timeoutOf renders the job timeout (or the executor default sentinel).

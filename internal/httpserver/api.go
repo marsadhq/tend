@@ -101,6 +101,55 @@ type jobDTO struct {
 	NextRunAt       time.Time `json:"next_run_at,omitzero"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+	Spec            *specDTO  `json:"spec,omitempty"` // tls, domain, expiry and drill jobs
+}
+
+// specDTO is the wire shape of a probe's or a drill's settings: only the
+// fields of the job's type. None of them is secret material (secrets reach
+// the commands through env, which no DTO carries).
+type specDTO struct {
+	WarnDays           *int      `json:"warn_days,omitempty"`
+	Host               string    `json:"host,omitempty"`
+	Port               int       `json:"port,omitempty"`
+	ServerName         string    `json:"server_name,omitempty"`
+	StartTLS           string    `json:"starttls,omitempty"`
+	InsecureSkipVerify bool      `json:"insecure_skip_verify,omitempty"`
+	CAFile             string    `json:"ca_file,omitempty"`
+	RenewAfterFraction *float64  `json:"renew_after_fraction,omitempty"`
+	Domain             string    `json:"domain,omitempty"`
+	RDAPURL            string    `json:"rdap_url,omitempty"`
+	ExpiresAt          time.Time `json:"expires_at,omitzero"`
+	ExpiryCommand      string    `json:"expiry_command,omitempty"`
+	Restore            string    `json:"restore,omitempty"`
+	Checks             []string  `json:"checks,omitempty"`
+	Cleanup            string    `json:"cleanup,omitempty"`
+	ScratchDir         string    `json:"scratch_dir,omitempty"`
+	MaxDurationSeconds int       `json:"max_duration_seconds,omitempty"`
+}
+
+// fromSpec is the DTO of the settings of job j, nil for a job without any.
+func fromSpec(j jobs.Job) *specDTO {
+	if j.Spec == nil || !jobs.HasSpec(j.Type) {
+		return nil
+	}
+	s := *j.Spec
+	d := &specDTO{}
+	if j.Type != jobs.Drill {
+		d.WarnDays = &s.WarnDays
+	}
+	switch j.Type {
+	case jobs.TLS:
+		d.Host, d.Port, d.ServerName, d.StartTLS = s.Host, s.Port, s.ServerName, s.StartTLS
+		d.InsecureSkipVerify, d.CAFile, d.RenewAfterFraction = s.InsecureSkipVerify, s.CAFile, &s.RenewAfterFraction
+	case jobs.Domain:
+		d.Domain, d.RDAPURL = s.Domain, s.RDAPURL
+	case jobs.Expiry:
+		d.ExpiresAt, d.ExpiryCommand = s.ExpiresAt, s.ExpiryCommand
+	case jobs.Drill:
+		d.Restore, d.Checks, d.Cleanup = s.Restore, s.Checks, s.Cleanup
+		d.ScratchDir, d.MaxDurationSeconds = s.ScratchDir, s.MaxDurationSeconds
+	}
+	return d
 }
 
 func fromJob(j jobs.Job) jobDTO {
@@ -119,6 +168,7 @@ func fromJob(j jobs.Job) jobDTO {
 		NextRunAt:       j.NextRunAt,
 		CreatedAt:       j.CreatedAt,
 		UpdatedAt:       j.UpdatedAt,
+		Spec:            fromSpec(j),
 	}
 }
 
