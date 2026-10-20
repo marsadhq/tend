@@ -209,3 +209,59 @@ func TestMarkDownLosesToANewerStart(t *testing.T) {
 		}
 	})
 }
+
+// TestRecoveryIsStampedAfterTheMissItEnds: a ping's time is taken when the
+// request arrives, before rate limiting, the body read and the wait for the
+// database. If the watcher records heartbeat.missed in that gap, the
+// recovery the ping then records must still be stamped after the miss:
+// receivers (Ward) order a heartbeat's events by CreatedAt and refuse an
+// older recovery as stale. Events are stamped when they are written.
+func TestRecoveryIsStampedAfterTheMissItEnds(t *testing.T) {
+	ctx := context.Background()
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "late", Token: "tok-late-stamp", PeriodSeconds: 60}); err != nil {
+			t.Fatal(err)
+		}
+		real := time.Now()
+		ping(t, ctx, s, "tok-late-stamp", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, real.Add(-2*time.Minute))
+
+		arrived := time.Now() // the request arrives and takes its time here
+		fk := clock.NewFake(time.Now())
+		if err := heartbeat.NewWatcher(s, fk, nil, nil).Check(ctx); err != nil {
+			t.Fatal(err)
+		}
+		missed := eventsOfType(t, ctx, s, org.ID, heartbeat.EventMissed)
+		if len(missed) != 1 {
+			t.Fatalf("heartbeat.missed events = %d, want 1", len(missed))
+		}
+		res := ping(t, ctx, s, "tok-late-stamp", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, arrived)
+		if res.Event == nil || res.Event.Type != heartbeat.EventRecovered {
+			t.Fatalf("ping result %+v, want a recovery", res)
+		}
+		rec := eventsOfType(t, ctx, s, org.ID, heartbeat.EventRecovered)
+		if len(rec) != 1 || !rec[0].CreatedAt.After(missed[0].CreatedAt) || rec[0].ID <= missed[0].ID {
+			t.Fatalf("recovered %v (id %d) is not after missed %v (id %d)", rec[0].CreatedAt, rec[0].ID, missed[0].CreatedAt, missed[0].ID)
+		}
+
+		// The same holds for a miss a failure ping records after a recovery.
+		arrived = time.Now()
+		ping(t, ctx, s, "tok-late-stamp", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, time.Now())
+		res = ping(t, ctx, s, "tok-late-stamp", heartbeat.PingInput{Kind: heartbeat.PingFail}, arrived)
+		if res.Event == nil {
+			t.Fatal("the failure recorded no event")
+		}
+		evs, err := s.ListHeartbeatEvents(ctx, org.ID, "late", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(evs); i++ { // newest first
+			if !evs[i].CreatedAt.After(evs[i+1].CreatedAt) {
+				t.Fatalf("event %d (%s, %v) is not after event %d (%s, %v)", evs[i].ID, evs[i].Type, evs[i].CreatedAt, evs[i+1].ID, evs[i+1].Type, evs[i+1].CreatedAt)
+			}
+		}
+	})
+}

@@ -1607,8 +1607,8 @@ func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args 
 		fmt.Fprintf(stdout, "(no pings or transitions recorded for %q)\n", name)
 		return nil
 	}
-	// Merge newest first. A transition is listed above the ping that made
-	// it, which carries the same time.
+	// Merge newest first. A transition is stamped when it was written, just
+	// after the ping that made it arrived, so it is listed above that ping.
 	for n := 0; n < *limit && (len(evs) > 0 || len(pings) > 0); n++ {
 		if len(evs) > 0 && (len(pings) == 0 || !evs[0].CreatedAt.Before(pings[0].CreatedAt)) {
 			e := evs[0]
