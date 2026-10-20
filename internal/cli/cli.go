@@ -94,6 +94,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		if cfg.MasterKey == "" && !opts.noMasterKey {
 			return errNoMasterKey
 		}
+		if opts.retention, err = config.LoadRetention(); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
 		serveOpts = opts
 	}
 
@@ -177,11 +180,14 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 var errNoMasterKey = errors.New("serve: refusing to start without TEND_MASTER_KEY: without it no alert can be sent and the dashboard is off " +
 	"(set it to a stable key from `head -c 32 /dev/urandom | base64`, or pass --no-master-key to run a local experiment without alerts or dashboard)")
 
-// serveOptions are serve's command-line flags.
+// serveOptions are serve's command-line flags plus the settings Run reads
+// for it from the environment before the store is opened.
 type serveOptions struct {
 	// noMasterKey lets serve start without TEND_MASTER_KEY, with alerts and
 	// the dashboard off. A key that is set is used regardless.
 	noMasterKey bool
+	// retention is the history the daily sweep keeps (TEND_RETENTION_*).
+	retention config.Retention
 }
 
 // parseServeFlags parses serve's flags.
@@ -208,14 +214,42 @@ const watcherInterval = 30 * time.Second
 // otherwise grow without bound. The sweep also runs once at startup.
 const retentionSweepInterval = 24 * time.Hour
 
-// Retention windows for the daily sweep. Events and job runs are the forensic
-// record (kept a month); finalized deliveries only matter while debugging a
-// recent notification problem (kept a week -- pending rows are never pruned).
-const (
-	eventRetention    = 30 * 24 * time.Hour
-	jobRunRetention   = 30 * 24 * time.Hour
-	deliveryRetention = 7 * 24 * time.Hour
-)
+// retentionSweep prunes the history older than ret's windows (a zero window
+// keeps that history forever) and then, when the prune deleted anything, gives
+// the freed space back to the file system if there is enough of it (see
+// store.ReclaimSpace). Errors are logged, never fatal: a failed sweep just
+// retries on the next tick.
+func retentionSweep(ctx context.Context, st store.Store, now time.Time, ret config.Retention, logger *slog.Logger) {
+	var deleted int64
+	prune := func(what string, fn func(context.Context, time.Time) (int64, error), window time.Duration) {
+		if window <= 0 {
+			return // kept forever
+		}
+		n, err := fn(ctx, now.Add(-window))
+		switch {
+		case err != nil && ctx.Err() == nil:
+			logger.Error("retention sweep: prune "+what, "err", err)
+		case n > 0:
+			logger.Info("retention sweep: pruned "+what, "rows", n)
+			deleted += n
+		}
+	}
+	prune("events", st.PruneEvents, ret.Events)
+	prune("job runs", st.PruneJobRuns, ret.JobRuns)
+	prune("deliveries", st.PruneDeliveries, ret.Deliveries)
+	if deleted == 0 || ctx.Err() != nil {
+		return
+	}
+	reclaimed, err := st.ReclaimSpace(ctx)
+	switch {
+	case errors.Is(err, store.ErrCompactTooLarge):
+		logger.Warn("retention sweep: space not reclaimed", "err", err)
+	case err != nil && ctx.Err() == nil:
+		logger.Error("retention sweep: reclaim space", "err", err)
+	case reclaimed > 0:
+		logger.Info("retention sweep: reclaimed disk space", "bytes", reclaimed)
+	}
+}
 
 // serveShutdownTimeout bounds the HTTP server's graceful drain on ctx cancel.
 const serveShutdownTimeout = 5 * time.Second
@@ -381,8 +415,8 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	if authCfg != nil {
 		dashboardOn = "on"
 	}
-	fmt.Fprintf(stdout, "tend serve: runner + http(%s) + heartbeat watcher running; alerts %s; dashboard %s; db %s(%s) org %q (Ctrl-C to stop)\n",
-		addr, alertsOn, dashboardOn, redactDSN(cfg.Driver, cfg.DSN), cfg.Driver, org.Name)
+	fmt.Fprintf(stdout, "tend serve: runner + http(%s) + heartbeat watcher running; alerts %s; dashboard %s; db %s(%s) org %q; retention %s (Ctrl-C to stop)\n",
+		addr, alertsOn, dashboardOn, redactDSN(cfg.Driver, cfg.DSN), cfg.Driver, org.Name, opts.retention)
 
 	// serveCtx is cancelled either by the parent (SIGINT/SIGTERM) or by the HTTP
 	// goroutine on a fatal bind/listen error so that all components tear down
@@ -468,26 +502,11 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 
 	// --- retention sweep ---
 	// Prunes old events/job_runs/deliveries once at startup and then daily so
-	// the audit tables stay bounded. Errors are logged, never fatal: a failed
-	// sweep just retries next tick.
+	// the audit tables stay bounded, then reclaims the space (retentionSweep).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sweep := func() {
-			now := clk.Now()
-			prune := func(what string, fn func(context.Context, time.Time) (int64, error), retention time.Duration) {
-				n, err := fn(serveCtx, now.Add(-retention))
-				switch {
-				case err != nil && serveCtx.Err() == nil:
-					logger.Error("retention sweep: prune "+what, "err", err)
-				case n > 0:
-					logger.Info("retention sweep: pruned "+what, "rows", n)
-				}
-			}
-			prune("events", st.PruneEvents, eventRetention)
-			prune("job runs", st.PruneJobRuns, jobRunRetention)
-			prune("deliveries", st.PruneDeliveries, deliveryRetention)
-		}
+		sweep := func() { retentionSweep(serveCtx, st, clk.Now(), opts.retention, logger) }
 		sweep()
 		t := time.NewTicker(retentionSweepInterval)
 		defer t.Stop()
@@ -1289,6 +1308,11 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 	fmt.Fprintf(stdout, "org:        %d %q\n", org.ID, org.Name)
 	fmt.Fprintf(stdout, "base url:   %s\n", baseURL())
 	fmt.Fprintf(stdout, "master key: %s\n", masterKey)
+	if ret, err := config.LoadRetention(); err != nil {
+		fmt.Fprintf(stdout, "retention:  invalid, serve will refuse to start: %v\n", err)
+	} else {
+		fmt.Fprintf(stdout, "retention:  %s\n", ret)
+	}
 	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
 	return nil
 }
@@ -1697,7 +1721,8 @@ Runs these components until interrupted (Ctrl-C):
   - the HTTP server (heartbeat ping + healthz; dashboard/API)
   - the heartbeat watcher (flags missed dead-man's-switch pings)
   - the notification delivery worker
-  - a daily retention sweep (prunes old events, job runs, and deliveries)
+  - a daily retention sweep (prunes old events, job runs, and deliveries,
+    then gives the space back on SQLite)
 
 serve refuses to start without TEND_MASTER_KEY: channel configs are encrypted
 with it, so without it nothing can be alerted on, and the dashboard needs it
@@ -1713,6 +1738,9 @@ Environment:
   TEND_ADDR            listen address (default ":8080")
   TEND_COOKIE_SECURE   mark session cookie Secure (default off; set behind TLS)
   TEND_TRUST_PROXY     honor X-Forwarded-For for rate-limit keying (default off)
+  TEND_RETENTION_EVENTS_DAYS      days of events to keep (default 30; 0 = forever)
+  TEND_RETENTION_RUNS_DAYS        days of finished job runs to keep (default 90; 0 = forever)
+  TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity

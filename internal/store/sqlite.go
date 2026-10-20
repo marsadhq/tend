@@ -1360,6 +1360,114 @@ func (s *SQLiteStore) PruneDeliveries(ctx context.Context, before time.Time) (in
 	return n, nil
 }
 
+// --- reclaiming space -------------------------------------------------------
+
+// Thresholds for ReclaimSpace. Pages a delete frees are reused by later
+// inserts, so giving them back to the file system only pays when there are
+// many: at least reclaimMinFreeBytes and at least reclaimMinFreeRatio of the
+// file. A full VACUUM (needed once, to switch a database to incremental
+// vacuum) rewrites the whole file while holding the write lock, so it is only
+// done while serving for a file of at most reclaimMaxVacuumBytes. Vars so
+// tests can lower them.
+var (
+	reclaimMinFreeBytes   int64 = 8 << 20
+	reclaimMinFreeRatio         = 0.25
+	reclaimMaxVacuumBytes int64 = 512 << 20
+)
+
+// incrementalVacuumPages is how many free pages one incremental_vacuum step
+// gives back. Each step is its own short write, so pings and runs are never
+// held up for long.
+const incrementalVacuumPages = 2048
+
+// ReclaimSpace returns the space freed by pruning to the file system when
+// there is enough of it to be worth it (see reclaimMinFreeBytes), and reports
+// how many bytes the database file shrank by.
+//
+// A database already in incremental auto-vacuum mode is shrunk in short
+// incremental_vacuum steps. Any other database (every one created by an
+// earlier version) is switched to that mode by one VACUUM, which compacts it
+// at the same time; a file larger than reclaimMaxVacuumBytes is not rewritten
+// while serving and ErrCompactTooLarge is returned instead, for the operator
+// to VACUUM it offline. The write-ahead log is truncated afterwards.
+func (s *SQLiteStore) ReclaimSpace(ctx context.Context) (int64, error) {
+	// One connection throughout: PRAGMA auto_vacuum only takes effect through
+	// a VACUUM run on the connection that set it.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reclaim space: %w", err)
+	}
+	defer conn.Close()
+
+	pragma := func(name string) (int64, error) {
+		var v int64
+		if err := conn.QueryRowContext(ctx, "PRAGMA "+name).Scan(&v); err != nil {
+			return 0, fmt.Errorf("reclaim space: PRAGMA %s: %w", name, err)
+		}
+		return v, nil
+	}
+	pageSize, err := pragma("page_size")
+	if err != nil {
+		return 0, err
+	}
+	size := func() (pages, free int64, err error) {
+		if pages, err = pragma("page_count"); err != nil {
+			return 0, 0, err
+		}
+		free, err = pragma("freelist_count")
+		return pages, free, err
+	}
+	pages, free, err := size()
+	if err != nil {
+		return 0, err
+	}
+	freeBytes, fileBytes := free*pageSize, pages*pageSize
+	if freeBytes < reclaimMinFreeBytes || float64(freeBytes) < reclaimMinFreeRatio*float64(fileBytes) {
+		return 0, nil
+	}
+	mode, err := pragma("auto_vacuum")
+	if err != nil {
+		return 0, err
+	}
+
+	const incremental = 2
+	if mode == incremental {
+		for free > 0 && ctx.Err() == nil {
+			if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", incrementalVacuumPages)); err != nil {
+				return 0, fmt.Errorf("reclaim space: incremental vacuum: %w", err)
+			}
+			_, left, err := size()
+			if err != nil {
+				return 0, err
+			}
+			if left >= free {
+				break // no progress; do not spin
+			}
+			free = left
+		}
+	} else {
+		if fileBytes > reclaimMaxVacuumBytes {
+			return 0, fmt.Errorf("%w: %d MiB of the %d MiB file is free", ErrCompactTooLarge, freeBytes>>20, fileBytes>>20)
+		}
+		if _, err := conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
+			return 0, fmt.Errorf("reclaim space: set auto_vacuum: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx, "VACUUM"); err != nil {
+			return 0, fmt.Errorf("reclaim space: vacuum: %w", err)
+		}
+	}
+	// The pages moved by the vacuum went through the write-ahead log; give
+	// that space back as well. A busy reader can keep the log from being
+	// truncated, which is harmless: the next checkpoint does it.
+	_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+
+	after, err := pragma("page_count")
+	if err != nil {
+		return 0, err
+	}
+	return (pages - after) * pageSize, nil
+}
+
 // --- heartbeats ----------------------------------------------------------
 
 // CreateHeartbeat upserts a heartbeat by (org, name), returning its row ID and

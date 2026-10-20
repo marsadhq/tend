@@ -139,7 +139,8 @@ dialects force it:
 - **Retention pruning.** `PruneEvents`, `PruneJobRuns`, and `PruneDeliveries`
   hard-delete rows created before a cutoff. They never touch pending or
   running runs, pending deliveries, or an event that a pending delivery still
-  references.
+  references. `ReclaimSpace` gives freed space back afterwards (SQLite only;
+  see §8).
 
 The claim path differs subtly by engine: SQLite serializes writes at the pool
 (`SetMaxOpenConns(1)`) and uses a single atomic `UPDATE … RETURNING` to claim the
@@ -479,10 +480,19 @@ These limits are constants in the code, not configuration.
   redaction. The capture cap does not: it falls on the raw bytes, so the first
   part of a secret that straddles the end of a capture cut at 1 MiB matches
   nothing and is stored. This is a known limitation.
-- **Retention sweep.** `serve` prunes at startup and every 24 hours: events and
-  terminal job runs older than 30 days, finalized deliveries older than 7 days
-  (the constants sit next to `cmdServe`). A failed sweep is logged and retried
-  on the next tick.
+- **Retention sweep.** `serve` prunes at startup and every 24 hours: by default
+  events older than 30 days, terminal job runs older than 90 days, finalized
+  deliveries older than 7 days (`config.LoadRetention`, from
+  `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS` and
+  `TEND_RETENTION_DELIVERIES_DAYS`; `0` keeps that history forever and an
+  invalid value stops `serve` from starting). When the sweep deleted rows it
+  calls `ReclaimSpace`: on SQLite, once at least 8 MiB and a quarter of the file
+  is free, the first call switches the file to incremental auto-vacuum with one
+  `VACUUM` (only for a file of at most 512 MiB; a larger one is logged for an
+  offline `VACUUM`), and later calls free pages in short `incremental_vacuum`
+  steps so pings and runs are never held up for long. On Postgres it does
+  nothing; autovacuum makes the space reusable. A failed sweep is logged and
+  retried on the next tick.
 - **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
   and `IdleTimeout` are all 10 seconds (`newHTTPServer` in `internal/cli`).
   Every handler is quick and the largest request body is a login form, so a

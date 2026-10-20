@@ -17,3 +17,13 @@ func RawDB(s Store) *sql.DB {
 // FormatTime exposes the storage timestamp layout to external tests (e.g. for
 // backdating rows to exercise retention pruning).
 var FormatTime = formatTime
+
+// SetReclaimThresholds lowers ReclaimSpace's thresholds for a test and returns
+// a func that restores them.
+func SetReclaimThresholds(minFreeBytes int64, minFreeRatio float64, maxVacuumBytes int64) (restore func()) {
+	oldMin, oldRatio, oldMax := reclaimMinFreeBytes, reclaimMinFreeRatio, reclaimMaxVacuumBytes
+	reclaimMinFreeBytes, reclaimMinFreeRatio, reclaimMaxVacuumBytes = minFreeBytes, minFreeRatio, maxVacuumBytes
+	return func() {
+		reclaimMinFreeBytes, reclaimMinFreeRatio, reclaimMaxVacuumBytes = oldMin, oldRatio, oldMax
+	}
+}
