@@ -157,3 +157,28 @@ func TestServeWithMasterKeyIgnoresOptOut(t *testing.T) {
 		t.Errorf("with a key set, banner = %q, want alerts on and dashboard on", banner)
 	}
 }
+
+// TestServeRefusesAnInvalidRetentionWindow: a retention value that is not a
+// whole number of days stops serve before it opens the database.
+func TestServeRefusesAnInvalidRetentionWindow(t *testing.T) {
+	t.Setenv("TEND_ADDR", "127.0.0.1:0")
+	t.Setenv("TEND_RETENTION_RUNS_DAYS", "90d")
+	cfg := keyedConfig(t)
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "TEND_RETENTION_RUNS_DAYS") {
+		t.Fatalf("serve with TEND_RETENTION_RUNS_DAYS=90d: err = %v, want an error naming the variable", err)
+	}
+	if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+		t.Errorf("a refused serve must not create the database (stat err = %v)", statErr)
+	}
+}
+
+// TestServeBannerShowsRetention: the banner prints the windows in effect.
+func TestServeBannerShowsRetention(t *testing.T) {
+	t.Setenv("TEND_RETENTION_EVENTS_DAYS", "0")
+	_, stdout := startServe(t, keyedConfig(t))
+	if banner := stdout.String(); !strings.Contains(banner, "retention events kept forever, job runs 90d, deliveries 7d") {
+		t.Errorf("banner = %q, want the retention windows", banner)
+	}
+}

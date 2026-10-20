@@ -20,6 +20,11 @@ import (
 // ErrNotFound is returned by Get* methods when no matching row exists.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrCompactTooLarge is returned by ReclaimSpace when compacting the database
+// would mean rewriting a file too large to rewrite while serving. Stop Tend
+// and run VACUUM on the file to compact it.
+var ErrCompactTooLarge = errors.New("store: database too large to compact while serving; stop tend and VACUUM it offline")
+
 // SecretMeta is the non-secret metadata of a stored secret. It deliberately has
 // NO ciphertext/value field so a listing of secrets can never carry secret
 // material; ListSecrets selects only name and created_at.
@@ -130,6 +135,13 @@ type Store interface {
 	PruneEvents(ctx context.Context, before time.Time) (int64, error)
 	PruneJobRuns(ctx context.Context, before time.Time) (int64, error)
 	PruneDeliveries(ctx context.Context, before time.Time) (int64, error)
+	// ReclaimSpace gives the space pruning freed back to the file system when
+	// there is enough of it to matter, and returns the bytes the database
+	// shrank by. SQLite compacts (once switching the file to incremental
+	// auto-vacuum, then in short steps), returning ErrCompactTooLarge instead
+	// of rewriting a large file while serving; Postgres does nothing, as
+	// autovacuum already makes the space reusable.
+	ReclaimSpace(ctx context.Context) (int64, error)
 
 	// durable notification deliveries. Pending rows are enqueued transactionally
 	// by every event insert (EmitEvent / FinishRunAndEmit / ReapStaleRun) for

@@ -1010,6 +1010,12 @@ func (s *PostgresStore) PruneDeliveries(ctx context.Context, before time.Time) (
 	return n, nil
 }
 
+// ReclaimSpace is a no-op on Postgres, which reclaims the space of deleted
+// rows itself (autovacuum) for reuse. Shrinking the files would take VACUUM
+// FULL, which locks each table for the whole rewrite, so it is left to the
+// operator.
+func (s *PostgresStore) ReclaimSpace(context.Context) (int64, error) { return 0, nil }
+
 // --- heartbeats ----------------------------------------------------------
 
 // DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound, and
