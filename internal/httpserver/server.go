@@ -1,8 +1,9 @@
 // Package httpserver implements Tend's minimal HTTP surface: a liveness probe
-// and the heartbeat (dead-man's-switch) ping endpoint. External jobs POST (or
-// GET) /ping/{token} on each successful run; the server records the ping, which
-// flips a previously-'down' heartbeat back to 'up' and emits a
-// heartbeat.recovered event.
+// and the heartbeat (dead-man's-switch) ping API, compatible with the one of
+// Healthchecks. External jobs ping /ping/{token} on each successful run (and
+// /start, /fail, /log or /<exit-status> for more); the server records the
+// ping, which flips a previously-'down' heartbeat back to 'up' and emits a
+// heartbeat.recovered event, or takes it down on a failure.
 //
 // The server depends only on the store, clock, and core packages (no import
 // cycle: the store does not import httpserver). Everything is stdlib net/http.
@@ -10,15 +11,12 @@ package httpserver
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/kit/httpx"
 	"github.com/marsadhq/tend/internal/core"
-	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
 
@@ -77,8 +75,8 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 //
 // Public routes (always registered, never gated by requireAuth):
 //
-//   - GET       /healthz       -> 200 liveness probe
-//   - POST|GET  /ping/{token}  -> record a heartbeat ping
+//   - GET            /healthz   -> 200 liveness probe
+//   - HEAD|GET|POST  /ping/...  -> record a heartbeat ping (handlePing)
 //
 // When auth is configured, Handler also registers the public auth surface
 // (GET/POST /login, the /static/ asset prefix) and mounts the requireAuth-gated
@@ -95,8 +93,9 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("POST /ping/{token}", s.handlePing)
-	mux.HandleFunc("GET /ping/{token}", s.handlePing)
+	// The ping API: /ping/<token>[/start|/fail|/log|/<exit-status>] and the
+	// slug forms, for HEAD, GET and POST (see handlePing).
+	mux.HandleFunc("/ping/", s.handlePing)
 
 	if s.auth == nil {
 		return httpx.SecurityHeaders(mux)
@@ -135,84 +134,4 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", s.requireAuth(authed))
 
 	return httpx.SecurityHeaders(mux)
-}
-
-// Ping limits; see the limiters in New.
-const (
-	pingMissRate   = 1
-	pingMissBurst  = 30
-	pingTokenRate  = 1
-	pingTokenBurst = 10
-)
-
-// pingWriteTimeout bounds recording one ping. The write runs detached from the
-// request (see handlePing), so this is what stops it from running forever.
-const pingWriteTimeout = 10 * time.Second
-
-// handlePing records a dead-man's-switch ping. On a down->up recovery the store
-// appends heartbeat.recovered, with the deliveries its rules match, in the same
-// transaction as the status change; the dispatch func only nudges the delivery
-// worker. Nothing here blocks on a slow destination, so the ping response is
-// never held hostage by a down webhook receiver.
-//
-// The write is detached from the request's context: once a ping has arrived it
-// is recorded in full even if the client times out or disconnects meanwhile,
-// so a recovery can no longer be committed without its event, or skipped
-// because the caller went away. pingWriteTimeout bounds it instead.
-//
-// Rate limiting happens here rather than in a RateLimiter.Limit wrapper,
-// because it depends on whether the token is real. Before the database is
-// touched, a request is refused (429 with Retry-After) when its client address
-// has used up its budget of unknown tokens, or its token its own ping budget.
-// A miss then costs the address one unit; a real ping costs its token one, and
-// nothing per address. Pings from one host for many heartbeats, all on the
-// same minute, therefore never crowd each other out, while an address that
-// keeps guessing tokens is cut off whatever it sends next.
-func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
-	token := r.PathValue("token")
-	now := s.clk.Now()
-	missKey, tokenKey := clientIP(r)+"|ping-miss", "ping-token|"+token
-	if !s.pingMissLimiter.Has(missKey, now) {
-		httpx.TooManyRequests(w, s.pingMissLimiter)
-		return
-	}
-	if !s.pingTokenLimiter.Has(tokenKey, now) {
-		httpx.TooManyRequests(w, s.pingTokenLimiter)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pingWriteTimeout)
-	defer cancel()
-	orgID, name, recovered, err := s.store.RecordPing(ctx, token, now)
-	if errors.Is(err, store.ErrNotFound) {
-		s.pingMissLimiter.Allow(missKey, now)
-		http.NotFound(w, r)
-		return
-	}
-	if err == nil {
-		s.pingTokenLimiter.Allow(tokenKey, now)
-	}
-	if err != nil {
-		// A real DB error must not masquerade as a 404. The token is a
-		// credential, so log only a truncated hint, never the full value.
-		s.log.Error("record ping failed", "token_hint", tokenHint(token), "err", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	if recovered && s.dispatch != nil {
-		s.dispatch(ctx, heartbeat.RecoveredEvent(orgID, name))
-	}
-
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
-}
-
-// tokenHint returns a short, non-sensitive prefix of a ping token for logs, so
-// the full token (a credential) is never written to a log aggregator.
-func tokenHint(token string) string {
-	if len(token) <= 8 {
-		return "********"
-	}
-	return token[:8] + "..."
 }
