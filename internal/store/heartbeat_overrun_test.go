@@ -265,3 +265,54 @@ func TestRecoveryIsStampedAfterTheMissItEnds(t *testing.T) {
 		}
 	})
 }
+
+// TestStartedRunWithoutGraceGetsAPeriod: tend exec sends /start by default and
+// a heartbeat's grace defaults to 0, so a run is allowed a period there, not
+// nothing: a run lasting past the next watcher tick is not reported, one
+// lasting longer than a period is, as overran with that limit.
+func TestStartedRunWithoutGraceGetsAPeriod(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "nograce", Token: "tok-nograce", PeriodSeconds: 3600})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ping(t, ctx, s, "tok-nograce", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, base)
+		fk := clock.NewFake(base)
+		w := heartbeat.NewWatcher(s, fk, nil, nil)
+
+		// A run that starts and takes 40 seconds is fine.
+		start := base.Add(time.Minute)
+		ping(t, ctx, s, "tok-nograce", heartbeat.PingInput{Kind: heartbeat.PingStart}, start)
+		checkAt(t, ctx, w, fk, start.Add(30*time.Second))
+		ping(t, ctx, s, "tok-nograce", heartbeat.PingInput{Kind: heartbeat.PingSuccess}, start.Add(40*time.Second))
+		if hb := getHB(t, ctx, s, org.ID, id); hb.Status != "up" {
+			t.Fatalf("a 40 s run with grace 0: status %q, want up", hb.Status)
+		}
+
+		// One that hangs is reported once a period has passed since it
+		// started (here a concurrent run's success, with another rid, keeps
+		// the regular deadline later than that).
+		start = base.Add(2 * time.Minute)
+		ping(t, ctx, s, "tok-nograce", heartbeat.PingInput{Kind: heartbeat.PingStart, RID: "728b3763-ea80-4113-9fc0-f49b3adf226a"}, start)
+		ping(t, ctx, s, "tok-nograce", heartbeat.PingInput{Kind: heartbeat.PingSuccess, RID: "0b2f8a8e-4a46-4b0e-9a1c-3f0e2d8f1c55"}, start.Add(5*time.Minute))
+		checkAt(t, ctx, w, fk, start.Add(59*time.Minute))
+		if hb := getHB(t, ctx, s, org.ID, id); hb.Status != "up" {
+			t.Fatalf("within a period of its start: status %q, want up", hb.Status)
+		}
+		checkAt(t, ctx, w, fk, start.Add(time.Hour+time.Second))
+		if hb := getHB(t, ctx, s, org.ID, id); hb.Status != "down" {
+			t.Fatalf("a period after its start: status %q, want down", hb.Status)
+		}
+		missed := eventsOfType(t, ctx, s, org.ID, heartbeat.EventMissed)
+		d, ok := heartbeat.ParseMissDetail(missed[0].Detail)
+		if len(missed) != 1 || !ok || d.Reason != heartbeat.ReasonOverran || d.GraceSeconds != 3600 {
+			t.Fatalf("missed = %+v, detail %+v; want one overran with the period as its limit", missed, d)
+		}
+	})
+}

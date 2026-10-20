@@ -260,7 +260,8 @@ Event types currently emitted:
   creation time, so `heartbeat.missed` also covers a first ping that never
   arrives. It also covers a failure ping (`/fail`, an exit status of 1 to
   255), which takes the heartbeat down at once, and a run started with
-  `/start` that does not finish within the grace; its `Detail` says which
+  `/start` that does not finish within the grace (`Heartbeat.RunGrace`: the
+  period when the grace is 0); its `Detail` says which
   (`heartbeat.FailedEvent`, `heartbeat.OverranEvent`), and the subject reads
   `Heartbeat failed: <name> (exit 3)` or `Heartbeat missed: <name> (run did
   not finish)`. Every heartbeat event carries the plain heartbeat name as its

@@ -30,7 +30,8 @@ type MissDetail struct {
 	ExitStatus *int `json:"exit_status,omitempty"`
 	// Output is the tail of the failure ping's logged body (OutputTail).
 	Output string `json:"output,omitempty"`
-	// StartedAt and GraceSeconds describe the run that overran.
+	// StartedAt and GraceSeconds describe the run that overran: when it
+	// started and how long it was allowed (Heartbeat.RunGrace).
 	StartedAt    time.Time `json:"started_at,omitzero"`
 	GraceSeconds int       `json:"grace_seconds,omitempty"`
 }
@@ -53,7 +54,8 @@ func FailedEvent(orgID int64, name string, exitStatus *int, body string) core.Ev
 }
 
 // OverranEvent is the heartbeat.missed recorded when a run of the heartbeat
-// named name, started at startedAt, did not finish within graceSeconds.
+// named name, started at startedAt, did not finish within graceSeconds (the
+// heartbeat's RunGrace).
 func OverranEvent(orgID int64, name string, startedAt time.Time, graceSeconds int) core.Event {
 	ev := MissedEvent(orgID, name)
 	ev.Detail = encodeDetail(MissDetail{Reason: ReasonOverran, StartedAt: startedAt.UTC(), GraceSeconds: graceSeconds})

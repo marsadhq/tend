@@ -51,7 +51,7 @@ type Heartbeat struct {
 // The regular deadline is period + grace after the last ping, or, for a
 // heartbeat that never pinged ('new'), after its creation, so a monitor whose
 // first ping never comes is reported too. A started run moves it earlier, to
-// grace after the start, as in Healthchecks; a start never makes it later.
+// RunGrace after the start, as in Healthchecks; a start never makes it later.
 func (h Heartbeat) Deadline() (deadline time.Time, overran, watched bool) {
 	if h.PeriodSeconds <= 0 || h.Status == "down" {
 		return time.Time{}, false, false
@@ -66,11 +66,22 @@ func (h Heartbeat) Deadline() (deadline time.Time, overran, watched bool) {
 	grace := time.Duration(h.GraceSeconds) * time.Second
 	deadline = anchor.Add(time.Duration(h.PeriodSeconds)*time.Second + grace)
 	if !h.StartedAt.IsZero() {
-		if run := h.StartedAt.Add(grace); run.Before(deadline) {
+		if run := h.StartedAt.Add(h.RunGrace()); run.Before(deadline) {
 			return run, true, true
 		}
 	}
 	return deadline, false, true
+}
+
+// RunGrace is how long a started run may take before the heartbeat goes
+// down: its grace, as in Healthchecks, or, when it has none (Tend's default),
+// its period. Healthchecks' grace is never below a minute; a grace of 0 here
+// would report every run that outlasts a watcher tick.
+func (h Heartbeat) RunGrace() time.Duration {
+	if h.GraceSeconds > 0 {
+		return time.Duration(h.GraceSeconds) * time.Second
+	}
+	return time.Duration(h.PeriodSeconds) * time.Second
 }
 
 // NewToken returns a random 32-hex-char ping token.
@@ -176,7 +187,7 @@ func (w *Watcher) Check(ctx context.Context) error {
 		// NULL for 'new') makes a concurrent ping win the race as a no-op.
 		ev := MissedEvent(hb.OrgID, hb.Name)
 		if _, overran, _ := hb.Deadline(); overran {
-			ev = OverranEvent(hb.OrgID, hb.Name, hb.StartedAt, hb.GraceSeconds)
+			ev = OverranEvent(hb.OrgID, hb.Name, hb.StartedAt, int(hb.RunGrace()/time.Second))
 		}
 		fired, err := w.store.MarkHeartbeatDownAndEmit(ctx, hb, ev)
 		if err != nil {

@@ -12,7 +12,7 @@ UUIDs, `tend exec` for wrapping commands, and where Tend behaves differently.
 | Healthchecks | Tend | What it does |
 |---|---|---|
 | `https://hc-ping.com/<uuid>` | `<TEND_BASE_URL>/ping/<token>` | Success: the heartbeat is up; one that was down recovers (`heartbeat.recovered`). |
-| `…/<uuid>/start` | `…/ping/<token>/start` | A run starts. The heartbeat goes down if no success or failure follows within its grace. |
+| `…/<uuid>/start` | `…/ping/<token>/start` | A run starts. The heartbeat goes down if no success or failure follows within its grace (its period when the grace is 0). |
 | `…/<uuid>/fail` | `…/ping/<token>/fail` | Failure: the heartbeat goes down at once. |
 | `…/<uuid>/<exit-status>` | `…/ping/<token>/<exit-status>` | `0` is a success, `1` to `255` a failure with that status, anything larger is refused with `400 invalid url format`. |
 | `…/<uuid>/log` | `…/ping/<token>/log` | A log entry: logged, changes nothing. |
@@ -47,8 +47,14 @@ page, and by `GET /api/heartbeats/{id}/pings`.
 
 After `/start` the heartbeat goes down when its grace has passed without a
 success or failure, as in Healthchecks: the deadline is the earlier of the
-regular one (period plus grace after the last ping) and the start plus grace,
-so a start never buys more time. A run that did not finish reports
+regular one (period plus grace after the last ping) and the start plus the
+grace, so a start never buys more time. Healthchecks' grace is at least a
+minute, while Tend's defaults to 0; with a grace of 0 a started run may last
+up to one period instead, so that `tend exec`, which sends `/start` by
+default, does not report every run that outlasts a watcher tick. Give a
+heartbeat a grace to bound its runs more tightly (and to tolerate a late
+ping, which a grace of 0 does not), or use `tend exec --no-start` for a job
+that should only report its completion. A run that did not finish reports
 `heartbeat.missed` with the subject `Heartbeat missed: <name> (run did not
 finish)`.
 
