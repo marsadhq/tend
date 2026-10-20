@@ -284,10 +284,11 @@ notifications:
         url: "https://ward.example/ingest/tend"
   rules:
     - channel: ward
-      events: [run.failed, heartbeat.missed, heartbeat.recovered]
+      events: [run.failed, run.recovered, heartbeat.missed, heartbeat.recovered,
+               job.removed, heartbeat.removed, notification.failed]
 ```
 
-The webhook payload is JSON with `subject`, `body`, and the full originating `event` (type, source, and payload). Rules are org-wide; per-heartbeat routing is not yet supported.
+The webhook payload is JSON with `subject`, `body`, and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. Rules are org-wide; per-heartbeat routing is not yet supported.
 
 ## CLI reference
 
