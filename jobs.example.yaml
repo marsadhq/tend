@@ -114,9 +114,15 @@ notifications:
         chat_id: "-1001234567890"
 
   rules:
-    # Send every failure and heartbeat transition to Slack.
+    # Send every failure, its all-clear, and every heartbeat transition to
+    # Slack.
     - channel: ops-slack
-      events: [run.failed, heartbeat.missed, heartbeat.recovered]
+      events: [run.failed, run.recovered, heartbeat.missed, heartbeat.recovered]
+
+    # Hear about deliveries that were given up through a second channel: a
+    # report of a failed delivery is never itself reported again.
+    - channel: oncall-email
+      events: [notification.failed]
 
     # Escalate failures of the critical backup job to email as well.
     - channel: oncall-email
