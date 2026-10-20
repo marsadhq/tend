@@ -27,12 +27,12 @@ schedules resolve identically everywhere with no host `tzdata` dependency.
   notification delivery worker**:
   - the **runner** (scheduler tick, worker goroutines that claim and execute
     runs, and a periodic sweep that fails runs whose worker was lost),
-  - the **HTTP server** (heartbeat ping endpoint, `/healthz`, the read + action
-    REST API, and the htmx dashboard),
+  - the **HTTP server** (the heartbeat ping API, compatible with Healthchecks',
+    `/healthz`, the read + action REST API, and the htmx dashboard),
   - the **heartbeat watcher** (periodic scan for missed dead-man's-switch pings),
   - the **delivery worker** (drains the durable notification queue),
-  - the **retention sweep** (prunes old events, job runs, and deliveries at
-    startup and then daily).
+  - the **retention sweep** (prunes old events, job runs, deliveries, and
+    heartbeat ping logs at startup and then daily).
 
   The runner, HTTP server, and watcher share the injected `clock.Clock` and a
   single `func(context.Context, core.Event)` closure that nudges the delivery
@@ -46,8 +46,10 @@ schedules resolve identically everywhere with no host `tzdata` dependency.
   worker and the dashboard and says so in the banner.
 
 Other subcommands (`sync`, `job`, `run`, `logs`, `secret`, `channel`, `rule`,
-`heartbeat`, `doctor`, `user`, `token`, `version`) are one-shot CLI operations
-dispatched from `internal/cli`.
+`heartbeat`, `import`, `doctor`, `user`, `token`, `version`) are one-shot CLI
+operations dispatched from `internal/cli`. `exec` is the odd one out: it wraps a
+command with pings to a ping URL (`internal/pingexec`) and never opens a
+database, so it runs on any host that can reach Tend.
 
 ---
 
@@ -64,9 +66,11 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/auth` | The identity types `Principal`, `User`, `APIToken`, `Membership`, and the `tend_` prefix of the API tokens Tend issues. |
 | `internal/notify` | The notification domain: channels, rules, the `Alertable` filter, how each event is rendered, and the wiring of kit's delivery worker over the store's deliveries queue (`NewWorker`: the queue, the send step, the give-up that records `notification.failed`). |
-| `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
+| `internal/heartbeat` | The `Heartbeat` domain type with its `Deadline` (a started run brings it forward), the ping kinds and ping log types, the detail a `heartbeat.missed` carries when it is a failure or an overrun, and the `Watcher` that marks missed heartbeats down. |
+| `internal/pingexec` | `tend exec`: run a command between a start ping and an exit-status ping carrying its output's tail, with retries, signal forwarding and the command's exit status. Talks to any Healthchecks-compatible ping URL; no store. |
+| `internal/hcimport` | `tend import healthchecks`: read a project's checks from the Healthchecks Management API (v3) and plan the heartbeats they become (UUID as token, cron schedules approximated by a period). |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
-| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, and how the security headers and the `/login` and `/ping` rate limits from `kit/httpx` are applied. |
+| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the Healthchecks-compatible ping API (`ping.go`: token and slug forms, body capture) and the health endpoint, and how the security headers and the `/login` and `/ping` rate limits from `kit/httpx` are applied. |
 | `internal/config` | Environment-driven process configuration (driver, DSN, master key). `TEND_DB` has no default; an unset value leaves the DSN empty and `cli.Run` refuses to open a database. |
 | `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, delivery worker, and retention sweep together. |
 
@@ -238,8 +242,10 @@ accepts neither NUL nor invalid UTF-8 and a rejected value would leave the run
 ## 4. Event pipeline and the `EventSink` seam
 
 `core.Event` is the generic record carried by the event pipeline: `{ID, OrgID,
-Type, Source, Payload (JSON), DedupKey, CreatedAt}`. Events are the spine that ties
-the runner, watcher, and notifier together.
+Type, Source, Payload (JSON), DedupKey, CreatedAt, Detail}`. Events are the spine that ties
+the runner, watcher, and notifier together. `Detail` is optional JSON for the
+notification text only (why a heartbeat went down); it is stored with the event
+but left out of the webhook's legacy `event` object, whose bytes never change.
 
 Event types currently emitted:
 
@@ -252,8 +258,13 @@ Event types currently emitted:
 - **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`,
   `heartbeat.removed`. A heartbeat that was never pinged is armed from its
   creation time, so `heartbeat.missed` also covers a first ping that never
-  arrives. Every heartbeat event carries the plain heartbeat name as its
-  payload.
+  arrives. It also covers a failure ping (`/fail`, an exit status of 1 to
+  255), which takes the heartbeat down at once, and a run started with
+  `/start` that does not finish within the grace; its `Detail` says which
+  (`heartbeat.FailedEvent`, `heartbeat.OverranEvent`), and the subject reads
+  `Heartbeat failed: <name> (exit 3)` or `Heartbeat missed: <name> (run did
+  not finish)`. Every heartbeat event carries the plain heartbeat name as its
+  payload; there are no other heartbeat event types.
 - **Removals:** `job.removed` (payload `{"job_id":…,"job_name":…}`, dedup key
   `job:<id>:removed`) and `heartbeat.removed` are recorded by the store's
   `DeleteJob` / `DeleteHeartbeat` in the delete's own transaction, so every
@@ -271,11 +282,18 @@ but a separate `EmitEvent` then fail. (`run.started` is explicitly *not* termina
 and is best-effort; a lost start event is non-critical because the terminal
 event is guaranteed.) A heartbeat's transitions get the same treatment: the
 watcher marks a heartbeat `down` and records `heartbeat.missed` in one
-transaction (`SetHeartbeatStatusIfAndEmit`), so a failed write leaves the
-heartbeat `up` and the next check tries again instead of losing the alert.
+transaction (`MarkHeartbeatDownAndEmit`, guarded on the status, last ping and
+started run it saw), so a failed write leaves the heartbeat `up` and the next
+check tries again instead of losing the alert. A ping is one transaction too
+(`RecordHeartbeatPing`): the heartbeat's new state, its ping log entry, and the
+`heartbeat.missed` of a failure or the `heartbeat.recovered` of a recovery
+commit together or not at all, and of racing pings exactly one records the
+transition. The ping log entry keeps the request body (cleaned to text, the
+URL's credential redacted, capped at 100 kB) and, for a completion paired with
+its start by `?rid=`, the run's duration.
 
 **Notifications are a durable queue.** Every event insert (`EmitEvent`,
-`FinishRunAndEmit`, `ReapStaleRun`, `SetHeartbeatStatusIfAndEmit`) also inserts, in the same transaction, one
+`FinishRunAndEmit`, `ReapStaleRun`, `MarkHeartbeatDownAndEmit`, `RecordHeartbeatPing`) also inserts, in the same transaction, one
 `pending` row in the `deliveries` table for each existing channel that has an
 enabled rule matching the event: org-wide rules plus rules scoped to the
 event's job. Deleting a channel deletes its rules and finalizes its pending
@@ -410,8 +428,9 @@ careful.
   `requireAuth`. A resource id belonging to another org is simply not found.
 - **Rate limiting on the unauthenticated endpoints.** `POST /login` (burst 5,
   refill 1 per second) passes through an in-memory token bucket keyed by client
-  address and endpoint (`kit/httpx`'s `RateLimiter`). `/ping/{token}`
-  has two buckets, checked before the database is touched: unknown tokens are
+  address and endpoint (`kit/httpx`'s `RateLimiter`). `/ping/...`
+  has two buckets, checked before the database is touched: unknown tokens (and
+  unknown ping keys or slugs) are
   counted per client address (burst 30, refill 1 per second), and once an
   address has spent that budget every ping from it is refused, whatever token
   it sends next, so rotating tokens does not evade it; pings for a real
@@ -490,9 +509,9 @@ These limits are constants in the code, not configuration.
 
 - **No implicit database.** `config.Load` leaves the DSN empty when `TEND_DB` is
   unset, and `cli.Run` then refuses every command that would open the store.
-  `version`, top-level help (`help`, `-h`, `--help`), and `serve -h` are
-  answered before that check, so they need no configuration and never create a
-  database file or start the daemon. Every other subcommand parses its flags
+  `version`, top-level help (`help`, `-h`, `--help`), `serve -h` and `exec`
+  are answered before that check, so they need no configuration and never
+  create a database file or start the daemon. Every other subcommand parses its flags
   after the store is open, so its `-h` still needs `TEND_DB`.
 - **Bounded captured output.** The executor keeps at most `maxOutputBytes`
   (1 MiB) per attempt: shell jobs write through a `cappedBuffer` that discards
@@ -510,10 +529,13 @@ These limits are constants in the code, not configuration.
   nothing and is stored. This is a known limitation.
 - **Retention sweep.** `serve` prunes at startup and every 24 hours: by default
   events older than 30 days, terminal job runs older than 90 days, finalized
-  deliveries older than 7 days (`config.LoadRetention`, from
-  `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS` and
-  `TEND_RETENTION_DELIVERIES_DAYS`; `0` keeps that history forever and an
-  invalid value stops `serve` from starting). When the sweep deleted rows it
+  deliveries older than 7 days, heartbeat ping log entries older than 30 days
+  (`config.LoadRetention`, from `TEND_RETENTION_EVENTS_DAYS`,
+  `TEND_RETENTION_RUNS_DAYS`, `TEND_RETENTION_DELIVERIES_DAYS` and
+  `TEND_RETENTION_PINGS_DAYS`; `0` keeps that history forever and an
+  invalid value stops `serve` from starting). Each heartbeat also keeps only
+  its newest `store.MaxPingsPerHeartbeat` (1000) pings, trimmed in the ping's
+  own transaction, so a runaway client cannot fill the disk between sweeps. When the sweep deleted rows it
   calls `ReclaimSpace`: on SQLite, once at least 8 MiB and a quarter of the file
   is free, the first call switches the file to incremental auto-vacuum with one
   `VACUUM` (only for a file of at most 64 MiB, since the store's single
@@ -526,7 +548,8 @@ These limits are constants in the code, not configuration.
   failed sweep is logged and retried on the next tick.
 - **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
   and `IdleTimeout` are all 10 seconds (`httpx.NewServer`, called by `serve`).
-  Every handler is quick and the largest request body is a login form, so a
+  Every handler is quick and the largest request body is a ping's (read up to
+  100 kB, the rest discarded), so a
   client that stalls while sending its headers or body, while reading the
   response, or between requests cannot hold a connection open.
 - **Cron validation at the edges.** `jobs.ValidateCron` uses the same parser as
