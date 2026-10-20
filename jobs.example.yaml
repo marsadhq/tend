@@ -71,9 +71,11 @@ jobs:
     enabled: false
 
 # Notification channels and the rules that route events to them. Channels need
-# TEND_MASTER_KEY set. Rules fire on the alertable events only: run.failed,
-# heartbeat.missed, and heartbeat.recovered. Set `job:` to scope a rule to a
-# single job; omit it to match all jobs. Keep only the channels you actually use.
+# TEND_MASTER_KEY set. Rules may name the alertable events only (sync refuses
+# anything else): run.failed, run.recovered, heartbeat.missed,
+# heartbeat.recovered, job.removed, heartbeat.removed, notification.failed.
+# Set `job:` to scope a rule to a single job; omit it to match all jobs. Keep
+# only the channels you actually use.
 notifications:
   channels:
     - name: ops-slack
