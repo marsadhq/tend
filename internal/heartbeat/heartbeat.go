@@ -35,6 +35,12 @@ type Heartbeat struct {
 	GraceSeconds  int
 	Status        string // "new" | "up" | "down"
 	CreatedAt     time.Time
+	// StartedAt is when the run being timed was started (/start), zero when
+	// none is. Until a success or failure ends it, the heartbeat goes down
+	// once GraceSeconds pass after StartedAt.
+	StartedAt time.Time
+	// StartedRID is that run's ?rid=, "" when it was started without one.
+	StartedRID string
 }
 
 // NewToken returns a random 32-hex-char ping token.
