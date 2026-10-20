@@ -113,6 +113,30 @@ notifications:
         bot_token: "{{ secret.telegram_bot_token }}"
         chat_id: "-1001234567890"
 
+    - name: ops-phone
+      type: ntfy
+      config:
+        # The topic's URL on ntfy.sh or a self-hosted server (required). On
+        # ntfy.sh anyone who knows a topic's name can read it, so pick a long
+        # one and keep it secret. token (tk_...) is optional; priority is 1 to
+        # 5 (0 or unset: the server's default, 3); tags are optional.
+        url: "{{ secret.ntfy_topic_url }}"
+        token: "{{ secret.ntfy_token }}"
+        priority: 4
+        tags: [warning]
+
+    - name: oncall-pushover
+      type: pushover
+      config:
+        # Your application's API token and the user or group key (both
+        # required). priority is -2 to 2; 2 (emergency) repeats every `retry`
+        # seconds (at least 30, default 60) until acknowledged, for at most
+        # `expire` seconds (at most 10800, default 3600). device and sound are
+        # optional.
+        token: "{{ secret.pushover_app_token }}"
+        user: "{{ secret.pushover_user_key }}"
+        priority: 1
+
   rules:
     # Send every failure, its all-clear, and every heartbeat transition to
     # Slack.

@@ -83,6 +83,8 @@ var channelTypes = []kitnotify.ChannelType{
 	kitnotify.Discord,
 	kitnotify.SMTP,
 	kitnotify.Telegram,
+	kitnotify.Ntfy,
+	kitnotify.Pushover,
 }
 
 // ValidChannelType reports whether t names a channel kind Tend accepts.
@@ -91,7 +93,7 @@ func ValidChannelType(t string) bool {
 }
 
 // ChannelTypeList names the accepted channel kinds for a message:
-// "webhook, slack, ..., or telegram".
+// "webhook, slack, ..., or pushover".
 func ChannelTypeList() string {
 	names := make([]string, len(channelTypes))
 	for i, t := range channelTypes {

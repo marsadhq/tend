@@ -13,7 +13,7 @@
   <a href="https://goreportcard.com/report/github.com/marsadhq/tend"><img src="https://goreportcard.com/badge/github.com/marsadhq/tend" alt="Go Report Card"></a>
 </p>
 
-Tend is a self-hosted job runner with a web dashboard. It runs shell commands and HTTP calls on cron or interval schedules, records every run (history, captured output, exit codes), watches for missed heartbeats, and fires webhook/Slack/Discord/SMTP alerts.
+Tend is a self-hosted job runner with a web dashboard. It runs shell commands and HTTP calls on cron or interval schedules, records every run (history, captured output, exit codes), watches for missed heartbeats, and fires alerts to webhooks, Slack, Discord, email, Telegram, ntfy, and Pushover.
 
 ![Tend jobs dashboard](docs/assets/dashboard-jobs.png)
 
@@ -25,7 +25,7 @@ Most teams stitch this together from three or four moving parts: system cron to 
 
 - **Scheduling**: shell or HTTP jobs on cron expressions, fixed intervals, or a one-off `run_at` time.
 - **Run monitoring**: every execution is recorded with its status, exit code, timing, and captured output (up to 1 MiB per attempt), browsable in the dashboard or over the HTTP API.
-- **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, SMTP, or Telegram channels, globally or scoped to a single job.
+- **Alerting**: route `run.failed`, `heartbeat.missed`, and other events to webhook, Slack, Discord, SMTP, Telegram, ntfy, or Pushover channels, globally or scoped to a single job.
 - **Dead-man's-switch heartbeats**: give Tend a ping URL for any external job; if a ping doesn't arrive within its period plus grace, Tend alerts.
 
 It's a **single static, CGO-free binary**. SQLite is the default store (no database to stand up), with an optional Postgres backend for a managed or external database. **No Redis, no external dependencies.** Configure it imperatively with the CLI or declaratively with a YAML file you keep in version control.
@@ -198,7 +198,7 @@ jobs:
 notifications:
   channels:
     - name: ops-slack
-      type: slack                 # webhook | slack | discord | smtp | telegram
+      type: slack                 # webhook | slack | discord | smtp | telegram | ntfy | pushover
       config:
         webhook_url: "{{ secret.slack_webhook }}"
   rules:
@@ -244,9 +244,21 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 
 `run.started` and `run.succeeded` are recorded (dashboard, `GET /api/events`) but never notify, so `tend rule add` and `tend sync` refuse a rule for them, or for any type not in the table, and list the valid ones. (`tend rule list` flags a rule stored by an older version that can never fire.) A `notification.failed` whose own delivery is given up is dropped rather than reported again, so route it to a different channel than the ones it reports on.
 
-Channels are webhook, Slack, Discord, SMTP, or Telegram, and are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused).
+Channels are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused). Every channel sends the event's subject (`Job failed: nightly-backup`) and body; the webhook channel posts JSON (see [below](#send-tend-events-to-ward-or-any-sink)). The types and their config:
 
-**Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. Each send is bounded (10 seconds for webhook, Slack, Discord and Telegram, 30 seconds for SMTP), so a destination that hangs fails that attempt instead of holding up the others. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. A destination that refuses the notification for good (an HTTP 4xx other than 408 and 429 from a webhook, Slack, Discord or Telegram, or an SMTP 5xx reply) is not retried: the delivery is given up at once, the same way. Each channel receives its notifications in order, one at a time: a notification waits until the ones queued before it on the same channel have been delivered or given up, so after an outage a receiver gets `heartbeat.missed` before the `heartbeat.recovered` that followed it (other channels are not held up). The wait is bounded: once a notification that keeps failing was first attempted more than 15 minutes ago (`TEND_DELIVERY_HOLD_MINUTES`), the ones behind it go out while it keeps retrying, so one notification a destination keeps failing cannot silence the channel; past that point their order is no longer guaranteed, and a receiver should order by the event's `CreatedAt`. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
+| Type | Config | Notes |
+|---|---|---|
+| `webhook` | `{"url": "..."}` | POSTs the JSON body described below. |
+| `slack` | `{"webhook_url": "..."}` | A Slack incoming webhook. |
+| `discord` | `{"webhook_url": "..."}` | A Discord webhook. |
+| `smtp` | `{"host": "...", "port": 587, "username": "...", "password": "...", "from": "...", "to": ["..."]}` | `host`, `from` and at least one `to` are required. Without `username` the mail is sent unauthenticated; with one, the server must offer STARTTLS (or be localhost). |
+| `telegram` | `{"bot_token": "...", "chat_id": "..."}` | A bot from @BotFather and the chat it posts to. |
+| `ntfy` | `{"url": "https://ntfy.sh/<topic>", "token": "tk_...", "priority": 4, "tags": ["warning"]}` | `url` is the topic on [ntfy.sh](https://ntfy.sh) or a self-hosted server and is required; the topic is the last path segment (1 to 64 letters, digits, `-` or `_`). On ntfy.sh anyone who knows a topic's name can read it, so Tend treats the URL as a secret like the optional access `token`. `priority` is 1 (min) to 5 (max), or 0 / unset for the server's default (3); `tags` are optional, and ones that name an emoji show as one. The subject is the notification's title. |
+| `pushover` | `{"token": "...", "user": "...", "priority": 0, "retry": 60, "expire": 3600, "device": "...", "sound": "..."}` | `token` (your [Pushover](https://pushover.net) application's API token) and `user` (a user or group key) are required. `priority` is -2 (no alert) to 2; at 2 (emergency) the notification repeats every `retry` seconds (at least 30, default 60) until acknowledged, for up to `expire` seconds (at most 10800, default 3600). `device` limits it to some of the user's devices, `sound` picks the sound. Subject and body are cut to Pushover's limits (250 and 1024 characters). |
+
+Secrets in a channel's config (tokens, keys, webhook URLs) can come from `{{ secret.NAME }}` references in YAML; the config is checked when a notification is sent, not when the channel is saved, so a channel whose config is incomplete fails its deliveries: they are retried, then given up and reported like any other failure.
+
+**Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. Each send is bounded (10 seconds for webhook, Slack, Discord, Telegram, ntfy and Pushover, 30 seconds for SMTP), so a destination that hangs fails that attempt instead of holding up the others. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. A destination that refuses the notification for good (an HTTP 4xx other than 408 and 429 from a webhook, Slack, Discord, Telegram or ntfy, any 4xx from Pushover, or an SMTP 5xx reply) is not retried: the delivery is given up at once, the same way. Pushover asks to be retried no sooner than 5 seconds after any other failure, so its retries wait at least that long. Each channel receives its notifications in order, one at a time: a notification waits until the ones queued before it on the same channel have been delivered or given up, so after an outage a receiver gets `heartbeat.missed` before the `heartbeat.recovered` that followed it (other channels are not held up). The wait is bounded: once a notification that keeps failing was first attempted more than 15 minutes ago (`TEND_DELIVERY_HOLD_MINUTES`), the ones behind it go out while it keeps retrying, so one notification a destination keeps failing cannot silence the channel; past that point their order is no longer guaranteed, and a receiver should order by the event's `CreatedAt`. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
 
 ### Alert on a missed heartbeat
 
@@ -327,7 +339,7 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 
 `tend job add` flags: `-name` (required); `-type shell|http` (default `shell`); `-command` (required for shell); `-url` (required for http); `-method` (default `GET`, http only); `-body` (http only); `-cron`, `-interval <seconds>`, `-run-at <RFC3339>` (mutually exclusive; a cron expression that does not parse is rejected and no job is created); `-timeout <seconds>` per attempt (default `0` = 30 minutes); `-max-retries <n>` (default `0`); `-env KEY=VALUE` (repeatable; shell jobs only in effect).
 
-`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, or `telegram` (Telegram config is `{"bot_token": "...", "chat_id": "..."}`). The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
+`tend channel add` accepts `-type` of `webhook`, `slack`, `discord`, `smtp`, `telegram`, `ntfy`, or `pushover`, with the config JSON shown in [Alerting](#alerting) on stdin. The heartbeat ping URL is `<TEND_BASE_URL>/ping/<token>`; send a GET or POST to it from any external job. There is no `user list` or `user rm` in this release.
 
 ## HTTP API
 
@@ -366,7 +378,7 @@ These are built in; only the retention windows are configurable.
 | Rate limits | `POST /login`: a burst of 5 requests, then 1 per second, per client address. `/ping/{token}`: pings for a real heartbeat are limited per heartbeat (a burst of 10, then 1 per second) and never per address, so one host can ping any number of heartbeats on the same minute; pings with an unknown token are limited per client address (a burst of 30, then 1 per second), and an address over that limit is refused for every token until it refills, which is what stops token guessing. Limits are held in memory by the server process. Requests over a limit get `429 Too Many Requests` with a `Retry-After` header; ping clients should retry (see [the heartbeat section](#alert-on-a-missed-heartbeat)). Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
 | HTTP timeouts | The server gives up on a connection after 10 seconds spent reading a request (headers and body), writing a response, or sitting idle. |
 | Security headers | Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` that only allows same-origin scripts, styles, and images. `Strict-Transport-Security` is not sent because Tend itself serves plain HTTP; add it at the proxy that terminates TLS. |
-| URLs in errors | When a webhook, Slack, Discord, or Telegram delivery or an HTTP job fails, the error names only the host. The rest of the URL, where tokens usually live, is kept out of logs and stored run output. |
+| URLs in errors | When a webhook, Slack, Discord, Telegram, ntfy, or Pushover delivery or an HTTP job fails, the error names only the host. The rest of the URL, where tokens usually live (an ntfy topic among them), is kept out of logs and stored run output, and so are the Pushover token and user key. |
 
 ## Backups
 
