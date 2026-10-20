@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/auth"
@@ -339,7 +340,7 @@ func buildAuthConfig(masterKeyB64 string) (*httpserver.AuthConfig, error) {
 		return nil, err
 	}
 	return &httpserver.AuthConfig{
-		Codec:  auth.NewSessionCodec(key),
+		Codec:  kitauth.NewSessionCodec(key),
 		Secure: cookieSecure(),
 	}, nil
 }
@@ -1572,7 +1573,7 @@ func cmdUserAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 		return fmt.Errorf("user add: password required on stdin")
 	}
 
-	hash, err := auth.HashPassword(pw)
+	hash, err := kitauth.HashPassword(pw)
 	if err != nil {
 		return fmt.Errorf("user add: hash password: %w", err)
 	}
@@ -1639,7 +1640,7 @@ func cmdTokenCreate(ctx context.Context, st store.Store, orgID int64, args []str
 	id, err := st.CreateToken(ctx, auth.APIToken{
 		OrgID:     orgID,
 		Name:      *name,
-		TokenHash: auth.HashToken(plaintext),
+		TokenHash: kitauth.HashToken(plaintext),
 	})
 	if err != nil {
 		return fmt.Errorf("token create: %w", err)

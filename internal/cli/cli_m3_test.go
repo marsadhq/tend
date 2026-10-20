@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/marsadhq/tend/internal/auth"
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/tend/internal/cli"
 )
 
@@ -266,7 +266,7 @@ func TestTokenCreatePrintsOnceAndStoresHashOnly(t *testing.T) {
 	// hash of the plaintext must succeed and resolve to this org/name. (If the
 	// impl wrongly stored the plaintext in token_hash, this lookup-by-hash would
 	// miss and ErrNotFound here would fail the test.)
-	gotOrg, gotName, err := st.AuthenticateToken(ctx, auth.HashToken(plaintext))
+	gotOrg, gotName, err := st.AuthenticateToken(ctx, kitauth.HashToken(plaintext))
 	if err != nil {
 		t.Fatalf("AuthenticateToken(HashToken(plaintext)) failed; hash not stored correctly: %v", err)
 	}
