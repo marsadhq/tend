@@ -245,6 +245,11 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 		return jobs.Job{}, fmt.Errorf("configfile: %s: unknown type %q (must be shell or http)", ref, spec.Type)
 	}
 
+	// --- timeout ---
+	if spec.TimeoutSeconds < 0 {
+		return jobs.Job{}, fmt.Errorf("configfile: %s: timeout_seconds must be 0 (the default, 30 minutes) or positive, got %d", ref, spec.TimeoutSeconds)
+	}
+
 	// --- schedule: at most one (zero = a manual/no-schedule job) ---
 	schedCount := 0
 	if spec.Cron != "" {

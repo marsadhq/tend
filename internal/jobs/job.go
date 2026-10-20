@@ -34,7 +34,7 @@ type Job struct {
 	Cron            string    // cron expression (mutually exclusive with the others)
 	IntervalSeconds int       // fixed interval schedule
 	RunAt           time.Time // one-off schedule (zero = unset)
-	TimeoutSeconds  int       // 0 = executor default
+	TimeoutSeconds  int       // <= 0 = executor default (DefaultTimeout); input refuses negatives
 	MaxRetries      int       // additional attempts after the first
 	Enabled         bool
 	Env             map[string]string // per-job env vars; values may be secret refs (resolved later)

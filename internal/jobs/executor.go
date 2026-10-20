@@ -223,10 +223,13 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 // runOnce executes j exactly once with a per-attempt timeout. The timeout
 // saturates like the limit in maxRunDuration, so an enormous timeout_seconds
 // means "no timeout to speak of" to both, not an attempt that is cut short the
-// moment it starts.
+// moment it starts. Like maxRunDuration it treats any timeout that is not
+// positive as unset: a negative one (which job input now refuses, but a row
+// written before that may still hold) used to time every attempt out at once
+// while the reaper allowed the run the default.
 func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, attempt int) RunResult {
 	timeout := seconds(j.TimeoutSeconds)
-	if timeout == 0 {
+	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)

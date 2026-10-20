@@ -749,7 +749,7 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 	command := fs.String("command", "", "shell command")
 	cronExpr := fs.String("cron", "", "cron expression")
 	interval := fs.Int("interval", 0, "interval in seconds")
-	timeout := fs.Int("timeout", 0, "timeout in seconds")
+	timeout := fs.Int("timeout", 0, "timeout per attempt in seconds (0 = the default, 30 minutes)")
 	maxRetries := fs.Int("max-retries", 0, "max retries")
 	httpURL := fs.String("url", "", "HTTP URL (http jobs)")
 	httpMethod := fs.String("method", "GET", "HTTP method (http jobs)")
@@ -764,6 +764,9 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 
 	if *name == "" {
 		return fmt.Errorf("job add: -name is required")
+	}
+	if *timeout < 0 {
+		return fmt.Errorf("job add: -timeout must be 0 (the default, 30 minutes) or a positive number of seconds, got %d", *timeout)
 	}
 	// At most one schedule; zero = a manual/no-schedule job.
 	schedCount := 0
