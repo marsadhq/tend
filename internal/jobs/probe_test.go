@@ -36,6 +36,12 @@ func TestHumanDaysAndFloorDays(t *testing.T) {
 	if got := humanDays(time.Hour + time.Minute); got != "1 hour" {
 		t.Errorf("humanDays(61m) = %q", got)
 	}
+	if got := humanDays(59 * time.Minute); got != "59 minutes" {
+		t.Errorf("humanDays(59m) = %q", got)
+	}
+	if got := humanDays(-30 * time.Second); got != "0 minutes" {
+		t.Errorf("humanDays(-30s) = %q", got)
+	}
 	if got := floorDays(-time.Hour); got != -1 {
 		t.Errorf("floorDays(-1h) = %d, want -1", got)
 	}

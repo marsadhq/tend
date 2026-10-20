@@ -101,19 +101,27 @@ func probeErrorResult(ctx context.Context, attempt int, started time.Time, err e
 	return res
 }
 
-// humanDays renders a span as whole days, or as whole hours under two days.
-// A negative span is rendered as its length.
+// humanDays renders a span as whole days, as whole hours under two days, and
+// as whole minutes under an hour. A negative span is rendered as its length.
 func humanDays(d time.Duration) string {
 	if d < 0 {
 		d = -d
 	}
-	if d >= 2*day {
+	switch {
+	case d >= 2*day:
 		return fmt.Sprintf("%d days", int64(d/day))
+	case d >= time.Hour:
+		return plural(int64(d/time.Hour), "hour")
 	}
-	if h := int64(d / time.Hour); h != 1 {
-		return fmt.Sprintf("%d hours", h)
+	return plural(int64(d/time.Minute), "minute")
+}
+
+// plural renders "1 hour", "3 hours".
+func plural(n int64, unit string) string {
+	if n == 1 {
+		return "1 " + unit
 	}
-	return "1 hour"
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 // floorDays is the number of whole days in d, rounded towards minus infinity,

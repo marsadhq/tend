@@ -121,6 +121,8 @@ func DefaultWarnDays(t JobType) int {
 		return DefaultTLSWarnDays
 	case Domain:
 		return DefaultDomainWarnDays
+	case Expiry:
+		return DefaultExpiryWarnDays
 	}
 	return 0
 }
@@ -128,7 +130,7 @@ func DefaultWarnDays(t JobType) int {
 // HasSpec reports whether jobs of type t carry settings in Job.Spec.
 func HasSpec(t JobType) bool {
 	switch t {
-	case TLS, Domain:
+	case TLS, Domain, Expiry:
 		return true
 	}
 	return false
@@ -154,6 +156,19 @@ func ValidateSpec(t JobType, s *Spec) error {
 		return validateTLS(s)
 	case Domain:
 		return validateDomain(s)
+	case Expiry:
+		return validateExpiry(s)
+	}
+	return nil
+}
+
+func validateExpiry(s *Spec) error {
+	hasDate, hasCommand := !s.ExpiresAt.IsZero(), strings.TrimSpace(s.ExpiryCommand) != ""
+	switch {
+	case hasDate && hasCommand:
+		return errors.New("set expires_at or expiry_command, not both")
+	case !hasDate && !hasCommand:
+		return errors.New("expires_at or expiry_command is required for expiry jobs")
 	}
 	return nil
 }
