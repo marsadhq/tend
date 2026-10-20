@@ -43,6 +43,36 @@ type Heartbeat struct {
 	StartedRID string
 }
 
+// Deadline is the instant after which the heartbeat is down if nothing has
+// arrived, and whether that is the deadline of a started run (overran)
+// rather than the regular one. watched is false for a heartbeat that is not
+// watched: one that is already down, or has no period.
+//
+// The regular deadline is period + grace after the last ping, or, for a
+// heartbeat that never pinged ('new'), after its creation, so a monitor whose
+// first ping never comes is reported too. A started run moves it earlier, to
+// grace after the start, as in Healthchecks; a start never makes it later.
+func (h Heartbeat) Deadline() (deadline time.Time, overran, watched bool) {
+	if h.PeriodSeconds <= 0 || h.Status == "down" {
+		return time.Time{}, false, false
+	}
+	anchor := h.LastSeenAt
+	if h.Status == "new" {
+		anchor = h.CreatedAt
+	}
+	if anchor.IsZero() {
+		return time.Time{}, false, false
+	}
+	grace := time.Duration(h.GraceSeconds) * time.Second
+	deadline = anchor.Add(time.Duration(h.PeriodSeconds)*time.Second + grace)
+	if !h.StartedAt.IsZero() {
+		if run := h.StartedAt.Add(grace); run.Before(deadline) {
+			return run, true, true
+		}
+	}
+	return deadline, false, true
+}
+
 // NewToken returns a random 32-hex-char ping token.
 func NewToken() (string, error) {
 	b := make([]byte, 16)
@@ -84,12 +114,13 @@ func RemovedEvent(orgID int64, name string) core.Event {
 // WatchStore is the consumer interface the watcher needs.
 type WatchStore interface {
 	DueHeartbeats(ctx context.Context, now time.Time) ([]Heartbeat, error)
-	// SetHeartbeatStatusIfAndEmit moves a heartbeat from fromStatus to
-	// toStatus and records ev, with its deliveries, in one transaction. The
-	// move happens only when both the current status and last_seen_at still
-	// match the values observed by DueHeartbeats; it returns false, having
-	// written nothing, when a concurrent RecordPing changed them first.
-	SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error)
+	// MarkHeartbeatDownAndEmit moves the heartbeat observed by DueHeartbeats
+	// to 'down', ends any run it was timing, and records ev, with its
+	// deliveries, in one transaction. The move happens only when the
+	// heartbeat's status, last_seen_at and started_at still match observed;
+	// it returns false, having written nothing, when a concurrent ping
+	// changed them first.
+	MarkHeartbeatDownAndEmit(ctx context.Context, observed Heartbeat, ev core.Event) (bool, error)
 }
 
 // Watcher periodically scans for heartbeats that have missed their deadline.
@@ -111,17 +142,19 @@ func NewWatcher(s WatchStore, c clock.Clock, dispatch func(context.Context, core
 }
 
 // Check marks overdue heartbeats 'down', records heartbeat.missed, and
-// dispatches it. This covers both an 'up' heartbeat that stopped pinging and a 'new' one
-// that never pinged (armed on created_at) — the dead-man's-switch blind spot.
+// dispatches it. This covers an 'up' heartbeat that stopped pinging, a 'new' one
+// that never pinged (armed on created_at) — the dead-man's-switch blind spot —
+// and a started run that did not finish within its grace (see Deadline), whose
+// heartbeat.missed says so (OverranEvent).
 // Idempotent: a heartbeat already 'down' is not returned by DueHeartbeats, so it
 // is not re-alerted.
 //
-// The down-transition is guarded via SetHeartbeatStatusIf: only when both the
-// observed status ('up' or 'new') and last_seen_at still match the stored row
-// will the UPDATE fire. A RecordPing that re-stamped last_seen_at (and, for a
-// 'new' heartbeat, flipped status to 'up') between DueHeartbeats and
-// SetHeartbeatStatusIf makes the conditional UPDATE a no-op (fired==false), so
-// no spurious heartbeat.missed is emitted for the now-healthy heartbeat.
+// The down-transition is guarded via MarkHeartbeatDownAndEmit: only when the
+// observed status ('up' or 'new'), last_seen_at and started_at still match the
+// stored row will the UPDATE fire. A ping that re-stamped last_seen_at (and,
+// for a 'new' heartbeat, flipped status to 'up'), or a /start that began a new
+// run, between DueHeartbeats and the write makes the conditional UPDATE a no-op
+// (fired==false), so no spurious heartbeat.missed is emitted.
 //
 // The status change and the heartbeat.missed event (with the deliveries its
 // rules match) are written in ONE transaction. A heartbeat therefore never
@@ -142,7 +175,10 @@ func (w *Watcher) Check(ctx context.Context) error {
 		// same heartbeat.missed event. The guard (status + last_seen_at, which is
 		// NULL for 'new') makes a concurrent ping win the race as a no-op.
 		ev := MissedEvent(hb.OrgID, hb.Name)
-		fired, err := w.store.SetHeartbeatStatusIfAndEmit(ctx, hb.ID, hb.Status, "down", hb.LastSeenAt, ev)
+		if _, overran, _ := hb.Deadline(); overran {
+			ev = OverranEvent(hb.OrgID, hb.Name, hb.StartedAt, hb.GraceSeconds)
+		}
+		fired, err := w.store.MarkHeartbeatDownAndEmit(ctx, hb, ev)
 		if err != nil {
 			// Nothing was written, so the heartbeat is retried on the next
 			// Check; the failure must still be visible. Do NOT abort the scan -

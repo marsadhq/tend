@@ -246,6 +246,13 @@ type Store interface {
 	// heartbeat.missed. (false, nil) when the guard rejected it; nothing is
 	// written then or on any error.
 	SetHeartbeatStatusIfAndEmit(ctx context.Context, id int64, fromStatus, toStatus string, lastSeenAt time.Time, ev core.Event) (bool, error)
+	// MarkHeartbeatDownAndEmit is the watcher's transition: it moves a
+	// heartbeat observed by DueHeartbeats to 'down', ends any run it was
+	// timing, and appends ev with its deliveries, in one transaction, but only
+	// while its status, last_seen_at and started_at still match observed. A
+	// ping or a /start that came in meanwhile wins: (false, nil), and nothing
+	// is written then or on any error.
+	MarkHeartbeatDownAndEmit(ctx context.Context, observed heartbeat.Heartbeat, ev core.Event) (bool, error)
 }
 
 // Compile-time assertion that *SQLiteStore implements Store.

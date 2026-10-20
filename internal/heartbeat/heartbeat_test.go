@@ -394,8 +394,8 @@ func (f *fakeWatchStore) DueHeartbeats(_ context.Context, _ time.Time) ([]heartb
 	return f.due, nil
 }
 
-func (f *fakeWatchStore) SetHeartbeatStatusIfAndEmit(_ context.Context, id int64, _, _ string, _ time.Time, e core.Event) (bool, error) {
-	r := f.setStatusIfResult[id]
+func (f *fakeWatchStore) MarkHeartbeatDownAndEmit(_ context.Context, hb heartbeat.Heartbeat, e core.Event) (bool, error) {
+	r := f.setStatusIfResult[hb.ID]
 	if r.fired && r.err == nil {
 		f.emitted = append(f.emitted, e)
 	}

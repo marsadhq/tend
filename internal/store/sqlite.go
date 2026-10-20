@@ -1698,26 +1698,20 @@ func scanHeartbeat(sc interface{ Scan(...any) error }) (heartbeat.Heartbeat, err
 // identical across dialects. This is the single source of the filter; both
 // backends call it after their SELECT.
 //
-// The deadline anchor depends on status. An 'up' heartbeat (SELECTed with a
-// non-NULL last_seen_at) counts from its last ping. A 'new' heartbeat has never
-// been pinged (last_seen_at NULL), so it counts from created_at: this arms the
-// dead-man's switch for a monitor whose first ping never arrives — the cron that
-// was never installed, the ping URL with a typo — which would otherwise stay
-// unmonitored forever.
+// The deadline is heartbeat.Heartbeat.Deadline. Its anchor depends on status.
+// An 'up' heartbeat (SELECTed with a non-NULL last_seen_at) counts from its
+// last ping. A 'new' heartbeat has never been pinged (last_seen_at NULL), so it
+// counts from created_at: this arms the dead-man's switch for a monitor whose
+// first ping never arrives — the cron that was never installed, the ping URL
+// with a typo — which would otherwise stay unmonitored forever. A run started
+// with /start brings it forward to grace after the start.
 func dueFromCandidates(candidates []heartbeat.Heartbeat, now time.Time) []heartbeat.Heartbeat {
 	var out []heartbeat.Heartbeat
 	for _, hb := range candidates {
-		// unconfigured period => not monitored; skip to avoid immediate false misses
-		// when period+grace == 0 (deadline == anchor, so now.After is true immediately).
-		if hb.PeriodSeconds <= 0 {
-			continue
-		}
-		anchor := hb.LastSeenAt
-		if hb.Status == "new" {
-			anchor = hb.CreatedAt
-		}
-		deadline := anchor.Add(time.Duration(hb.PeriodSeconds+hb.GraceSeconds) * time.Second)
-		if now.After(deadline) {
+		// An unconfigured period is not monitored (Deadline reports it
+		// unwatched), which also avoids immediate false misses when
+		// period+grace == 0. A started run can bring the deadline forward.
+		if deadline, _, watched := hb.Deadline(); watched && now.After(deadline) {
 			out = append(out, hb)
 		}
 	}
