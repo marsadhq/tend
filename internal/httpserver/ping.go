@@ -325,16 +325,28 @@ func trimPartialRune(b []byte) []byte {
 	return b
 }
 
-// pingReply writes a ping response: Healthchecks' short plain-text bodies,
-// its Ping-Body-Limit header, and CORS open to any origin (a ping is
-// authorized by its URL alone, never by a cookie).
-func pingReply(w http.ResponseWriter, code int, body string) {
+// pingOK writes a successful ping reply: body as plain text, with the
+// Ping-Body-Limit header Healthchecks clients read to size what they send.
+// The plain success reply is "ok", in lower case, exactly as Tend has always
+// answered (Healthchecks answers "OK"; clients normally check the status), and
+// carries no other header a v0.3.0 reply did not.
+func pingOK(w http.ResponseWriter, code int, body string) {
 	h := w.Header()
 	h.Set("Content-Type", "text/plain; charset=utf-8")
-	h.Set("Access-Control-Allow-Origin", "*")
 	h.Set("Ping-Body-Limit", strconv.Itoa(PingBodyLimit))
 	w.WriteHeader(code)
 	_, _ = io.WriteString(w, body)
+}
+
+// pingError writes a refused ping the way Tend always has: http.NotFound's
+// "404 page not found" for an unknown token, key or slug, and http.Error's
+// plain-text message for the rest.
+func pingError(w http.ResponseWriter, r *http.Request, code int, msg string) {
+	if code == http.StatusNotFound {
+		http.NotFound(w, r)
+		return
+	}
+	http.Error(w, msg, code)
 }
 
 // handlePing records one ping of the ping API. A failure takes the heartbeat
@@ -363,16 +375,16 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	case http.MethodHead, http.MethodGet, http.MethodPost:
 	default:
 		w.Header().Set("Allow", "HEAD, GET, POST")
-		pingReply(w, http.StatusMethodNotAllowed, "method not allowed")
+		pingError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	req, err := parsePing(strings.TrimPrefix(r.URL.EscapedPath(), "/ping/"), r.URL.Query())
 	switch {
 	case errors.Is(err, errPingURL), errors.Is(err, errPingRID):
-		pingReply(w, http.StatusBadRequest, err.Error())
+		pingError(w, r, http.StatusBadRequest, err.Error())
 		return
 	case err != nil:
-		pingReply(w, http.StatusNotFound, "not found")
+		pingError(w, r, http.StatusNotFound, "")
 		return
 	}
 
@@ -398,7 +410,7 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if code != 0 {
-			pingReply(w, code, msg)
+			pingError(w, r, code, msg)
 			return
 		}
 		req.token, created = token, made
@@ -412,21 +424,21 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.in.Body, err = readPingBody(r, req.token, req.key); err != nil {
-		pingReply(w, http.StatusBadRequest, "could not read the request body")
+		pingError(w, r, http.StatusBadRequest, "could not read the request body")
 		return
 	}
 
 	res, err := s.store.RecordHeartbeatPing(ctx, req.token, req.in, now)
 	if errors.Is(err, store.ErrNotFound) {
 		s.pingMissLimiter.Allow(missKey, now)
-		pingReply(w, http.StatusNotFound, "not found")
+		pingError(w, r, http.StatusNotFound, "")
 		return
 	}
 	if err != nil {
 		// A real DB error must not masquerade as a 404. The token is a
 		// credential, so log only a truncated hint, never the full value.
 		s.log.Error("record ping failed", "token_hint", tokenHint(req.token), "kind", req.in.Kind, "err", err)
-		pingReply(w, http.StatusInternalServerError, "internal error")
+		pingError(w, r, http.StatusInternalServerError, "internal error")
 		return
 	}
 	s.pingTokenLimiter.Allow(tokenKey, now)
@@ -434,10 +446,10 @@ func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 		s.dispatch(ctx, *res.Event)
 	}
 	if created {
-		pingReply(w, status, "Created")
+		pingOK(w, status, "Created")
 		return
 	}
-	pingReply(w, status, "OK")
+	pingOK(w, status, "ok")
 }
 
 // resolveSlug finds the token of the heartbeat a slug ping names: the

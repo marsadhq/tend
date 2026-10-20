@@ -26,11 +26,14 @@ with nothing else changed; a heartbeat created in Tend has a 32-character hex
 token instead (`tend heartbeat ping-url <name>` prints its URL). A UUID token
 matches in either letter case.
 
-Replies are Healthchecks' short plain-text bodies: `OK`, `Created` (201, a
-heartbeat made by `?create=1`), `not found` (404), `invalid url format` or
-`invalid uuid format` (400), `rate limit exceeded` (429, with `Retry-After`).
-Every reply carries `Ping-Body-Limit: 100000` and
-`Access-Control-Allow-Origin: *`.
+Replies are short plain text. A ping that is recorded answers `200` with
+`ok`, in lower case, exactly as Tend always has (Healthchecks answers `OK`;
+clients normally check only the status code), or `201 Created` for a
+heartbeat made by `?create=1`. A refused one answers `404 page not found`,
+`400 invalid url format` or `400 invalid uuid format`, or `429 rate limit
+exceeded` with `Retry-After`. A recorded ping's reply also carries
+Healthchecks' `Ping-Body-Limit` header (the most bytes of body that are
+kept); otherwise the headers are the ones Tend has always sent.
 
 ### The request body
 
@@ -192,9 +195,11 @@ server.
 
 ## What differs from Healthchecks
 
+- **`ok`, not `OK`.** A recorded ping answers `ok` in lower case, as Tend
+  always has, so scripts that match Tend's reply keep working.
 - **Unknown token: 404.** The hosted Healthchecks answers `200 OK (not
-  found)` for an unknown UUID on everything but `/log`; Tend answers `404 not
-  found` on every endpoint, as it always has, so a mistyped URL shows up in
+  found)` for an unknown UUID on everything but `/log`; Tend answers `404 page
+  not found` on every endpoint, as it always has, so a mistyped URL shows up in
   `curl -f` and similar. Unknown tokens count against the client address's
   budget (a burst of 30, then one a second), which is what stops token
   guessing.
