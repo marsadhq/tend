@@ -197,3 +197,29 @@ func TestPlanPausedChecks(t *testing.T) {
 		t.Fatalf("paused check with IncludePaused: %+v, want created with a warning", a)
 	}
 }
+
+// TestFetchDoesNotFollowTheKeyToAnotherHost: the key is sent in a header Go
+// copies onto redirects, so a redirect to another host is refused rather
+// than handing it the key.
+func TestFetchDoesNotFollowTheKeyToAnotherHost(t *testing.T) {
+	var leaked bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Api-Key") != "" {
+			leaked = true
+		}
+		_, _ = w.Write([]byte(`{"checks": []}`))
+	}))
+	t.Cleanup(other.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/api/v3/checks/", http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	_, err := hcimport.Fetch(context.Background(), nil, redirector.URL, apiKey)
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("err = %v, want the cross-host redirect refused", err)
+	}
+	if leaked {
+		t.Fatal("the API key was sent to the host the redirect pointed at")
+	}
+}
