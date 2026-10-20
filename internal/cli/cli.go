@@ -8,6 +8,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -18,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -760,12 +762,24 @@ func (e *envFlag) Set(s string) error {
 	return nil
 }
 
+// stringsFlag is a repeatable flag.Value collecting its values in order.
+type stringsFlag struct {
+	values []string
+}
+
+func (f *stringsFlag) String() string { return strings.Join(f.values, " ") }
+
+func (f *stringsFlag) Set(s string) error {
+	f.values = append(f.values, s)
+	return nil
+}
+
 func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("job add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	name := fs.String("name", "", "job name (required)")
-	typ := fs.String("type", "shell", "job type: shell or http")
+	typ := fs.String("type", "shell", "job type: shell, http, tls, domain, expiry or drill")
 	command := fs.String("command", "", "shell command")
 	cronExpr := fs.String("cron", "", "cron expression")
 	interval := fs.Int("interval", 0, "interval in seconds")
@@ -775,12 +789,34 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 	httpMethod := fs.String("method", "GET", "HTTP method (http jobs)")
 	httpBody := fs.String("body", "", "HTTP request body (http jobs)")
 	var envF envFlag
-	fs.Var(&envF, "env", "set an env var KEY=VALUE (repeatable)")
+	fs.Var(&envF, "env", "set an env var KEY=VALUE (repeatable; shell, expiry and drill jobs)")
 	runAtStr := fs.String("run-at", "", "one-off run time (RFC3339, e.g. 2026-06-01T02:00:00Z)")
+
+	// Probe and drill settings; see jobs.Spec.
+	warnDays := fs.Int("warn-days", 0, "fail this many days before the expiry (tls, domain, expiry; default 14, 30 for domain)")
+	host := fs.String("host", "", "server host name or IP address (tls)")
+	port := fs.Int("port", 0, "server port (tls; default 443, 25 with -starttls smtp, 143 with imap)")
+	serverName := fs.String("server-name", "", "name sent as SNI and checked against the certificate (tls; default -host)")
+	starttls := fs.String("starttls", "", "upgrade with STARTTLS first: smtp or imap (tls)")
+	insecure := fs.Bool("insecure-skip-verify", false, "do not check the chain, for a self-signed certificate (tls)")
+	caFile := fs.String("ca-file", "", "PEM file of extra roots, for a private CA (tls)")
+	renewFraction := fs.Float64("renew-after-fraction", 0, "share of the lifetime after which a renewal is due (tls; default 2/3, 0 = no renewal check)")
+	domain := fs.String("domain", "", "registered domain name (domain)")
+	rdapURL := fs.String("rdap-url", "", "RDAP server base URL, for a TLD the IANA bootstrap file lacks (domain)")
+	expiresAt := fs.String("expires-at", "", "the date watched, RFC3339 or YYYY-MM-DD (expiry)")
+	expiryCommand := fs.String("expiry-command", "", "shell command printing the date watched, in RFC3339 (expiry)")
+	restore := fs.String("restore", "", "shell command restoring the backup into $TEND_SCRATCH (drill)")
+	var checks stringsFlag
+	fs.Var(&checks, "check", "shell command checking the restored data, exit 0 = pass (drill; repeatable)")
+	cleanup := fs.String("cleanup", "", "shell command run after the restore and checks however they ended (drill)")
+	scratchDir := fs.String("scratch-dir", "", "directory the scratch directory is made in (drill; default the system's temp dir)")
+	maxDuration := fs.Int("max-duration", 0, "fail when the restore takes longer, in seconds (drill; 0 = no limit)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 
 	if *name == "" {
 		return fmt.Errorf("job add: -name is required")
@@ -829,8 +865,51 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 		if *httpURL == "" {
 			return fmt.Errorf("job add: -url is required for http jobs")
 		}
+	case "tls", "domain", "expiry", "drill":
+		jt = jobs.JobType(*typ)
 	default:
-		return fmt.Errorf("job add: unknown type %q", *typ)
+		return fmt.Errorf("job add: unknown type %q (shell, http, tls, domain, expiry or drill)", *typ)
+	}
+
+	// The settings of a probe or a drill: only its type's, with the type's
+	// defaults for what the flags leave out.
+	var spec *jobs.Spec
+	if jobs.HasSpec(jt) {
+		s := jobs.Spec{WarnDays: jobs.DefaultWarnDays(jt)}
+		if given["warn-days"] && jt != jobs.Drill {
+			s.WarnDays = *warnDays
+		}
+		switch jt {
+		case jobs.TLS:
+			s.Host, s.Port, s.ServerName, s.StartTLS = *host, *port, *serverName, *starttls
+			s.InsecureSkipVerify, s.CAFile = *insecure, *caFile
+			s.RenewAfterFraction = jobs.DefaultRenewAfterFraction
+			if given["renew-after-fraction"] {
+				s.RenewAfterFraction = *renewFraction
+			}
+		case jobs.Domain:
+			s.Domain, s.RDAPURL = *domain, *rdapURL
+			if d, err := jobs.NormalizeDomain(*domain); err == nil {
+				s.Domain = d
+			}
+		case jobs.Expiry:
+			s.ExpiryCommand = *expiryCommand
+			if *expiresAt != "" {
+				at, err := jobs.ParseExpiryDate(*expiresAt)
+				if err != nil {
+					return fmt.Errorf("job add: -expires-at: %w", err)
+				}
+				s.ExpiresAt = at
+			}
+		case jobs.Drill:
+			s.WarnDays = 0
+			s.Restore, s.Checks, s.Cleanup = *restore, checks.values, *cleanup
+			s.ScratchDir, s.MaxDurationSeconds = *scratchDir, *maxDuration
+		}
+		if err := jobs.ValidateSpec(jt, &s); err != nil {
+			return fmt.Errorf("job add: %w", err)
+		}
+		spec = &s
 	}
 
 	now := time.Now()
@@ -853,6 +932,7 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 		// consumed by http jobs. Setting either on the "wrong" type is a no-op.
 		Env:      envF.m,
 		HTTPBody: *httpBody,
+		Spec:     spec,
 	}
 
 	// Compute initial NextRunAt (scheduling contract).
@@ -1353,7 +1433,67 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 		fmt.Fprintf(stdout, "ping bodies:  first %d kB of each kept\n", limit/1000)
 	}
 	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
+	if len(jl) > 0 {
+		fmt.Fprintf(stdout, "job types:  %s\n", jobTypeCounts(jl))
+	}
+	for _, j := range jl {
+		if msg := jobProblem(j); msg != "" {
+			fmt.Fprintf(stdout, "warning: job %q: %s\n", j.Name, msg)
+		}
+	}
 	return nil
+}
+
+// jobTypeCounts renders how many jobs there are of each type: "shell=3 tls=1".
+func jobTypeCounts(jl []jobs.Job) string {
+	counts := map[string]int{}
+	for _, j := range jl {
+		counts[string(j.Type)]++
+	}
+	types := make([]string, 0, len(counts))
+	for t := range counts {
+		types = append(types, t)
+	}
+	slices.Sort(types)
+	parts := make([]string, len(types))
+	for i, t := range types {
+		parts[i] = fmt.Sprintf("%s=%d", t, counts[t])
+	}
+	return strings.Join(parts, " ")
+}
+
+// jobProblem is what doctor can tell is wrong with a probe or drill from this
+// host, as the user running it: a tls job's ca_file that cannot be read, a
+// drill whose scratch directory cannot be made. It is "" for a job with no
+// such problem. serve may run as another user; the warning says so.
+func jobProblem(j jobs.Job) string {
+	if j.Spec == nil || !j.Enabled {
+		return ""
+	}
+	switch j.Type {
+	case jobs.TLS:
+		if j.Spec.CAFile == "" {
+			return ""
+		}
+		pem, err := os.ReadFile(j.Spec.CAFile)
+		if err != nil {
+			return fmt.Sprintf("ca_file cannot be read (by this user): %v", err)
+		}
+		if !x509.NewCertPool().AppendCertsFromPEM(pem) {
+			return fmt.Sprintf("ca_file %s holds no PEM certificate", j.Spec.CAFile)
+		}
+	case jobs.Drill:
+		dir, err := os.MkdirTemp(j.Spec.ScratchDir, "tend_doctor_*")
+		if err != nil {
+			where := j.Spec.ScratchDir
+			if where == "" {
+				where = os.TempDir()
+			}
+			return fmt.Sprintf("scratch_dir %s: no scratch directory can be made there (by this user): %v", where, err)
+		}
+		_ = os.Remove(dir)
+	}
+	return ""
 }
 
 func cmdHeartbeat(ctx context.Context, st store.Store, orgID int64, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -1915,7 +2055,8 @@ Commands:
                       (needs TEND_MASTER_KEY unless --no-master-key)
   sync <file>         reconcile jobs/channels/rules/heartbeats from a YAML config
   job list            list jobs
-  job add [flags]     create a new job
+  job add [flags]     create a new job: shell, http, a tls, domain or expiry
+                      probe, or a restore drill (-type)
   job enable <name>   enable a job
   job disable <name>  disable a job
   job rm <name>       delete a job (and its runs + job-scoped rules)
