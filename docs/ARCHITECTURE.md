@@ -66,7 +66,7 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP/Telegram), rules, the `Alertable` filter, and the `Worker` that drains the durable delivery queue. |
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
-| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, the security-headers middleware, and the rate limiter for `/login` and `/ping`. |
+| `internal/httpserver` | The HTTP surface: `requireAuth` middleware, the read + action REST API with leak-free DTOs, the htmx dashboard, login/logout, the heartbeat ping/health endpoints, and how the security headers and the `/login` and `/ping` rate limits from `kit/httpx` are applied. |
 | `internal/config` | Environment-driven process configuration (driver, DSN, master key). `TEND_DB` has no default; an unset value leaves the DSN empty and `cli.Run` refuses to open a database. |
 | `internal/cli` | Subcommand dispatch and the `serve` wiring that ties the runner, HTTP server, watcher, delivery worker, and retention sweep together. |
 
@@ -79,6 +79,7 @@ Code the Marsad tools share comes from the
 | `kit/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 | `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 | `kit/auth` | Cryptographic identity primitives: argon2id passwords, API token generation and hashing, signed session cookies, CSRF tokens. |
+| `kit/httpx` | The security-headers middleware (the CSP), the HTTP server with every connection phase bounded, and the keyed token-bucket rate limiter with its client-address keying. |
 | `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
 ---
@@ -406,7 +407,7 @@ careful.
   `requireAuth`. A resource id belonging to another org is simply not found.
 - **Rate limiting on the unauthenticated endpoints.** `POST /login` (burst 5,
   refill 1 per second) passes through an in-memory token bucket keyed by client
-  address and endpoint (`internal/httpserver/ratelimit.go`). `/ping/{token}`
+  address and endpoint (`kit/httpx`'s `RateLimiter`). `/ping/{token}`
   has two buckets, checked before the database is touched: unknown tokens are
   counted per client address (burst 30, refill 1 per second), and once an
   address has spent that budget every ping from it is refused, whatever token
@@ -421,7 +422,7 @@ careful.
   canonical form; anything else falls back to the TCP peer, so a header value
   cannot become an arbitrary bucket key. Buckets live in the server process;
   idle ones are evicted by a sweep that runs at most every 10 minutes.
-- **Security headers on every response.** `securityHeaders` wraps the whole mux
+- **Security headers on every response.** `httpx.SecurityHeaders` wraps the whole mux
   and sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` built on
   `default-src 'self'` and `frame-ancestors 'none'`, with no inline scripts or
@@ -521,7 +522,7 @@ These limits are constants in the code, not configuration.
   on. On Postgres it does nothing; autovacuum makes the space reusable. A
   failed sweep is logged and retried on the next tick.
 - **HTTP server timeouts.** `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`,
-  and `IdleTimeout` are all 10 seconds (`newHTTPServer` in `internal/cli`).
+  and `IdleTimeout` are all 10 seconds (`httpx.NewServer`, called by `serve`).
   Every handler is quick and the largest request body is a login form, so a
   client that stalls while sending its headers or body, while reading the
   response, or between requests cannot hold a connection open.

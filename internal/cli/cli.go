@@ -23,6 +23,7 @@ import (
 
 	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/kit/httpx"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/config"
@@ -275,30 +276,11 @@ func (sw *sweeper) run(ctx context.Context, now time.Time) {
 // serveShutdownTimeout bounds the HTTP server's graceful drain on ctx cancel.
 const serveShutdownTimeout = 5 * time.Second
 
-// httpTimeout bounds each phase of an HTTP connection; see newHTTPServer.
+// httpTimeout bounds each phase of an HTTP connection (reading the headers,
+// reading the whole request including its body, writing the response, and
+// idling between requests); see httpx.NewServer. All handlers are quick and
+// the largest request body is a login form, so one short limit fits them all.
 const httpTimeout = 10 * time.Second
-
-// newHTTPServer returns the HTTP server serve runs, with every phase of a
-// connection bounded by timeout: reading the request headers, reading the
-// whole request including its body, writing the response, and sitting idle
-// between requests. All handlers are quick (ping, login, dashboard pages, API
-// calls) and the largest request body is a login form, so one short limit fits
-// them all and a stalled or abandoned client can hold a connection for at most
-// about that long instead of forever.
-//
-// ReadTimeout is what bounds the body. Without it a client could send complete
-// headers, promise a body, and never send it: the connection and its goroutine
-// then stayed open indefinitely, including on the unauthenticated routes.
-func newHTTPServer(addr string, h http.Handler, timeout time.Duration) *http.Server {
-	return &http.Server{
-		Addr:              addr,
-		Handler:           h,
-		ReadHeaderTimeout: timeout,
-		ReadTimeout:       timeout,
-		WriteTimeout:      timeout,
-		IdleTimeout:       timeout,
-	}
-}
 
 // sessionKeyInfo is the HKDF "info" label that domain-separates the session
 // signing key from any other key derived from the same master key. Bumping the
@@ -349,12 +331,7 @@ func buildAuthConfig(masterKeyB64 string) (*httpserver.AuthConfig, error) {
 // (HTTPS-only). It defaults to false (plain HTTP behind a TLS-terminating
 // proxy) and is opted into via TEND_COOKIE_SECURE.
 func cookieSecure() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("TEND_COOKIE_SECURE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return httpx.EnvFlag("TEND_COOKIE_SECURE")
 }
 
 // buildServeHandler constructs the exact HTTP handler cmdServe serves, opening a
@@ -479,7 +456,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	}()
 
 	// --- HTTP server ---
-	srv := newHTTPServer(addr, httpserver.New(st, clk, dispatch, logger, authCfg).Handler(), httpTimeout)
+	srv := httpx.NewServer(addr, httpserver.New(st, clk, dispatch, logger, authCfg).Handler(), httpTimeout)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

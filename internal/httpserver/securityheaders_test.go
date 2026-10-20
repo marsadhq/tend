@@ -9,6 +9,11 @@ import (
 	"github.com/marsadhq/tend/internal/httpserver"
 )
 
+// tendCSP is the Content-Security-Policy Tend has always served. The headers
+// now come from kit/httpx; this pins that the policy did not change with them.
+const tendCSP = "default-src 'self'; script-src 'self'; style-src 'self'; " +
+	"img-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+
 // wantSecurityHeaders asserts the four defensive headers are present with
 // their exact expected values on the given response.
 func wantSecurityHeaders(t *testing.T, h http.Header) {
@@ -25,6 +30,9 @@ func wantSecurityHeaders(t *testing.T, h http.Header) {
 	csp := h.Get("Content-Security-Policy")
 	if csp == "" {
 		t.Fatal("Content-Security-Policy: missing")
+	}
+	if csp != tendCSP {
+		t.Errorf("Content-Security-Policy:\n got %q\nwant %q", csp, tendCSP)
 	}
 	for _, want := range []string{"default-src 'self'", "script-src 'self'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, want) {

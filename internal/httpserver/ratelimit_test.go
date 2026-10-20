@@ -5,93 +5,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/marsadhq/kit/clock"
 )
 
-func TestRateLimiter_AllowsBurstThenBlocks(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := newRateLimiter(fk, 1, 5)
-
-	for i := 0; i < 5; i++ {
-		if !rl.Allow("k", fk.Now()) {
-			t.Fatalf("burst request %d: expected allowed", i+1)
-		}
-	}
-	if rl.Allow("k", fk.Now()) {
-		t.Fatal("6th request within burst window: expected blocked")
-	}
-
-	fk.Advance(1 * time.Second)
-	if !rl.Allow("k", fk.Now()) {
-		t.Fatal("after 1s refill: expected one more allowed request")
-	}
-	if rl.Allow("k", fk.Now()) {
-		t.Fatal("immediately after the refilled request: expected blocked again")
-	}
-}
-
-func TestRateLimiter_PerKeyIsolation(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := newRateLimiter(fk, 1, 3)
-
-	for i := 0; i < 3; i++ {
-		if !rl.Allow("ip-a|ping", fk.Now()) {
-			t.Fatalf("ip-a request %d: expected allowed", i+1)
-		}
-	}
-	if rl.Allow("ip-a|ping", fk.Now()) {
-		t.Fatal("ip-a: expected exhausted burst to block")
-	}
-	for i := 0; i < 3; i++ {
-		if !rl.Allow("ip-b|ping", fk.Now()) {
-			t.Fatalf("ip-b request %d: expected its own full burst, unaffected by ip-a", i+1)
-		}
-	}
-}
-
-func TestRateLimiter_EndpointIsolation(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := newRateLimiter(fk, 1, 2)
-
-	for i := 0; i < 2; i++ {
-		if !rl.Allow("1.2.3.4|login", fk.Now()) {
-			t.Fatalf("login request %d: expected allowed", i+1)
-		}
-	}
-	if rl.Allow("1.2.3.4|login", fk.Now()) {
-		t.Fatal("login: expected exhausted burst to block")
-	}
-	// Same IP, different endpoint key: independent bucket.
-	for i := 0; i < 2; i++ {
-		if !rl.Allow("1.2.3.4|ping", fk.Now()) {
-			t.Fatalf("ping request %d: expected its own full burst, unaffected by login", i+1)
-		}
-	}
-}
-
-func TestRateLimiter_GCEvictsIdleBuckets(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := newRateLimiter(fk, 1, 1)
-
-	rl.Allow("stale-key", fk.Now())
-	if len(rl.buckets) != 1 {
-		t.Fatalf("buckets after seed: got %d, want 1", len(rl.buckets))
-	}
-
-	// Advance well past the idle TTL and touch a new key; gc runs opportunistically
-	// inside Allow and should drop the stale bucket.
-	fk.Advance(rateLimiterIdleTTL + time.Minute)
-	rl.Allow("fresh-key", fk.Now())
-
-	if _, ok := rl.buckets["stale-key"]; ok {
-		t.Error("expected stale-key to be evicted after exceeding idle TTL")
-	}
-	if _, ok := rl.buckets["fresh-key"]; !ok {
-		t.Error("expected fresh-key to be present")
-	}
-}
+// The token buckets themselves are kit/httpx's and are tested there; these
+// tests pin how Tend keys them: by the TCP peer, or by X-Forwarded-For only
+// when TEND_TRUST_PROXY says so.
 
 func TestClientIP_IgnoresXFFByDefault(t *testing.T) {
 	t.Setenv("TEND_TRUST_PROXY", "")
@@ -161,49 +79,5 @@ func TestClientIP_XFFMustBeAnAddress(t *testing.T) {
 				t.Errorf("clientIP with X-Forwarded-For %.40q = %q, want %q", c.xff, got, c.want)
 			}
 		})
-	}
-}
-
-// TestRateLimiter_RetryAfter: a rejected client is told how long an empty
-// bucket takes to hold a token again, never less than a second.
-func TestRateLimiter_RetryAfter(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	for _, c := range []struct {
-		rate float64
-		want string
-	}{
-		{10, "1"},   // a token every 100ms
-		{1, "1"},    // the login and ping limiters: a token every second
-		{0.1, "10"}, // a token every 10 seconds
-		{0.3, "4"},  // rounded up
-	} {
-		if got := newRateLimiter(fk, c.rate, 5).retryAfter(); got != c.want {
-			t.Errorf("retryAfter at %v tokens/s = %q, want %q", c.rate, got, c.want)
-		}
-	}
-}
-
-// TestRateLimiter_HasDoesNotConsumeOrAllocate: Has reports whether a token is
-// there without taking it, and asking about a new key creates no bucket.
-func TestRateLimiter_HasDoesNotConsumeOrAllocate(t *testing.T) {
-	fk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	rl := newRateLimiter(fk, 1, 2)
-
-	for i := 0; i < 5; i++ {
-		if !rl.Has("new", fk.Now()) {
-			t.Fatal("Has on an unseen key: want true (a full bucket)")
-		}
-	}
-	if len(rl.buckets) != 0 {
-		t.Fatalf("Has created %d buckets, want 0", len(rl.buckets))
-	}
-	rl.Allow("k", fk.Now())
-	rl.Allow("k", fk.Now())
-	if rl.Has("k", fk.Now()) {
-		t.Fatal("Has on an empty bucket: want false")
-	}
-	fk.Advance(time.Second)
-	if !rl.Has("k", fk.Now()) || !rl.Has("k", fk.Now()) {
-		t.Fatal("Has after a refill: want true, and still true on asking again")
 	}
 }
