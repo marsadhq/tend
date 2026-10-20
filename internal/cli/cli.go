@@ -174,6 +174,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 	case "token":
 		return cmdToken(ctx, st, org.ID, args[1:], stdout, stderr)
 
+	case "import":
+		return cmdImport(ctx, st, org.ID, args[1:], stdin, stdout, stderr)
+
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", cmd)
 		printUsage(stderr)
@@ -1900,6 +1903,8 @@ Commands:
   heartbeat show <n>  show a heartbeat: status, run, last result and output
   heartbeat ping-key [-new|-set|-clear]  the org's ping key for slug URLs
   heartbeat history <n> [-body]  its pings and transitions, newest first
+  import healthchecks --api-key-file <f>  import a Healthchecks project's checks
+                      as heartbeats, keeping their UUIDs as tokens (--dry-run)
   doctor              diagnose config/DB/connectivity
   user add [flags]    create a user (admin) - password read from stdin
   token create [flags]  create an API token (printed once)
