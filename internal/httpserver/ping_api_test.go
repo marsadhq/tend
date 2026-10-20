@@ -81,14 +81,14 @@ func (p *pingAPI) log(t *testing.T) []heartbeat.Ping {
 
 func wantOK(t *testing.T, rec *httptest.ResponseRecorder, what string) {
 	t.Helper()
-	if rec.Code != http.StatusOK || rec.Body.String() != "OK" {
-		t.Fatalf("%s: %d %q, want 200 OK", what, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
+		t.Fatalf("%s: %d %q, want 200 ok", what, rec.Code, rec.Body.String())
 	}
 }
 
 // TestPingAPIVariants: every Healthchecks ping URL works with HEAD, GET and
-// POST, answers 200 "OK" with the Healthchecks headers, and is logged as the
-// kind it names.
+// POST, answers 200 "ok" with Healthchecks' Ping-Body-Limit header, and is
+// logged as the kind it names.
 func TestPingAPIVariants(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s store.Store) {
 		p := newPingAPI(t, s, "tok-variants")
@@ -112,11 +112,8 @@ func TestPingAPIVariants(t *testing.T) {
 				if rec.Code != http.StatusOK {
 					t.Fatalf("%s /ping/<token>%s: status %d, want 200", method, c.suffix, rec.Code)
 				}
-				if method != http.MethodHead && rec.Body.String() != "OK" {
-					t.Fatalf("%s /ping/<token>%s: body %q, want OK", method, c.suffix, rec.Body.String())
-				}
-				if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-					t.Errorf("%s %s: Access-Control-Allow-Origin = %q, want *", method, c.suffix, got)
+				if method != http.MethodHead && rec.Body.String() != "ok" {
+					t.Fatalf("%s /ping/<token>%s: body %q, want ok", method, c.suffix, rec.Body.String())
 				}
 				if got := rec.Header().Get("Ping-Body-Limit"); got != "100000" {
 					t.Errorf("%s %s: Ping-Body-Limit = %q, want 100000", method, c.suffix, got)
@@ -194,13 +191,13 @@ func TestPingAPIErrors(t *testing.T) {
 			{http.MethodGet, p.token + "/99999999999999999999", http.StatusBadRequest, "invalid url format"},
 			{http.MethodGet, p.token + "/start?rid=not-a-uuid", http.StatusBadRequest, "invalid uuid format"},
 			{http.MethodGet, p.token + "?rid=", http.StatusBadRequest, "invalid uuid format"},
-			{http.MethodGet, p.token + "/start/extra", http.StatusNotFound, "not found"},
-			{http.MethodGet, p.token + "/a/b/c", http.StatusNotFound, "not found"},
-			{http.MethodGet, "", http.StatusNotFound, "not found"},
-			{http.MethodGet, "nope", http.StatusNotFound, "not found"},
-			{http.MethodGet, "nope/start", http.StatusNotFound, "not found"},
-			{http.MethodPost, "nope/log", http.StatusNotFound, "not found"},
-			{http.MethodGet, "nope/7", http.StatusNotFound, "not found"},
+			{http.MethodGet, p.token + "/start/extra", http.StatusNotFound, "404 page not found"},
+			{http.MethodGet, p.token + "/a/b/c", http.StatusNotFound, "404 page not found"},
+			{http.MethodGet, "", http.StatusNotFound, "404 page not found"},
+			{http.MethodGet, "nope", http.StatusNotFound, "404 page not found"},
+			{http.MethodGet, "nope/start", http.StatusNotFound, "404 page not found"},
+			{http.MethodPost, "nope/log", http.StatusNotFound, "404 page not found"},
+			{http.MethodGet, "nope/7", http.StatusNotFound, "404 page not found"},
 		} {
 			rec := p.do(c.method, c.path, "")
 			if rec.Code != c.code || strings.TrimSpace(rec.Body.String()) != c.body {

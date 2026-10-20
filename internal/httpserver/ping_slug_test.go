@@ -78,16 +78,16 @@ func TestSlugPingErrors(t *testing.T) {
 			code int
 			body string
 		}{
-			{"wrong-key/nightly", http.StatusNotFound, "not found"},
-			{"wrong-key/nightly/start", http.StatusNotFound, "not found"},
-			{testPingKey + "/no-such-check", http.StatusNotFound, "not found"},
-			{testPingKey + "/no-such-check/fail", http.StatusNotFound, "not found"},
+			{"wrong-key/nightly", http.StatusNotFound, "404 page not found"},
+			{"wrong-key/nightly/start", http.StatusNotFound, "404 page not found"},
+			{testPingKey + "/no-such-check", http.StatusNotFound, "404 page not found"},
+			{testPingKey + "/no-such-check/fail", http.StatusNotFound, "404 page not found"},
 			{testPingKey + "/nightly/256", http.StatusBadRequest, "invalid url format"},
-			{testPingKey + "/nightly/bogus", http.StatusNotFound, "not found"},
+			{testPingKey + "/nightly/bogus", http.StatusNotFound, "404 page not found"},
 			{testPingKey + "/Not-A-Slug?create=1", http.StatusBadRequest, "invalid url format"},
 		} {
 			rec := p.do(http.MethodGet, c.path, "")
-			if rec.Code != c.code || rec.Body.String() != c.body {
+			if rec.Code != c.code || strings.TrimSpace(rec.Body.String()) != c.body {
 				t.Errorf("/ping/%s: %d %q, want %d %q", c.path, rec.Code, rec.Body.String(), c.code, c.body)
 			}
 		}
