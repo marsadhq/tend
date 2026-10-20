@@ -292,7 +292,9 @@ the channel config, builds the provider, and sends. Success marks the row
 `delivered`. Failure reschedules it with exponential backoff (1 second,
 doubling, capped at 5 minutes). Once a delivery has been failing for 24 hours it
 is marked `failed` and `notification.failed` is recorded, so a dropped alert is
-never silent. Delivery is at-least-once: a send that succeeded but could not be
+never silent. A failure the provider marks permanent (`notify.Permanent`: an
+HTTP 4xx other than 408 and 429, an SMTP 5xx reply) is given up the same way on
+the spot, since retrying cannot change the answer. Delivery is at-least-once: a send that succeeded but could not be
 marked delivered is repeated after the lease.
 
 **Delivery is ordered per channel.** The claim only takes a channel's oldest

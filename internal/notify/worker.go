@@ -70,8 +70,9 @@ const claimBatch = 32
 
 // Worker drains the durable deliveries queue: claim due rows, send each via
 // its channel's provider, and either finalize (delivered), reschedule with
-// capped exponential backoff, or - once a delivery is older than MaxAge -
-// give up and record notification.failed so a dropped alert is never silent.
+// capped exponential backoff, or - when the destination refused it for good
+// (IsPermanent) or once a delivery is older than MaxAge - give up and record
+// notification.failed so a dropped alert is never silent.
 //
 // Delivery is asynchronous by design: emitters only enqueue (transactionally
 // with the event insert) and optionally Nudge the worker, so a slow or down
@@ -187,10 +188,19 @@ func (w *Worker) deliverOne(ctx context.Context, d Delivery) bool {
 		return false // shutdown mid-send: the lease expiry retries, not a failure
 	}
 
-	if w.now().Sub(d.CreatedAt) >= w.MaxAge {
+	// Give up when the destination refused this notification for good (a
+	// 4xx answer, an SMTP 5xx reply: retrying cannot help, and on an ordered
+	// channel it would hold back every later alert), or once the delivery has
+	// been failing for MaxAge.
+	rejected := IsPermanent(err)
+	if rejected || w.now().Sub(d.CreatedAt) >= w.MaxAge {
 		// Errors from send never include channel secrets (postJSON redacts the
 		// URL; decrypt errors carry no blob), so logging err here is safe.
-		w.log.Error("notify: delivery failed permanently",
+		reason := "retried for too long"
+		if rejected {
+			reason = "rejected by the destination"
+		}
+		w.log.Error("notify: delivery failed permanently", "reason", reason,
 			"delivery", d.ID, "channel", d.ChannelID, "event", d.Event.Type, "attempts", d.Attempts, "err", err)
 		// Loop guard: a notification.failed that cannot be delivered is
 		// logged and dropped. Recording another notification.failed for it

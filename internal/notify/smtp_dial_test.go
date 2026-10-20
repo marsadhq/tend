@@ -50,6 +50,11 @@ func stallingSMTPServer(t *testing.T) (host string, port int) {
 // fakeSMTPServer speaks just enough SMTP for one unauthenticated delivery
 // (no STARTTLS, no AUTH advertised) and reports what it received.
 func fakeSMTPServer(t *testing.T) (host string, port int, received <-chan string) {
+	return fakeSMTPServerReplying(t, "250 ok")
+}
+
+// fakeSMTPServerReplying is fakeSMTPServer answering RCPT with rcptReply.
+func fakeSMTPServerReplying(t *testing.T, rcptReply string) (host string, port int, received <-chan string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -77,8 +82,10 @@ func fakeSMTPServer(t *testing.T) (host string, port int, received <-chan string
 			case strings.HasPrefix(cmd, "EHLO"):
 				say("250-fake")
 				say("250 8BITMIME")
-			case strings.HasPrefix(cmd, "MAIL"), strings.HasPrefix(cmd, "RCPT"):
+			case strings.HasPrefix(cmd, "MAIL"):
 				say("250 ok")
+			case strings.HasPrefix(cmd, "RCPT"):
+				say(rcptReply)
 			case cmd == "DATA":
 				say("354 go ahead")
 				for {
@@ -197,5 +204,31 @@ func TestSMTPSendRefusesAuthWithoutServerSupport(t *testing.T) {
 	err := p.Send(ctx, Message{Subject: "Down", Body: "api"})
 	if err == nil || !strings.Contains(err.Error(), "doesn't support AUTH") {
 		t.Fatalf("err = %v, want the server-doesn't-support-AUTH refusal", err)
+	}
+}
+
+// TestSMTPSendClassifiesReplies: a 5xx reply (here an unknown recipient) is
+// permanent, so the worker gives the delivery up at once; a 4xx reply is a
+// temporary refusal and stays retryable.
+func TestSMTPSendClassifiesReplies(t *testing.T) {
+	for reply, permanent := range map[string]bool{
+		"550 5.1.1 no such user":         true,
+		"554 5.7.1 rejected":             true,
+		"451 4.3.0 try again later":      false,
+		"421 4.7.0 too many connections": false,
+	} {
+		t.Run(reply, func(t *testing.T) {
+			host, port, _ := fakeSMTPServerReplying(t, reply)
+			p := NewSMTP(SMTPConfig{Host: host, Port: port, From: "a@x", To: []string{"b@y"}})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := p.Send(ctx, Message{Subject: "Down", Body: "api"})
+			if err == nil {
+				t.Fatal("Send: err = nil, want the relay's refusal")
+			}
+			if got := IsPermanent(err); got != permanent {
+				t.Fatalf("IsPermanent(%v) = %v, want %v", err, got, permanent)
+			}
+		})
 	}
 }
