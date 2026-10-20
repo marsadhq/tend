@@ -61,7 +61,9 @@ type Store interface {
 	ListJobs(ctx context.Context, orgID int64) ([]jobs.Job, error)
 	UpdateJob(ctx context.Context, j jobs.Job) error
 	// DeleteJob removes a job and ALL of its dependent rows (its job_runs and any
-	// notification_rules scoped to it) in a single transaction, then the job row.
+	// notification_rules scoped to it) in a single transaction, then the job row,
+	// and records job.removed (jobs.RemovedEvent) in that transaction, before the
+	// job-scoped rules are gone so they can still route it.
 	// Deletes are explicit (not FK cascade) so behavior is identical on every
 	// backend. All-jobs rules (job_id = 0) are preserved. ErrNotFound if the job
 	// doesn't exist for the org (no side effect: the transaction is rolled back).
@@ -169,8 +171,9 @@ type Store interface {
 	// / heartbeat.recovered, keyed by name in the events table), newest first,
 	// bounded by limit.
 	ListHeartbeatEvents(ctx context.Context, orgID int64, name string, limit int) ([]core.Event, error)
-	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound. Its
-	// past events (the audit trail) are intentionally left in place.
+	// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound, and
+	// records heartbeat.removed in the same transaction. Its past events (the
+	// audit trail) are intentionally left in place.
 	DeleteHeartbeat(ctx context.Context, orgID, id int64) error
 	// RecordPing records a dead-man's-switch ping for the heartbeat identified by
 	// the globally-unique token: it stamps last_seen_at and sets status to 'up'.

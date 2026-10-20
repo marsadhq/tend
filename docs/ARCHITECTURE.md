@@ -228,9 +228,18 @@ Event types currently emitted:
   recorded next to `run.succeeded` (same payload, dedup key
   `run:<run_id>:run.recovered`) when the job's previous finished run had not
   succeeded: failed, timed out or reaped.
-- **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`. A heartbeat that
-  was never pinged is armed from its creation time, so `heartbeat.missed` also
-  covers a first ping that never arrives.
+- **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`,
+  `heartbeat.removed`. A heartbeat that was never pinged is armed from its
+  creation time, so `heartbeat.missed` also covers a first ping that never
+  arrives. Every heartbeat event carries the plain heartbeat name as its
+  payload.
+- **Removals:** `job.removed` (payload `{"job_id":…,"job_name":…}`, dedup key
+  `job:<id>:removed`) and `heartbeat.removed` are recorded by the store's
+  `DeleteJob` / `DeleteHeartbeat` in the delete's own transaction, so every
+  way of deleting (`tend job rm`, `tend heartbeat rm`) reports it. A rule
+  scoped to the deleted job still routes its `job.removed`: the event is
+  written before the job's rules are deleted. (`tend sync` does not delete
+  jobs or heartbeats; see section 5.)
 - **Notifications:** `notification.failed` (emitted when delivery is exhausted).
 
 **Terminal run events are written atomically with the run.** The runner records

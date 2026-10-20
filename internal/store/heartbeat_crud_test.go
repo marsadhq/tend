@@ -327,13 +327,15 @@ func TestDeleteHeartbeat(t *testing.T) {
 			t.Errorf("delete again: %v, want ErrNotFound", err)
 		}
 
-		// Past transition events remain (audit trail).
+		// Past transition events remain (audit trail), now ended by the one
+		// heartbeat.removed the delete recorded (the failed deletes recorded
+		// nothing).
 		evs, err := s.ListHeartbeatEvents(ctx, org.ID, "gone", 10)
 		if err != nil {
 			t.Fatalf("ListHeartbeatEvents: %v", err)
 		}
-		if len(evs) != 1 {
-			t.Errorf("events after delete = %d, want 1 (audit trail preserved)", len(evs))
+		if len(evs) != 2 || evs[0].Type != "heartbeat.removed" || evs[1].Type != "heartbeat.missed" {
+			t.Errorf("events after delete = %+v, want heartbeat.removed then the preserved heartbeat.missed", evs)
 		}
 	})
 }
