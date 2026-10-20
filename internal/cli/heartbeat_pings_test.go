@@ -72,13 +72,15 @@ func TestHeartbeatShowAndHistoryShowThePingLog(t *testing.T) {
 	if len(lines) != 4 {
 		t.Fatalf("history has %d lines, want 4 (3 pings, 1 transition):\n%s", len(lines), hist)
 	}
-	for i, want := range []string{"start", "heartbeat.missed", "fail", "start"} {
+	// The pings above are back-dated while the transition is stamped when it
+	// is written, so here it is the newest entry.
+	for i, want := range []string{"heartbeat.missed", "start", "fail", "start"} {
 		if !strings.Contains(lines[i], want) {
 			t.Errorf("history line %d = %q, want it to show %q", i, lines[i], want)
 		}
 	}
-	if !strings.Contains(lines[1], "Heartbeat failed: db-backup (exit 3)") {
-		t.Errorf("transition line = %q, want its subject", lines[1])
+	if !strings.Contains(lines[0], "Heartbeat failed: db-backup (exit 3)") {
+		t.Errorf("transition line = %q, want its subject", lines[0])
 	}
 	for _, want := range []string{"exit 3", "took 1m30s", "rid 728b3763", "36 B"} {
 		if !strings.Contains(lines[2], want) {
