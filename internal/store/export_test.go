@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"time"
+)
 
 // RawDB exposes a store's underlying *sql.DB to external tests for raw schema
 // assertions. Test-only (export_test.go is not part of the normal build).
@@ -26,4 +29,12 @@ func SetReclaimThresholds(minFreeBytes int64, minFreeRatio float64, maxVacuumByt
 	return func() {
 		reclaimMinFreeBytes, reclaimMinFreeRatio, reclaimMaxVacuumBytes = oldMin, oldRatio, oldMax
 	}
+}
+
+// SetReclaimSteps sets ReclaimSpace's incremental step size, time budget and
+// step hook for a test and returns a func that restores them.
+func SetReclaimSteps(pages int, budget time.Duration, hook func()) (restore func()) {
+	oldPages, oldBudget, oldHook := incrementalVacuumPages, reclaimBudget, reclaimStepHook
+	incrementalVacuumPages, reclaimBudget, reclaimStepHook = pages, budget, hook
+	return func() { incrementalVacuumPages, reclaimBudget, reclaimStepHook = oldPages, oldBudget, oldHook }
 }

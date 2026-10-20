@@ -1400,46 +1400,47 @@ func (s *SQLiteStore) PruneDeliveries(ctx context.Context, before time.Time) (in
 
 // --- reclaiming space -------------------------------------------------------
 
-// Thresholds for ReclaimSpace. Pages a delete frees are reused by later
-// inserts, so giving them back to the file system only pays when there are
-// many: at least reclaimMinFreeBytes and at least reclaimMinFreeRatio of the
-// file. A full VACUUM (needed once, to switch a database to incremental
-// vacuum) rewrites the whole file while holding the write lock, so it is only
-// done while serving for a file of at most reclaimMaxVacuumBytes. Vars so
-// tests can lower them.
+// Settings for ReclaimSpace. Vars so tests can change them.
+//
+// Pages a delete frees are reused by later inserts, so giving them back to
+// the file system only pays when there are many: at least reclaimMinFreeBytes
+// and at least reclaimMinFreeRatio of the file.
+//
+// The store has a single connection (SetMaxOpenConns(1)), so whatever
+// ReclaimSpace runs, every ping, run and page waits for. A full VACUUM (needed
+// once, to switch a database to incremental vacuum) rewrites the whole file in
+// one statement, so it is only done for a file of at most
+// reclaimMaxVacuumBytes, which takes a moment. Incremental vacuum goes in
+// steps of incrementalVacuumPages pages, each its own short statement that
+// returns the connection to the pool, and stops once reclaimBudget is spent;
+// the next sweep carries on.
 var (
-	reclaimMinFreeBytes   int64 = 8 << 20
-	reclaimMinFreeRatio         = 0.25
-	reclaimMaxVacuumBytes int64 = 512 << 20
+	reclaimMinFreeBytes    int64 = 8 << 20
+	reclaimMinFreeRatio          = 0.25
+	reclaimMaxVacuumBytes  int64 = 64 << 20
+	reclaimBudget                = 2 * time.Second
+	incrementalVacuumPages       = 512
+	// reclaimStepHook, when set, runs after each incremental step, with no
+	// connection held. Tests use it to look inside the loop.
+	reclaimStepHook func()
 )
-
-// incrementalVacuumPages is how many free pages one incremental_vacuum step
-// gives back. Each step is its own short write, so pings and runs are never
-// held up for long.
-const incrementalVacuumPages = 2048
 
 // ReclaimSpace returns the space freed by pruning to the file system when
 // there is enough of it to be worth it (see reclaimMinFreeBytes), and reports
 // how many bytes the database file shrank by.
 //
-// A database already in incremental auto-vacuum mode is shrunk in short
-// incremental_vacuum steps. Any other database (every one created by an
+// A database in incremental auto-vacuum mode is shrunk in short
+// incremental_vacuum steps for at most reclaimBudget; between two steps other
+// queries get the connection. Any other database (every one created by an
 // earlier version) is switched to that mode by one VACUUM, which compacts it
-// at the same time; a file larger than reclaimMaxVacuumBytes is not rewritten
-// while serving and ErrCompactTooLarge is returned instead, for the operator
-// to VACUUM it offline. The write-ahead log is truncated afterwards.
+// at the same time and holds the connection while it runs; a file larger than
+// reclaimMaxVacuumBytes is not rewritten while serving and ErrCompactTooLarge
+// is returned instead (see its doc for the offline fix). The write-ahead log
+// is truncated afterwards.
 func (s *SQLiteStore) ReclaimSpace(ctx context.Context) (int64, error) {
-	// One connection throughout: PRAGMA auto_vacuum only takes effect through
-	// a VACUUM run on the connection that set it.
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("reclaim space: %w", err)
-	}
-	defer conn.Close()
-
 	pragma := func(name string) (int64, error) {
 		var v int64
-		if err := conn.QueryRowContext(ctx, "PRAGMA "+name).Scan(&v); err != nil {
+		if err := s.db.QueryRowContext(ctx, "PRAGMA "+name).Scan(&v); err != nil {
 			return 0, fmt.Errorf("reclaim space: PRAGMA %s: %w", name, err)
 		}
 		return v, nil
@@ -1448,14 +1449,11 @@ func (s *SQLiteStore) ReclaimSpace(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	size := func() (pages, free int64, err error) {
-		if pages, err = pragma("page_count"); err != nil {
-			return 0, 0, err
-		}
-		free, err = pragma("freelist_count")
-		return pages, free, err
+	pages, err := pragma("page_count")
+	if err != nil {
+		return 0, err
 	}
-	pages, free, err := size()
+	free, err := pragma("freelist_count")
 	if err != nil {
 		return 0, err
 	}
@@ -1470,16 +1468,20 @@ func (s *SQLiteStore) ReclaimSpace(ctx context.Context) (int64, error) {
 
 	const incremental = 2
 	if mode == incremental {
+		deadline := time.Now().Add(reclaimBudget)
 		for free > 0 && ctx.Err() == nil {
-			if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", incrementalVacuumPages)); err != nil {
+			if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", incrementalVacuumPages)); err != nil {
 				return 0, fmt.Errorf("reclaim space: incremental vacuum: %w", err)
 			}
-			_, left, err := size()
+			if reclaimStepHook != nil {
+				reclaimStepHook()
+			}
+			left, err := pragma("freelist_count")
 			if err != nil {
 				return 0, err
 			}
-			if left >= free {
-				break // no progress; do not spin
+			if left >= free || !time.Now().Before(deadline) {
+				break // no progress, or out of time: the next sweep carries on
 			}
 			free = left
 		}
@@ -1487,17 +1489,25 @@ func (s *SQLiteStore) ReclaimSpace(ctx context.Context) (int64, error) {
 		if fileBytes > reclaimMaxVacuumBytes {
 			return 0, fmt.Errorf("%w: %d MiB of the %d MiB file is free", ErrCompactTooLarge, freeBytes>>20, fileBytes>>20)
 		}
-		if _, err := conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL"); err != nil {
-			return 0, fmt.Errorf("reclaim space: set auto_vacuum: %w", err)
+		// PRAGMA auto_vacuum only takes effect through a VACUUM run on the
+		// connection that set it, so these two share one.
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("reclaim space: %w", err)
 		}
-		if _, err := conn.ExecContext(ctx, "VACUUM"); err != nil {
+		_, err = conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL")
+		if err == nil {
+			_, err = conn.ExecContext(ctx, "VACUUM")
+		}
+		conn.Close()
+		if err != nil {
 			return 0, fmt.Errorf("reclaim space: vacuum: %w", err)
 		}
 	}
 	// The pages moved by the vacuum went through the write-ahead log; give
 	// that space back as well. A busy reader can keep the log from being
 	// truncated, which is harmless: the next checkpoint does it.
-	_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 
 	after, err := pragma("page_count")
 	if err != nil {

@@ -22,8 +22,9 @@ var ErrNotFound = errors.New("store: not found")
 
 // ErrCompactTooLarge is returned by ReclaimSpace when compacting the database
 // would mean rewriting a file too large to rewrite while serving. Stop Tend
-// and run VACUUM on the file to compact it.
-var ErrCompactTooLarge = errors.New("store: database too large to compact while serving; stop tend and VACUUM it offline")
+// and run `PRAGMA auto_vacuum = INCREMENTAL; VACUUM;` on the file once; from
+// then on the sweep frees space in short steps by itself.
+var ErrCompactTooLarge = errors.New("store: database too large to compact while serving; stop tend and run sqlite3 <db> 'PRAGMA auto_vacuum = INCREMENTAL; VACUUM;' once")
 
 // SecretMeta is the non-secret metadata of a stored secret. It deliberately has
 // NO ciphertext/value field so a listing of secrets can never carry secret
@@ -137,10 +138,11 @@ type Store interface {
 	PruneDeliveries(ctx context.Context, before time.Time) (int64, error)
 	// ReclaimSpace gives the space pruning freed back to the file system when
 	// there is enough of it to matter, and returns the bytes the database
-	// shrank by. SQLite compacts (once switching the file to incremental
-	// auto-vacuum, then in short steps), returning ErrCompactTooLarge instead
-	// of rewriting a large file while serving; Postgres does nothing, as
-	// autovacuum already makes the space reusable.
+	// shrank by. SQLite compacts (once switching a small file to incremental
+	// auto-vacuum with VACUUM, then in short steps that let other queries
+	// through, for a bounded time per call), returning ErrCompactTooLarge
+	// instead of rewriting a large file while serving; Postgres does nothing,
+	// as autovacuum already makes the space reusable.
 	ReclaimSpace(ctx context.Context) (int64, error)
 
 	// durable notification deliveries. Pending rows are enqueued transactionally
