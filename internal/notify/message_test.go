@@ -96,3 +96,24 @@ func TestMessageForRunRecovered(t *testing.T) {
 		t.Fatal("run.recovered must be alertable and run.succeeded must not")
 	}
 }
+
+// TestMessageForRemovals asserts job.removed and heartbeat.removed name what
+// was deleted and are alertable.
+func TestMessageForRemovals(t *testing.T) {
+	job := messageFor(core.Event{Type: "job.removed", Payload: `{"job_id":7,"job_name":"nightly"}`})
+	if job.Subject != "Job removed: nightly" {
+		t.Fatalf("job.removed subject = %q", job.Subject)
+	}
+	hb := messageFor(core.Event{Type: "heartbeat.removed", Payload: "db-backup"})
+	if hb.Subject != "Heartbeat removed: db-backup" {
+		t.Fatalf("heartbeat.removed subject = %q", hb.Subject)
+	}
+	for _, typ := range []string{"job.removed", "heartbeat.removed"} {
+		if !Alertable(typ) {
+			t.Errorf("Alertable(%q) = false, want true", typ)
+		}
+	}
+	if EventJobID(core.Event{Payload: `{"job_id":7,"job_name":"nightly"}`}) != 7 {
+		t.Fatal("job.removed payload must scope to its job")
+	}
+}

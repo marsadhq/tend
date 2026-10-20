@@ -18,6 +18,8 @@ var alertable = map[string]bool{
 	"run.recovered":       true, // a success after a run that did not succeed
 	"heartbeat.missed":    true,
 	"heartbeat.recovered": true,
+	"job.removed":         true,
+	"heartbeat.removed":   true,
 }
 
 // Alertable reports whether events of type t may trigger notifications. The
@@ -102,6 +104,29 @@ func messageFor(ev core.Event) Message {
 		return Message{
 			Subject: "Heartbeat recovered: " + ev.Payload,
 			Body:    ev.Payload,
+			Event:   ev,
+		}
+
+	case "job.removed":
+		var p struct {
+			JobID   int64  `json:"job_id"`
+			JobName string `json:"job_name"`
+		}
+		_ = json.Unmarshal([]byte(ev.Payload), &p)
+		subject := "Job removed"
+		if p.JobName != "" {
+			subject = "Job removed: " + p.JobName
+		}
+		return Message{
+			Subject: subject,
+			Body:    "the job was deleted; it will not run or alert again",
+			Event:   ev,
+		}
+
+	case "heartbeat.removed":
+		return Message{
+			Subject: "Heartbeat removed: " + ev.Payload,
+			Body:    "the heartbeat was deleted; it is no longer monitored",
 			Event:   ev,
 		}
 

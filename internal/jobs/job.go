@@ -4,6 +4,7 @@
 package jobs
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -90,4 +91,24 @@ func RecoveredEvent(succeeded core.Event, runID int64) core.Event {
 	ev.Type = EventRunRecovered
 	ev.DedupKey = fmt.Sprintf("run:%d:%s", runID, EventRunRecovered)
 	return ev
+}
+
+// EventJobRemoved is recorded when a job is deleted. Its payload is
+// {"job_id":<id>,"job_name":"<name>"}, so rules scoped to the job match it, and
+// its dedup key is job:<id>:removed.
+const EventJobRemoved = "job.removed"
+
+// RemovedEvent is the job.removed event for job id, named name, of org orgID.
+func RemovedEvent(orgID, id int64, name string) core.Event {
+	payload, _ := json.Marshal(struct {
+		JobID   int64  `json:"job_id"`
+		JobName string `json:"job_name"`
+	}{id, name}) // cannot fail: an int and a string
+	return core.Event{
+		OrgID:    orgID,
+		Type:     EventJobRemoved,
+		Source:   "jobs",
+		Payload:  string(payload),
+		DedupKey: fmt.Sprintf("job:%d:removed", id),
+	}
 }

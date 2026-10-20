@@ -201,11 +201,14 @@ func (s *PostgresStore) UpdateJob(ctx context.Context, j jobs.Job) error {
 }
 
 // DeleteJob removes a job and its dependents (job_runs + job-scoped
-// notification_rules) then the job row, transactionally and org-scoped. Deletes
-// are explicit rather than relying on FK cascade so SQLite and Postgres behave
-// identically. The job_id = id filter on notification_rules leaves all-jobs
-// rules (job_id = 0) intact. Returns ErrNotFound if the job row doesn't exist
-// for the org, rolling back so nothing is deleted.
+// notification_rules) then the job row, transactionally and org-scoped, and
+// records job.removed in the same transaction. The event is appended BEFORE
+// the job-scoped rules go, so a rule scoped to this job still routes its
+// removal. Deletes are explicit rather than relying on FK cascade so SQLite
+// and Postgres behave identically. The job_id = id filter on
+// notification_rules leaves all-jobs rules (job_id = 0) intact. Returns
+// ErrNotFound if the job row doesn't exist for the org, rolling back so
+// nothing is deleted or recorded.
 func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -213,6 +216,18 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	var name string
+	err = tx.QueryRowContext(ctx,
+		`SELECT name FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("delete job lookup: %w", err)
+	}
+	if _, err := pgEmitEventTx(ctx, tx, jobs.RemovedEvent(orgID, id, name)); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM job_runs WHERE org_id = $1 AND job_id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job runs: %w", err)
@@ -221,19 +236,14 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 		`DELETE FROM notification_rules WHERE org_id = $1 AND job_id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job rules: %w", err)
 	}
-	res, err := tx.ExecContext(ctx,
-		`DELETE FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete job rows: %w", err)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete job commit: %w", err)
 	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return tx.Commit()
+	return nil
 }
 
 // DueJobs returns enabled jobs whose next_run is set and <= now, excluding any
@@ -961,28 +971,40 @@ func (s *PostgresStore) PruneDeliveries(ctx context.Context, before time.Time) (
 
 // --- heartbeats ----------------------------------------------------------
 
+// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound, and
+// records heartbeat.removed in the same transaction. Its past events
+// (source='heartbeat') are intentionally left as an audit trail, which the
+// removal now ends.
+func (s *PostgresStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete heartbeat begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var name string
+	err = tx.QueryRowContext(ctx,
+		`DELETE FROM heartbeats WHERE org_id = $1 AND id = $2 RETURNING name`, orgID, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("delete heartbeat: %w", err)
+	}
+	if _, err := pgEmitEventTx(ctx, tx, heartbeat.RemovedEvent(orgID, name)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete heartbeat commit: %w", err)
+	}
+	return nil
+}
+
 // CreateHeartbeat upserts a heartbeat by (org, name), returning its row ID and
 // the effective token. Mirrors the SQLite backend: hb.Token is consumed ONLY on
 // insert; on conflict the existing token is preserved (absent from the SET list)
 // and RETURNING token yields whichever token applies. period/grace are refreshed
 // to the config values; status starts 'new' on insert, preserved on conflict.
-// DeleteHeartbeat removes the heartbeat with id for orgID, or ErrNotFound.
-// Mirrors the SQLite backend; past events are left as an audit trail.
-func (s *PostgresStore) DeleteHeartbeat(ctx context.Context, orgID, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM heartbeats WHERE org_id = $1 AND id = $2`, orgID, id)
-	if err != nil {
-		return fmt.Errorf("delete heartbeat: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete heartbeat rows: %w", err)
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 func (s *PostgresStore) CreateHeartbeat(ctx context.Context, hb heartbeat.Heartbeat) (int64, string, error) {
 	var (
 		id    int64
