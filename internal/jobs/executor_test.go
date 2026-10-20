@@ -699,3 +699,14 @@ func TestRun_TruncationKeepsOutputValidUTF8(t *testing.T) {
 		srv.Close()
 	}
 }
+
+// TestExecutor_NegativeTimeoutUsesTheDefault: a negative timeout_seconds is
+// unset, the same as in maxRunDuration. It used to make the attempt's context
+// expire before the job started, so every run timed out at once.
+func TestExecutor_NegativeTimeoutUsesTheDefault(t *testing.T) {
+	e := NewExecutor()
+	res := e.Run(context.Background(), Job{Type: Shell, Command: "sleep 0.1; echo done", TimeoutSeconds: -1}, nil)
+	if res.Status != StatusSucceeded {
+		t.Fatalf("status = %s (output %q), want succeeded under the default timeout", res.Status, res.Output)
+	}
+}

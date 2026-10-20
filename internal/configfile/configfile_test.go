@@ -125,6 +125,15 @@ func TestParseValidation(t *testing.T) {
     cron: "nope"`,
 			wantErr: "bad-cron",
 		},
+		{
+			name: "negative timeout",
+			yaml: `jobs:
+  - name: neg-timeout
+    type: shell
+    command: echo hi
+    timeout_seconds: -1`,
+			wantErr: "timeout_seconds",
+		},
 	}
 
 	for _, tc := range tests {
