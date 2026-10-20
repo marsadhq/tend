@@ -62,7 +62,7 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/core` | Cross-cutting domain types shared by everything: `Org` (tenant) and the generic `Event` record (the event-pipeline spine). |
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, with capped output), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
-| `internal/auth` | Cryptographic identity primitives: argon2id passwords, API tokens, signed session cookies, CSRF; the `Principal`, `User`, `APIToken`, `Membership` types. |
+| `internal/auth` | The identity types `Principal`, `User`, `APIToken`, `Membership`, and the `tend_` prefix of the API tokens Tend issues. |
 | `internal/notify` | The notification domain: channel types, the `Provider` abstraction (webhook/Slack/Discord/SMTP/Telegram), rules, the `Alertable` filter, and the `Worker` that drains the durable delivery queue. |
 | `internal/heartbeat` | The `Heartbeat` domain type and the `Watcher` that marks missed heartbeats down. |
 | `internal/configfile` | YAML config-as-code: `Parse` (file → structs) and `Reconcile` (structs → DB, one-way). |
@@ -78,6 +78,7 @@ Code the Marsad tools share comes from the
 | --- | --- |
 | `kit/clock` | The `Clock` interface, `RealClock`, and a concurrency-safe `FakeClock` for tests. |
 | `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
+| `kit/auth` | Cryptographic identity primitives: argon2id passwords, API token generation and hashing, signed session cookies, CSRF tokens. |
 | `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
 ---
@@ -544,7 +545,7 @@ These limits are constants in the code, not configuration.
 - The notification path: `internal/notify/worker.go` (delivery and retries),
   `internal/notify/message.go` (what is alertable, how messages are rendered),
   and `enqueueDeliveriesTx` in `internal/store/sqlite.go` (the enqueue side).
-- The auth/security surface: `internal/auth/auth.go` and
-  `internal/httpserver/auth.go`; DTOs in `internal/httpserver/api.go`.
+- The auth/security surface: `internal/httpserver/auth.go` (over the primitives
+  in `kit/auth`); DTOs in `internal/httpserver/api.go`.
 - Config-as-code: `internal/configfile/configfile.go`.
 - The wiring of `serve`: `internal/cli/cli.go`.

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -15,7 +16,7 @@ import (
 // to New; a nil *AuthConfig disables login/API/dashboard (M2 public-only mode).
 type AuthConfig struct {
 	// Codec signs/verifies session cookies and CSRF tokens. Required.
-	Codec *auth.SessionCodec
+	Codec *kitauth.SessionCodec
 	// Secure flags the session cookie as Secure (HTTPS-only). Set it when the
 	// server is reached over TLS. Reverse-proxy users that terminate TLS in
 	// front of tend should set it too.
@@ -42,7 +43,7 @@ const principalKey ctxKey = 0
 // decision.
 type authResult struct {
 	principal auth.Principal
-	session   auth.Session // zero for bearer auth
+	session   kitauth.Session // zero for bearer auth
 	byCookie  bool
 	csrf      string // session-bound CSRF token; "" for bearer/no-cookie
 }
@@ -168,7 +169,7 @@ func (s *Server) resolveBearer(r *http.Request) (authResult, bool) {
 	if !ok {
 		return authResult{}, false
 	}
-	orgID, _, err := s.store.AuthenticateToken(r.Context(), auth.HashToken(tok))
+	orgID, _, err := s.store.AuthenticateToken(r.Context(), kitauth.HashToken(tok))
 	if err != nil {
 		return authResult{}, false
 	}
@@ -205,7 +206,7 @@ func isUnsafeMethod(method string) bool {
 
 // validCSRF checks the X-CSRF-Token header first, then the csrf_token form
 // field, against the session-bound CSRF token (constant-time inside auth).
-func (s *Server) validCSRF(r *http.Request, sess auth.Session) bool {
+func (s *Server) validCSRF(r *http.Request, sess kitauth.Session) bool {
 	tok := r.Header.Get("X-CSRF-Token")
 	if tok == "" {
 		// ParseForm reads the body for urlencoded POSTs; ignore parse errors and
@@ -276,33 +277,6 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!doctype html>
 // the form cannot be used to enumerate accounts.
 const genericLoginError = "Invalid email or password."
 
-// dummyPasswordHash is a valid argon2id PHC string verified (and discarded) on
-// the unknown-email login path so that branch performs the SAME argon2id work as
-// the wrong-password branch. Without this, an unknown email would return before
-// VerifyPassword runs (~tens of ms cheaper), turning the login response time
-// into a username-enumeration oracle despite the identical response body.
-//
-// It is computed ONCE at package init via auth.HashPassword so it carries the
-// exact same cost parameters as real stored hashes (so the equalized timing
-// genuinely matches the real verify path). If hashing fails at startup we fall
-// back to a valid literal of the correct form rather than panicking; that
-// literal still drives a full argon2id verification, which is all we need.
-var dummyPasswordHash = mustDummyPasswordHash()
-
-// mustDummyPasswordHash returns a valid argon2id PHC string for timing
-// equalization. It never panics: on any HashPassword error it returns a
-// constant valid PHC literal (a real argon2id hash with the package's default
-// m=19456,t=2,p=1 parameters) so VerifyPassword still does full argon2id work.
-func mustDummyPasswordHash() string {
-	// A random-ish throwaway password; the plaintext is irrelevant because the
-	// verification result is always ignored.
-	if h, err := auth.HashPassword("tend-login-timing-equalizer"); err == nil {
-		return h
-	}
-	// Fallback: a valid argon2id PHC literal with the correct form/parameters.
-	return "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-}
-
 // handleLoginForm renders the (empty) login form.
 func (s *Server) handleLoginForm(w http.ResponseWriter, _ *http.Request) {
 	s.renderLogin(w, "", http.StatusOK)
@@ -339,21 +313,22 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		// Equalize login timing to prevent user enumeration: run one argon2id
 		// verification against a fixed dummy hash (result ignored) so the
 		// unknown-email path costs the same as the wrong-password path before
-		// returning the identical generic error.
-		_ = auth.VerifyPassword(dummyPasswordHash, pw)
+		// returning the identical generic error. The dummy hash carries the
+		// same cost parameters as the hashes HashPassword stores.
+		_ = kitauth.VerifyPassword(kitauth.DummyPasswordHash(), pw)
 		// Unknown email: same generic error as a bad password (no enumeration).
 		s.renderLogin(w, genericLoginError, http.StatusUnauthorized)
 		return
 	}
-	if !auth.VerifyPassword(user.PasswordHash, pw) {
+	if !kitauth.VerifyPassword(user.PasswordHash, pw) {
 		s.renderLogin(w, genericLoginError, http.StatusUnauthorized)
 		return
 	}
 
-	sess := auth.Session{
+	sess := kitauth.Session{
 		UserID: user.ID,
 		OrgID:  user.OrgID,
-		Expiry: s.clk.Now().Add(auth.DefaultSessionTTL),
+		Expiry: s.clk.Now().Add(kitauth.DefaultSessionTTL),
 	}
 	value, err := s.auth.Codec.Encode(sess)
 	if err != nil {
@@ -361,7 +336,7 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, s.sessionCookie(value, int(auth.DefaultSessionTTL.Seconds())))
+	http.SetCookie(w, s.sessionCookie(value, int(kitauth.DefaultSessionTTL.Seconds())))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

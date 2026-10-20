@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/marsadhq/tend/internal/auth"
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/httpserver"
 )
@@ -743,6 +743,6 @@ func TestDashboardActionAbsentJob404(t *testing.T) {
 	}
 }
 
-// compile-time anchor that auth.Session is the type CSRF is bound to (keeps the
+// compile-time anchor that kitauth.Session is the type CSRF is bound to (keeps the
 // import in use if the test list above changes).
-var _ = auth.Session{}
+var _ = kitauth.Session{}

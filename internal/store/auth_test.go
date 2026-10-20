@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/store"
@@ -136,7 +137,7 @@ func TestTokenAuthenticate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		hash := auth.HashToken("tend_secretplaintext")
+		hash := kitauth.HashToken("tend_secretplaintext")
 		id, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "ci", TokenHash: hash})
 		if err != nil {
 			t.Fatalf("CreateToken: %v", err)
@@ -154,7 +155,7 @@ func TestTokenAuthenticate(t *testing.T) {
 		}
 
 		// Unknown hash => ErrNotFound (no info leak, no partial match).
-		if _, _, err := s.AuthenticateToken(ctx, auth.HashToken("tend_nope")); !errors.Is(err, store.ErrNotFound) {
+		if _, _, err := s.AuthenticateToken(ctx, kitauth.HashToken("tend_nope")); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("AuthenticateToken unknown: got %v, want ErrNotFound", err)
 		}
 		// A prefix of the real hash must NOT match (exact match only).
@@ -173,8 +174,8 @@ func TestListTokensNoHashLeak(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h1 := auth.HashToken("tend_one")
-		h2 := auth.HashToken("tend_two")
+		h1 := kitauth.HashToken("tend_one")
+		h2 := kitauth.HashToken("tend_two")
 		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "one", TokenHash: h1}); err != nil {
 			t.Fatalf("CreateToken one: %v", err)
 		}
@@ -211,11 +212,11 @@ func TestListTokensOrgScoped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "mine", TokenHash: auth.HashToken("tend_mine")}); err != nil {
+		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "mine", TokenHash: kitauth.HashToken("tend_mine")}); err != nil {
 			t.Fatalf("CreateToken: %v", err)
 		}
 		// Another org's token is invisible.
-		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID + 777, Name: "theirs", TokenHash: auth.HashToken("tend_theirs")}); err != nil {
+		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID + 777, Name: "theirs", TokenHash: kitauth.HashToken("tend_theirs")}); err != nil {
 			t.Fatalf("CreateToken other org: %v", err)
 		}
 		tokens, err := s.ListTokens(ctx, org.ID)
@@ -237,7 +238,7 @@ func TestDeleteTokenOrgScoped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		id, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "victim", TokenHash: auth.HashToken("tend_victim")})
+		id, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "victim", TokenHash: kitauth.HashToken("tend_victim")})
 		if err != nil {
 			t.Fatalf("CreateToken: %v", err)
 		}
@@ -368,7 +369,7 @@ func TestTokenHashGloballyUnique(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		hash := auth.HashToken("tend_sametoken")
+		hash := kitauth.HashToken("tend_sametoken")
 		if _, err := s.CreateToken(ctx, auth.APIToken{OrgID: org.ID, Name: "a", TokenHash: hash}); err != nil {
 			t.Fatalf("CreateToken org1: %v", err)
 		}

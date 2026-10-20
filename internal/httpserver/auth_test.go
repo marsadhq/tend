@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	kitauth "github.com/marsadhq/kit/auth"
 	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/httpserver"
@@ -40,7 +41,7 @@ func seedAuth(t *testing.T, ts *testStore) *authStore {
 	ctx := context.Background()
 	const email = "admin@example.com"
 	const pw = "correct horse battery staple"
-	hash, err := auth.HashPassword(pw)
+	hash, err := kitauth.HashPassword(pw)
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
@@ -69,7 +70,7 @@ func seedAuth(t *testing.T, ts *testStore) *authStore {
 	}
 	if _, err := ts.raw.ExecContext(ctx,
 		`INSERT INTO api_tokens (org_id, name, token_hash, created_at) VALUES (?, ?, ?, ?)`,
-		ts.orgID, "ci", auth.HashToken(tok), created); err != nil {
+		ts.orgID, "ci", kitauth.HashToken(tok), created); err != nil {
 		t.Fatalf("seed token: %v", err)
 	}
 
@@ -84,7 +85,7 @@ func seedAuth(t *testing.T, ts *testStore) *authStore {
 	}
 }
 
-func testCodec() *auth.SessionCodec { return auth.NewSessionCodec([]byte(testCSRFKey)) }
+func testCodec() *kitauth.SessionCodec { return kitauth.NewSessionCodec([]byte(testCSRFKey)) }
 
 func authConfig(secure bool) *httpserver.AuthConfig {
 	return &httpserver.AuthConfig{Codec: testCodec(), Secure: secure}
@@ -98,9 +99,9 @@ func newAuthServer(t *testing.T, s store.Store, cfg *httpserver.AuthConfig) *htt
 
 // validSessionCookie encodes a session for as.userID/orgID and returns the
 // cookie value plus a matching CSRF token.
-func validSessionCookie(t *testing.T, as *authStore, codec *auth.SessionCodec) (cookie, csrf string) {
+func validSessionCookie(t *testing.T, as *authStore, codec *kitauth.SessionCodec) (cookie, csrf string) {
 	t.Helper()
-	sess := auth.Session{UserID: as.userID, OrgID: as.orgID, Expiry: time.Now().Add(time.Hour)}
+	sess := kitauth.Session{UserID: as.userID, OrgID: as.orgID, Expiry: time.Now().Add(time.Hour)}
 	enc, err := codec.Encode(sess)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -262,7 +263,7 @@ func TestRequireAuthWrongKeyCookieFailsClosed(t *testing.T) {
 	as := seedAuth(t, ts)
 	// Server uses one key; cookie minted with a DIFFERENT key.
 	srv := newAuthServer(t, ts.store, authConfig(false))
-	otherCodec := auth.NewSessionCodec([]byte("ffffffffffffffffffffffffffffffff"))
+	otherCodec := kitauth.NewSessionCodec([]byte("ffffffffffffffffffffffffffffffff"))
 	st := &stub{}
 	h := srv.RequireAuthForTest(st)
 
