@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The job types that watch something rather than do something, and the
@@ -102,6 +104,10 @@ const (
 	// DefaultTLSWarnDays is a tls probe's warn_days: two weeks, the most
 	// Let's Encrypt's retired expiry emails ever gave.
 	DefaultTLSWarnDays = 14
+	// DefaultDomainWarnDays is a domain probe's warn_days: a month, time to
+	// sort out a renewal that needs a person (a card that expired, a
+	// registrar account nobody can log in to).
+	DefaultDomainWarnDays = 30
 	// DefaultRenewAfterFraction is a tls probe's renew_after_fraction: ACME
 	// clients (certbot, Caddy, cert-manager) renew after two thirds of a
 	// certificate's lifetime.
@@ -113,6 +119,8 @@ func DefaultWarnDays(t JobType) int {
 	switch t {
 	case TLS:
 		return DefaultTLSWarnDays
+	case Domain:
+		return DefaultDomainWarnDays
 	}
 	return 0
 }
@@ -120,7 +128,7 @@ func DefaultWarnDays(t JobType) int {
 // HasSpec reports whether jobs of type t carry settings in Job.Spec.
 func HasSpec(t JobType) bool {
 	switch t {
-	case TLS:
+	case TLS, Domain:
 		return true
 	}
 	return false
@@ -144,8 +152,66 @@ func ValidateSpec(t JobType, s *Spec) error {
 	switch t {
 	case TLS:
 		return validateTLS(s)
+	case Domain:
+		return validateDomain(s)
 	}
 	return nil
+}
+
+func validateDomain(s *Spec) error {
+	if _, err := NormalizeDomain(s.Domain); err != nil {
+		return err
+	}
+	if s.RDAPURL != "" {
+		u, err := url.Parse(s.RDAPURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("rdap_url must be an http:// or https:// URL, got %q", s.RDAPURL)
+		}
+	}
+	return nil
+}
+
+// NormalizeDomain returns domain as a domain probe asks for it (lower case,
+// no trailing dot), or an error when it is not a registered domain name in
+// ASCII.
+func NormalizeDomain(domain string) (string, error) {
+	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if d == "" {
+		return "", errDomainRequired
+	}
+	for _, r := range d {
+		if r > unicode.MaxASCII {
+			return "", fmt.Errorf("domain %q: give an internationalized name in its ASCII form (xn--...)", domain)
+		}
+	}
+	labels := strings.Split(d, ".")
+	if len(d) > 253 {
+		return "", fmt.Errorf("domain %q is not a domain name", domain)
+	}
+	for _, l := range labels {
+		if !validLabel(l) {
+			return "", fmt.Errorf("domain %q is not a domain name", domain)
+		}
+	}
+	if len(labels) < 2 {
+		return "", fmt.Errorf("domain %q is not a registered domain (it has no TLD)", domain)
+	}
+	return d, nil
+}
+
+// validLabel accepts a lower-case LDH label: 1 to 63 letters, digits and
+// hyphens, not starting or ending with a hyphen.
+func validLabel(l string) bool {
+	if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(l); i++ {
+		c := l[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateTLS(s *Spec) error {
