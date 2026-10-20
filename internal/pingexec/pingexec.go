@@ -101,21 +101,48 @@ func CheckPingURL(u string) error {
 // Run runs name with args under cfg and returns its exit status: the
 // command's own, 128 + the signal number when a signal killed it, 127 when
 // it could not be found and 126 when it could not be started otherwise.
-// Signals tend exec receives (interrupt, terminate, hang-up, quit) are passed
-// on to the command, and the completion ping is sent even after one.
+//
+// Signals tend exec receives (interrupt, terminate, hang-up, quit) are caught
+// from the start: one that arrives while the start ping is still going out
+// abandons that ping and the command is not started at all (exit 128 + the
+// signal); one that arrives while the command runs is passed on to it. The
+// completion ping is sent either way.
 func Run(ctx context.Context, cfg Config, name string, args ...string) int {
 	p := newPinger(cfg)
 	// The pings must go out even when ctx is cancelled by the signal that
 	// is also stopping the command: its result is what they report.
 	pctx := context.WithoutCancel(ctx)
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, forwardedSignals...)
+	defer signal.Stop(sigs)
+
+	var early os.Signal
 	if cfg.Start {
-		if limit, ok := p.send(pctx, "start", nil); ok && limit > 0 && limit < p.bodyLimit {
+		limit, ok, sig := p.startPing(pctx, sigs)
+		if ok && limit > 0 && limit < p.bodyLimit {
 			p.bodyLimit = limit
+		}
+		early = sig
+	}
+	if early == nil {
+		select {
+		case early = <-sigs:
+		default:
 		}
 	}
 
 	tail := newTailBuffer(max(p.bodyLimit, 0))
-	code := runCommand(cfg, tail, name, args)
+	var code int
+	switch {
+	case early != nil:
+		code = signalExitCode(early)
+		notStarted(cfg, tail, fmt.Sprintf("tend exec: %v before %s started; not running it\n", early, name))
+	case ctx.Err() != nil:
+		code = 1
+		notStarted(cfg, tail, fmt.Sprintf("tend exec: interrupted before %s started; not running it\n", name))
+	default:
+		code = runCommand(cfg, tail, sigs, name, args)
+	}
 	var body []byte
 	if p.bodyLimit > 0 {
 		body = tail.Bytes()
@@ -128,9 +155,45 @@ func Run(ctx context.Context, cfg Config, name string, args ...string) int {
 	return code
 }
 
+// notStarted reports, on stderr and in the output tail, why the command was
+// not started.
+func notStarted(cfg Config, tail *tailBuffer, msg string) {
+	_, _ = io.WriteString(orDiscard(cfg.Stderr), msg)
+	_, _ = io.WriteString(tail, msg)
+}
+
+// startPing sends the start ping, abandoning it when a signal arrives on
+// sigs meanwhile; that signal is returned.
+func (p *pinger) startPing(ctx context.Context, sigs <-chan os.Signal) (limit int, ok bool, caught os.Signal) {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	got := make(chan os.Signal, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case s := <-sigs:
+			got <- s
+			cancel()
+		case <-done:
+		}
+	}()
+	limit, ok = p.send(sctx, "start", nil)
+	close(done)
+	wg.Wait()
+	select {
+	case caught = <-got:
+	default:
+	}
+	return limit, ok, caught
+}
+
 // runCommand runs the command with stdin, stdout and stderr passed through,
-// its output also written to tail, and returns its exit status.
-func runCommand(cfg Config, tail *tailBuffer, name string, args []string) int {
+// its output also written to tail, and the signals arriving on sigs passed on
+// to it, and returns its exit status.
+func runCommand(cfg Config, tail *tailBuffer, sigs <-chan os.Signal, name string, args []string) int {
 	cmd := exec.Command(name, args...)
 	cmd.Stdin = cfg.Stdin
 	cmd.Stdout = io.MultiWriter(orDiscard(cfg.Stdout), tail)
@@ -140,16 +203,14 @@ func runCommand(cfg Config, tail *tailBuffer, name string, args []string) int {
 		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
 			code = 127
 		}
-		msg := fmt.Sprintf("tend exec: cannot run %s: %v\n", name, err)
-		_, _ = io.WriteString(orDiscard(cfg.Stderr), msg)
-		_, _ = io.WriteString(tail, msg)
+		notStarted(cfg, tail, fmt.Sprintf("tend exec: cannot run %s: %v\n", name, err))
 		return code
 	}
 
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, forwardedSignals...)
 	done := make(chan struct{})
+	forwarded := make(chan struct{})
 	go func() {
+		defer close(forwarded)
 		for {
 			select {
 			case s := <-sigs:
@@ -160,17 +221,15 @@ func runCommand(cfg Config, tail *tailBuffer, name string, args []string) int {
 		}
 	}()
 	err := cmd.Wait()
-	signal.Stop(sigs)
 	close(done)
+	<-forwarded
 
 	if err == nil {
 		return 0
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
-		msg := fmt.Sprintf("tend exec: %s: %v\n", name, err)
-		_, _ = io.WriteString(orDiscard(cfg.Stderr), msg)
-		_, _ = io.WriteString(tail, msg)
+		notStarted(cfg, tail, fmt.Sprintf("tend exec: %s: %v\n", name, err))
 		return 126
 	}
 	if sig, ok := killedBy(exitErr.ProcessState); ok {
@@ -251,6 +310,10 @@ func (p *pinger) send(ctx context.Context, action string, body []byte) (limit in
 		status, retryAfter, limit, err := p.attempt(ctx, target, body)
 		if err == nil && status >= 200 && status < 300 {
 			return limit, true
+		}
+		if ctx.Err() != nil {
+			fmt.Fprintf(p.log, "tend exec: /%s ping to %s abandoned: interrupted\n", action, host)
+			return 0, false
 		}
 		retryable := err != nil || status >= 500 || status == http.StatusTooManyRequests
 		reason := fmt.Sprintf("HTTP %d", status)
