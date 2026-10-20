@@ -263,6 +263,12 @@ notifications:
       events: [heartbeat.missed, heartbeat.recovered]
 ```
 
+Make the ping retry, so a moment of unavailability (a restart, a network blip, or a `429 Too Many Requests`) does not turn into a missed heartbeat. curl's `--retry` treats 429 and 5xx answers as transient and honours `Retry-After`:
+
+```sh
+curl -fsS -m 10 --retry 5 --retry-max-time 60 -X POST "$TEND_BASE_URL/ping/<token>"
+```
+
 Recover a synced heartbeat's ping URL any time with `tend heartbeat ping-url <name>` (or `tend heartbeat show <name>`), and inspect its transition history with `tend heartbeat history <name>`.
 
 ### Send Tend events to Ward (or any sink)
@@ -340,7 +346,7 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `POST` | `/api/jobs/{id}/enable` | Enable a job. Returns the updated job. |
 | `POST` | `/api/jobs/{id}/disable` | Disable a job. Returns the updated job. |
 
-Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `GET`/`POST` `/ping/{token}` is the heartbeat ping receiver. `/ping/{token}` and `POST /login` are rate limited per client address; see [Limits and housekeeping](#limits-and-housekeeping).
+Two routes are unauthenticated: `GET /healthz` returns `ok` (suitable for load-balancer checks), and `GET`/`POST` `/ping/{token}` is the heartbeat ping receiver. `/ping/{token}` and `POST /login` are rate limited; see [Limits and housekeeping](#limits-and-housekeeping).
 
 The API is **read-mostly by design**: resource definitions are managed via the CLI and config-as-code; only run-now, enable, and disable are exposed as mutations. See the [capability asymmetries](docs/ARCHITECTURE.md#7-capability-asymmetries-by-design) for the rationale.
 
@@ -355,7 +361,7 @@ These are built in; only the retention windows are configurable.
 | Stale runs | On startup, runs left `running` by a crash are put back in the queue. While `serve` is up, a sweep every minute looks for runs still `running` more than 2 minutes past the longest they could legitimately take, counted from the start of the run: every attempt (`max_retries` + 1 of them) reaching its timeout, plus the pauses between retries. For a run the server itself is executing, the timeout and retry count are the ones the job had when the run started, so editing a job cannot get its run in flight failed; for any other run they are the job's current ones. Such a run is presumed to have lost its worker: it is marked failed and `run.failed` is emitted, so the job is not blocked until the next restart. That result is final; if the worker turns up after all, its late result is discarded, which the server logs. |
 | Retention | `serve` prunes at startup and then every 24 hours: events older than 30 days, finished job runs older than 90 days, and finished (delivered or failed) notification deliveries older than 7 days. Set `TEND_RETENTION_EVENTS_DAYS`, `TEND_RETENTION_RUNS_DAYS` and `TEND_RETENTION_DELIVERIES_DAYS` to a whole number of days to change a window, or to `0` to keep that history forever; `serve` refuses to start on any other value, and its banner and `tend doctor` print the windows in effect. Pending and running runs, pending deliveries, and the events they refer to are never pruned. |
 | Disk space (SQLite) | When a sweep has freed at least 8 MiB and a quarter of the database file, `serve` gives the space back to the file system. The first time, it switches the file to incremental auto-vacuum with one `VACUUM`, which rewrites the file and holds writes for a moment (a few seconds at most for the 512 MiB it will do this for while serving); from then on it frees space in small incremental steps. A larger file that has never been compacted is left alone and logged: stop `tend serve` and run `sqlite3 /path/to/tend.db VACUUM` once. Postgres reuses the space of deleted rows itself (autovacuum). |
-| Rate limits | `POST /login`: a burst of 5 requests, then 1 per second. `/ping/{token}`: a burst of 20, then 10 per second. Both are counted per client address and held in memory by the server process. Requests over the limit get `429 Too Many Requests` with a `Retry-After` header. Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
+| Rate limits | `POST /login`: a burst of 5 requests, then 1 per second, per client address. `/ping/{token}`: pings for a real heartbeat are limited per heartbeat (a burst of 10, then 1 per second) and never per address, so one host can ping any number of heartbeats on the same minute; pings with an unknown token are limited per client address (a burst of 30, then 1 per second), and an address over that limit is refused for every token until it refills, which is what stops token guessing. Limits are held in memory by the server process. Requests over a limit get `429 Too Many Requests` with a `Retry-After` header; ping clients should retry (see [the heartbeat section](#alert-on-a-missed-heartbeat)). Behind a reverse proxy every client shares the proxy's address unless `TEND_TRUST_PROXY` is set. |
 | HTTP timeouts | The server gives up on a connection after 10 seconds spent reading a request (headers and body), writing a response, or sitting idle. |
 | Security headers | Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` that only allows same-origin scripts, styles, and images. `Strict-Transport-Security` is not sent because Tend itself serves plain HTTP; add it at the proxy that terminates TLS. |
 | URLs in errors | When a webhook, Slack, Discord, or Telegram delivery or an HTTP job fails, the error names only the host. The rest of the URL, where tokens usually live, is kept out of logs and stored run output. |

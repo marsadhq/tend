@@ -30,11 +30,17 @@ type Server struct {
 	log      *slog.Logger
 	auth     *AuthConfig // nil disables login/API/dashboard (M2 public-only behavior)
 
-	// loginLimiter and pingLimiter are per-(IP,endpoint) token buckets guarding
-	// POST /login and /ping/{token} against brute-force/flood, defense-in-depth
-	// beyond argon2 cost / token secrecy. See ratelimit.go.
+	// loginLimiter is a per-(IP,endpoint) token bucket guarding POST /login
+	// against brute force, defense-in-depth beyond argon2 cost. See
+	// ratelimit.go.
 	loginLimiter *rateLimiter
-	pingLimiter  *rateLimiter
+	// pingMissLimiter and pingTokenLimiter guard /ping/{token}; see
+	// handlePing. Misses (unknown tokens) are counted per client address,
+	// which is what stops token guessing; pings for a real heartbeat are
+	// counted per token, never per address, so a host running many heartbeats
+	// on the same minute is not throttled for it.
+	pingMissLimiter  *rateLimiter
+	pingTokenLimiter *rateLimiter
 }
 
 // New constructs a Server. dispatch may be nil (e.g. in tests or when no
@@ -54,12 +60,16 @@ func New(s store.Store, clk clock.Clock, dispatch func(context.Context, core.Eve
 		// 1/s burst-5: slows online credential guessing hard; a human login is
 		// well within a 5-request burst.
 		loginLimiter: newRateLimiter(clk, 1, 5),
-		// 10/s burst-20: many heartbeats can legitimately share one source IP
-		// (NAT / one host running many cron jobs), so this is generous
-		// defense-in-depth against a flood, not per-token fairness - keying on
-		// the token itself would let an attacker rotate tokens to evade it and
-		// would penalize the exact identifier we want to protect.
-		pingLimiter: newRateLimiter(clk, 10, 20),
+		// Unknown tokens: a burst of 30, then 1/s per client address. A token
+		// is 128 random bits, so this is about load, not odds: an address
+		// that keeps guessing is refused before its requests reach the
+		// database, whatever token it sends next, so rotating tokens does not
+		// evade it.
+		pingMissLimiter: newRateLimiter(clk, pingMissRate, pingMissBurst),
+		// Known tokens: a burst of 10, then 1/s per heartbeat. A heartbeat
+		// pings once per period, so this only stops a runaway loop (or a
+		// leaked token) from writing to the database flat out.
+		pingTokenLimiter: newRateLimiter(clk, pingTokenRate, pingTokenBurst),
 	}
 }
 
@@ -84,8 +94,8 @@ func (s *Server) Handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("POST /ping/{token}", s.rateLimit(s.pingLimiter, "ping", s.handlePing))
-	mux.HandleFunc("GET /ping/{token}", s.rateLimit(s.pingLimiter, "ping", s.handlePing))
+	mux.HandleFunc("POST /ping/{token}", s.handlePing)
+	mux.HandleFunc("GET /ping/{token}", s.handlePing)
 
 	if s.auth == nil {
 		return securityHeaders(mux)
@@ -152,6 +162,14 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// Ping limits; see the limiters in New.
+const (
+	pingMissRate   = 1
+	pingMissBurst  = 30
+	pingTokenRate  = 1
+	pingTokenBurst = 10
+)
+
 // pingWriteTimeout bounds recording one ping. The write runs detached from the
 // request (see handlePing), so this is what stops it from running forever.
 const pingWriteTimeout = 10 * time.Second
@@ -166,14 +184,38 @@ const pingWriteTimeout = 10 * time.Second
 // is recorded in full even if the client times out or disconnects meanwhile,
 // so a recovery can no longer be committed without its event, or skipped
 // because the caller went away. pingWriteTimeout bounds it instead.
+//
+// Rate limiting happens here rather than in the rateLimit wrapper, because it
+// depends on whether the token is real. Before the database is touched, a
+// request is refused (429 with Retry-After) when its client address has used
+// up its budget of unknown tokens, or its token its own ping budget. A miss
+// then costs the address one unit; a real ping costs its token one, and
+// nothing per address. Pings from one host for many heartbeats, all on the
+// same minute, therefore never crowd each other out, while an address that
+// keeps guessing tokens is cut off whatever it sends next.
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
+	now := s.clk.Now()
+	missKey, tokenKey := clientIP(r)+"|ping-miss", "ping-token|"+token
+	if !s.pingMissLimiter.Has(missKey, now) {
+		tooManyRequests(w, s.pingMissLimiter)
+		return
+	}
+	if !s.pingTokenLimiter.Has(tokenKey, now) {
+		tooManyRequests(w, s.pingTokenLimiter)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), pingWriteTimeout)
 	defer cancel()
-	orgID, name, recovered, err := s.store.RecordPing(ctx, token, s.clk.Now())
+	orgID, name, recovered, err := s.store.RecordPing(ctx, token, now)
 	if errors.Is(err, store.ErrNotFound) {
+		s.pingMissLimiter.Allow(missKey, now)
 		http.NotFound(w, r)
 		return
+	}
+	if err == nil {
+		s.pingTokenLimiter.Allow(tokenKey, now)
 	}
 	if err != nil {
 		// A real DB error must not masquerade as a 404. The token is a
