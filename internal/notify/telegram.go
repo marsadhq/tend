@@ -55,7 +55,7 @@ func (p *TelegramProvider) Send(ctx context.Context, m Message) error {
 	// Drain so the connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram sendMessage: status %d", resp.StatusCode)
+		return httpStatusError("telegram sendMessage", resp.StatusCode)
 	}
 	return nil
 }

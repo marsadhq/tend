@@ -18,7 +18,8 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 // postJSON marshals payload as JSON, POSTs it to rawURL with Content-Type:
 // application/json, and returns a non-nil error if the response status is
-// outside the 2xx range so callers can retry. Every error that could quote the
+// outside the 2xx range: a permanent one (IsPermanent) for a 4xx other than
+// 408 and 429, a retryable one otherwise. Every error that could quote the
 // URL (request construction, transport, non-2xx status) reports only the host:
 // webhook/Slack/Discord URLs embed a secret token in the path, and this error
 // is logged by the delivery worker.
@@ -45,7 +46,9 @@ func postJSON(ctx context.Context, rawURL string, payload any) error {
 	// Drain the body so the underlying connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook POST %s: status %d", urlredact.Host(rawURL), resp.StatusCode)
+		// A 4xx (other than 408/429) is the receiver refusing this
+		// notification for good; see httpStatusError.
+		return httpStatusError("webhook POST "+urlredact.Host(rawURL), resp.StatusCode)
 	}
 	return nil
 }

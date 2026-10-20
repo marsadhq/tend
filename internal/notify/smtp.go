@@ -117,6 +117,9 @@ func sendMail(ctx context.Context, addr, host string, a smtp.Auth, from string, 
 	if err == nil {
 		return nil
 	}
+	// A 5xx reply (unknown recipient, message refused, bad credentials) will
+	// be the same on every retry.
+	err = smtpReplyError(err)
 	// The deadline or a cancel cut the exchange short; say so rather than
 	// leaving only "i/o timeout" or "use of closed network connection". The
 	// connection's deadline is ctx's, so it can fire a moment before ctx
