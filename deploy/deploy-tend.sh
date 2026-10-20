@@ -4,8 +4,9 @@
 #
 # Steps: preflight (clean tree, HEAD == origin/master) -> build -> upload the
 # new binary next to the running one -> snapshot the database -> stop ->
-# keep the old binary and swap -> start -> health check (rollback on
-# failure) -> append to an audit log on the host.
+# keep the old binary and swap -> start -> health check, retried for up to
+# TEND_DEPLOY_HEALTH_WAIT seconds (on failure: roll back, start the old
+# binary, check it again) -> append to an audit log on the host.
 #
 # Tend is only stopped once the new binary and a verified database snapshot
 # are both on the host, and from the stop onwards every exit path starts it
@@ -75,6 +76,8 @@ UNIT=${TEND_DEPLOY_UNIT:-tend}
 BIN_DIR=${TEND_DEPLOY_BIN_DIR:-'$HOME/bin'}
 BACKUP_DIR=${TEND_DEPLOY_BACKUP_DIR:-'$HOME/backups'}
 AUDIT_LOG=${TEND_DEPLOY_AUDIT_LOG:-'$HOME/audit/deploys-tend.log'}
+# How long to keep probing the health URL after a start, in seconds.
+HEALTH_WAIT=${TEND_DEPLOY_HEALTH_WAIT:-30}
 GO=${GO:-go}
 
 missing=""
@@ -95,6 +98,10 @@ for pair in "TEND_DEPLOY_HOST=$HOST" "TEND_DEPLOY_HEALTH_URL=$HEALTH_URL" "TEND_
         exit 2
     fi
 done
+if ! [[ "$HEALTH_WAIT" =~ ^[0-9]+$ ]]; then
+    echo "deploy-tend: TEND_DEPLOY_HEALTH_WAIT must be a whole number of seconds" >&2
+    exit 2
+fi
 command -v "$GO" >/dev/null || {
     echo "deploy-tend: '$GO' not found; set GO to the go binary" >&2
     exit 2
@@ -233,18 +240,46 @@ ssh "$HOST" "if [ -f $BIN ]; then cp $BIN $BIN.prev && cp $BIN $BIN.$OLD_SHA; fi
     fail "binary swap failed"
 
 # --- start + health check ------------------------------------------------------------
-echo "deploy-tend: starting tend..."
-ssh "$HOST" "$SCTL start $UNIT" || fail "systemctl start $UNIT failed"
-STOPPED=0
-sleep 3
-HEALTH=$(ssh "$HOST" "curl -sf --max-time 5 $HEALTH_URL || echo FAIL")
-if [ "$HEALTH" != "ok" ]; then
-    echo "deploy-tend: health check failed ($HEALTH); rolling back to $OLD_SHA" >&2
-    # The rollback stops tend too: keep the exit trap armed across it.
+
+# healthy probes the health URL from the host every 2 seconds until it answers
+# "ok", for up to HEALTH_WAIT seconds. Anything else counts as not healthy
+# (yet), the ssh call itself failing included.
+healthy() {
+    local deadline=$((SECONDS + HEALTH_WAIT)) out
+    while :; do
+        out=$(ssh "$HOST" "curl -sf --max-time 5 $HEALTH_URL" 2>/dev/null) || out=""
+        [ "$out" = ok ] && return 0
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 2
+    done
+}
+
+# rollback puts the previous binary back, starts it, and checks it, saying
+# plainly how far it got. Every way out of it is a failure of the deploy, and
+# the exit trap keeps starting the service whatever happens.
+rollback() {
+    local why="$1"
+    echo "deploy-tend: $why; rolling back to $OLD_SHA" >&2
     STOPPED=1
-    ssh "$HOST" "$SCTL stop $UNIT; if [ -f $BIN.prev ]; then cp $BIN.prev $BIN && echo $OLD_SHA > $BIN.sha; fi; $SCTL start $UNIT" || true
-    fail "health check failed after deploying $NEW_SHA; rolled back to $OLD_SHA"
-fi
+    ssh "$HOST" "$SCTL stop $UNIT" ||
+        echo "deploy-tend: WARNING: systemctl stop $UNIT failed during the rollback" >&2
+    ssh "$HOST" "cp $BIN.prev $BIN && echo $OLD_SHA > $BIN.sha" ||
+        fail "ROLLBACK FAILED: could not put $BIN.prev back, so $NEW_SHA ($why) is still installed and is being started again - fix the host by hand NOW"
+    ssh "$HOST" "$SCTL start $UNIT" ||
+        fail "ROLLBACK INCOMPLETE: $OLD_SHA is back in place but systemctl start $UNIT failed ($why on $NEW_SHA) - start it by hand NOW"
+    STOPPED=0
+    echo "deploy-tend: checking $OLD_SHA after the rollback..." >&2
+    if healthy; then
+        fail "$why after deploying $NEW_SHA; rolled back to $OLD_SHA, which is healthy"
+    fi
+    fail "$why after deploying $NEW_SHA; rolled back to $OLD_SHA, but it is NOT healthy either - check the host NOW"
+}
+
+echo "deploy-tend: starting tend..."
+ssh "$HOST" "$SCTL start $UNIT" || rollback "systemctl start $UNIT failed"
+STOPPED=0
+echo "deploy-tend: waiting up to ${HEALTH_WAIT}s for the health check..."
+healthy || rollback "health check failed"
 
 audit "deploy OK: $OLD_SHA -> $NEW_SHA (healthz ok, snapshot $SNAP_NAME, via deploy-tend.sh/systemd)"
 echo "deploy-tend: SUCCESS ($NEW_SHA)"
