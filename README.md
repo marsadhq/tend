@@ -125,7 +125,7 @@ printf 'yourpassword' | TEND_DB=/var/lib/tend/tend.db \
 
 For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a hardened system-wide systemd unit), [`deploy/tend-user.service`](deploy/tend-user.service) (a user-level unit for a single-operator install without root), and [`deploy/docker-compose.yml`](deploy/docker-compose.yml).
 
-[`deploy/deploy-tend.sh`](deploy/deploy-tend.sh) is the push-style script the maintainers use to ship a build to their own host: it builds the binary, stops the service, keeps the previous binary, copies the new one, starts the service, and rolls back automatically if `/healthz` does not answer. The host name, paths, and health URL in it, and the network-address wait in the user unit, are specific to that setup; adapt them before reusing either file.
+[`deploy/deploy-tend.sh`](deploy/deploy-tend.sh) ships a build to a host running the user unit over ssh. It refuses a dirty working tree or a `HEAD` that is not `origin/master` (override with `--allow-dirty` / `--allow-any-commit`), builds and uploads the new binary while the old one keeps serving, snapshots the SQLite database with the backup API and checks the copy, and only then stops the service, swaps the binary (keeping the previous one), starts it again, and rolls back if `/healthz` does not answer. From the stop onwards every way out of the script, a failure or Ctrl-C included, starts the service again. The host, health URL, database path and remote directories come from the environment or from `deploy/deploy.env` (not tracked; copy [`deploy/deploy.env.example`](deploy/deploy.env.example)), so nothing host-specific is in the repository.
 
 ---
 
