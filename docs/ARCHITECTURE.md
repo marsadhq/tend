@@ -81,7 +81,7 @@ Code the Marsad tools share comes from the
 | `kit/auth` | Cryptographic identity primitives: argon2id passwords, API token generation and hashing, signed session cookies, CSRF tokens. |
 | `kit/httpx` | The security-headers middleware (the CSP), the HTTP server with every connection phase bounded, and the keyed token-bucket rate limiter with its client-address keying. |
 | `kit/notify` | The `Provider` contract and `Message`, the providers (webhook, Slack, Discord, SMTP, Telegram, ntfy, Pushover), `BuildProvider` from a channel's config, permanent-error classification, and the durable delivery `Worker` with its leases, backoff and give-up. |
-| `kit/event` | `TendWebhook`, the body Tend's webhook channel posts, with the golden fixtures that pin it byte for byte. |
+| `kit/event` | `TendWebhook`, the body Tend's webhook channel posts, the `marsad.event/v1` envelope (`V1`) Tend adds to it under `marsad` (built in `internal/notify/message.go`, named by `TEND_INSTANCE`), and the golden fixtures that pin both byte for byte. |
 | `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
 ---

@@ -84,9 +84,10 @@ type Worker = kitnotify.Worker[Delivery]
 // a 2s poll, a 1m lease, give-up after 24h, backoff capped at 5m and a
 // kitnotify.DefaultHold (15m) per-channel hold. build makes a channel's
 // provider from its kind and decrypted config (kitnotify.BuildProvider in
-// production).
-func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), log *slog.Logger) *Worker {
-	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build), log)
+// production). instance names this installation in the marsad envelope of
+// every notification (config.LoadInstance: TEND_INSTANCE or the hostname).
+func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance string, log *slog.Logger) *Worker {
+	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build, instance), log)
 	w.LogAttrs = func(d kitnotify.Delivery[Delivery]) []any {
 		return []any{"channel", d.Item.ChannelID, "event", d.Item.Event.Type}
 	}
@@ -142,7 +143,7 @@ func (q queue) GiveUp(ctx context.Context, d kitnotify.Delivery[Delivery], _ err
 // config, build its provider, and send the rendered event. Its errors are
 // logged, so they never carry the config blob or decrypted secrets (provider
 // errors name only a destination's host).
-func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error)) kitnotify.SendFunc[Delivery] {
+func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance string) kitnotify.SendFunc[Delivery] {
 	return func(ctx context.Context, kd kitnotify.Delivery[Delivery]) error {
 		d := kd.Item
 		ch, blob, err := s.GetChannel(ctx, d.OrgID, d.ChannelID)
@@ -158,6 +159,6 @@ func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, [
 		if err != nil {
 			return fmt.Errorf("build provider for channel %d: %w", d.ChannelID, err)
 		}
-		return p.Send(ctx, messageFor(d.Event))
+		return p.Send(ctx, messageFor(d.Event, instance))
 	}
 }

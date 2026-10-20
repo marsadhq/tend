@@ -143,6 +143,7 @@ For unattended operation see [`deploy/tend.service`](deploy/tend.service) (a har
 | `TEND_RETENTION_EVENTS_DAYS` / `TEND_RETENTION_RUNS_DAYS` / `TEND_RETENTION_DELIVERIES_DAYS` | `30` / `90` / `7` | Days of events, finished job runs, and finished notification deliveries the [retention sweep](#limits-and-housekeeping) keeps; `0` keeps that history forever. |
 | `TEND_DELIVERY_HOLD_MINUTES` | `15` | How long a notification that keeps failing may hold back the later ones on its channel, counted from its first attempt (see [Delivery](#alerting)); `0` turns per-channel ordering off. A whole number of minutes up to 1440; `serve` refuses anything else. |
 | `TEND_TRUST_PROXY`   | `false`                 | Set to `1`, `true`, `yes`, or `on` when Tend runs behind a reverse proxy you control. [Rate limiting](#limits-and-housekeeping) then keys on the left-most `X-Forwarded-For` address instead of the TCP peer (an entry that is not an IP address is ignored). Only enable it when the proxy **overwrites** that header; if clients can reach Tend directly, or the proxy merely appends to the header, they can forge it and dodge the limit. |
+| `TEND_INSTANCE`      | the host name           | This installation's name in the `marsad` envelope of [webhook notifications](#send-tend-events-to-ward-or-any-sink) (`source.instance`), so a receiver fed by several Tends can tell them apart. |
 
 `tend serve` **refuses to start without `TEND_MASTER_KEY`**, and with a key that is not 32 base64-encoded bytes: channel configs are encrypted with it, so a server without it could not send a single alert, and a typo in the variable name used to produce exactly that without a word. For a local experiment, `tend serve --no-master-key` starts anyway with alerts and the dashboard off (only `/healthz` and `/ping/{token}` are served) and says so in its banner. The master key serves two roles: it derives a stable session-cookie signing key (HKDF-SHA256, so restarts keep existing sessions valid) and it encrypts stored secrets and channel configs. See the [security model](docs/ARCHITECTURE.md#6-security-model) for details.
 
@@ -302,6 +303,45 @@ notifications:
 ```
 
 The webhook payload is JSON with `subject`, `body`, and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. Rules are org-wide; per-heartbeat routing is not yet supported.
+
+The same body also carries the event as a [`marsad.event/v1`](https://github.com/marsadhq/kit#the-event-format) envelope under `marsad`, the format the Marsad tools exchange events in. The legacy keys above are unchanged, so a receiver that ignores keys it does not know keeps working as before (one that refuses unknown keys with a 4xx would now refuse every notification, and Tend would give each one up at once):
+
+```json
+{
+  "body": "db-backup",
+  "event": {"ID": 103, "OrgID": 1, "Type": "heartbeat.missed", "Source": "heartbeat", "Payload": "db-backup", "DedupKey": "", "CreatedAt": "2026-10-09T10:02:00.297609739Z"},
+  "marsad": {
+    "schema": "marsad.event/v1",
+    "id": "103",
+    "source": {"tool": "tend", "instance": "primary"},
+    "kind": "heartbeat.missed",
+    "subject": {"type": "heartbeat", "id": "db-backup", "name": "db-backup"},
+    "severity": "critical",
+    "status": "firing",
+    "dedup_key": "heartbeat.missed:db-backup@1791540120297609739",
+    "sequence": 1791540120297609739,
+    "occurred_at": "2026-10-09T10:02:00.297609739Z",
+    "title": "Heartbeat missed: db-backup",
+    "body": "db-backup",
+    "data": {"heartbeat": "db-backup"}
+  },
+  "subject": "Heartbeat missed: db-backup"
+}
+```
+
+(Tend sends it on one line.) `source.instance` is `TEND_INSTANCE`, or the host name when that is unset. `id` is the event's row id, `kind` its type, `title` and `body` the subject and body above, and `occurred_at` its `CreatedAt`. `dedup_key` is the event's `DedupKey` (or `<type>:<payload>` when it has none) followed by `@` and `CreatedAt` in Unix nanoseconds, so it is the same for every redelivery of an event and different for every event; `sequence` is that same nanosecond time, for ordering events about one subject. The subject, severity and status depend on the type:
+
+| Event | `subject` (`type`, `id`, `name`) | `severity` | `status` | `data` |
+|---|---|---|---|---|
+| `run.failed` | `job`, the job id, the job name | `critical` | `firing` | the run payload |
+| `run.recovered` | `job`, the job id, the job name | `critical` | `resolved` | the run payload |
+| `heartbeat.missed` | `heartbeat`, its name, its name | `critical` | `firing` | `{"heartbeat": name}` |
+| `heartbeat.recovered` | `heartbeat`, its name, its name | `critical` | `resolved` | `{"heartbeat": name}` |
+| `job.removed` | `job`, the job id, the job name | `info` | `resolved` | the job payload |
+| `heartbeat.removed` | `heartbeat`, its name, its name | `info` | `resolved` | `{"heartbeat": name}` |
+| `notification.failed` | `notifier`, `notify`, `notify` | `warning` | `firing` | `{"undelivered": type}` |
+
+An event that cannot be expressed as a valid envelope (a run event whose payload has no job id, say) is sent with the legacy keys alone, as before. Only the webhook channel sends the envelope; the other channel types send the subject and body.
 
 ## CLI reference
 

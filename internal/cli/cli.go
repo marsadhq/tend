@@ -395,7 +395,7 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var dispatch func(context.Context, core.Event)
 	var worker *notify.Worker
 	if box != nil {
-		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, logger)
+		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), logger)
 		worker.Hold = opts.deliveryHold
 		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
@@ -895,7 +895,7 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// makes the overlap safe. Without a master key the channel configs cannot
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
-		w := notify.NewWorker(st, box, kitnotify.BuildProvider, logger)
+		w := notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), logger)
 		if hold, err := config.LoadDeliveryHold(); err != nil {
 			fmt.Fprintf(stderr, "run: warning: %v; using the default\n", err)
 		} else {
@@ -1758,6 +1758,8 @@ Environment:
   TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
   TEND_DELIVERY_HOLD_MINUTES      how long a failing notification may hold back the
                                   later ones on its channel (default 15; 0 = no ordering)
+  TEND_INSTANCE        this installation's name in webhook notifications
+                       (default: the host name)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity

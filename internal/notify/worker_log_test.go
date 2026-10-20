@@ -112,7 +112,7 @@ func TestWorkerLogLinesUnchanged(t *testing.T) {
 					return nil, c.buildErr
 				}
 				return errProvider{c.sendErr}, nil
-			}, log)
+			}, "primary", log)
 			w.Clock = clock.NewFake(now)
 			n, err := w.DrainOnce(context.Background())
 			if err != nil || n != c.delivered {
@@ -127,7 +127,7 @@ func TestWorkerLogLinesUnchanged(t *testing.T) {
 
 // TestNewWorkerDefaults pins the delivery policy serve runs with.
 func TestNewWorkerDefaults(t *testing.T) {
-	w := NewWorker(&logStore{}, testBox(t), kitnotify.BuildProvider, discardLogger())
+	w := NewWorker(&logStore{}, testBox(t), kitnotify.BuildProvider, "primary", discardLogger())
 	for name, c := range map[string]struct{ got, want time.Duration }{
 		"Interval":   {w.Interval, 2 * time.Second},
 		"Lease":      {w.Lease, time.Minute},

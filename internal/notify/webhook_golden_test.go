@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,7 +58,7 @@ func postedWebhookBody(t *testing.T, ev core.Event) []byte {
 		channel: Channel{ID: 7, OrgID: ev.OrgID, Name: "ward", Kind: kitnotify.Webhook},
 		blob:    blob,
 	}
-	w := NewWorker(fs, box, kitnotify.BuildProvider, discardLogger())
+	w := NewWorker(fs, box, kitnotify.BuildProvider, "primary", discardLogger())
 	w.Clock = clock.NewFake(time.Now())
 	if n, err := w.DrainOnce(context.Background()); err != nil || n != 1 {
 		t.Fatalf("DrainOnce = %d, %v; want the delivery sent", n, err)
@@ -81,23 +82,99 @@ func fixtureEvent(t *testing.T, body []byte) core.Event {
 	return core.Event{ID: e.ID, OrgID: e.OrgID, Type: e.Type, Source: e.Source, Payload: e.Payload, DedupKey: e.DedupKey, CreatedAt: e.CreatedAt}
 }
 
-// TestWebhookBodyMatchesTheLegacyFixtures: for every event type a rule can
-// route, the body Tend posts to a webhook is byte for byte kit's legacy
-// fixture, the body every receiver of Tend's webhooks has been parsing.
-func TestWebhookBodyMatchesTheLegacyFixtures(t *testing.T) {
+// TestWebhookBodyMatchesTheFixtures: for every event type a rule can route,
+// the body Tend posts to a webhook is byte for byte kit's fixture with the
+// marsad envelope, and without the envelope it is byte for byte the legacy
+// fixture, the body every receiver of Tend's webhooks has been parsing. The
+// fixtures are for an installation named "primary".
+func TestWebhookBodyMatchesTheFixtures(t *testing.T) {
 	for _, typ := range event.TendEventTypes() {
 		t.Run(typ, func(t *testing.T) {
-			want, err := event.LoadTendFixture(typ, false)
+			legacy, err := event.LoadTendFixture(typ, false)
 			if err != nil {
 				t.Fatalf("LoadTendFixture: %v", err)
 			}
-			if got := postedWebhookBody(t, fixtureEvent(t, want)); !bytes.Equal(got, want) {
-				t.Errorf("posted body differs from %s:\n got %s\nwant %s", event.TendFixtureName(typ, false), got, want)
+			want, err := event.LoadTendFixture(typ, true)
+			if err != nil {
+				t.Fatalf("LoadTendFixture: %v", err)
+			}
+			ev := fixtureEvent(t, legacy)
+			if got := postedWebhookBody(t, ev); !bytes.Equal(got, want) {
+				t.Errorf("posted body differs from %s:\n got %s\nwant %s", event.TendFixtureName(typ, true), got, want)
+			}
+			w := messageFor(ev, "primary").Webhook.(event.TendWebhook)
+			w.Marsad = nil
+			if got, err := json.Marshal(w); err != nil || !bytes.Equal(got, legacy) {
+				t.Errorf("body without the envelope differs from %s (%v):\n got %s\nwant %s", event.TendFixtureName(typ, false), err, got, legacy)
 			}
 		})
 	}
 	if got, want := event.TendEventTypes(), AlertableTypes(); !equalStrings(got, want) {
 		t.Errorf("kit has fixtures for %v, Tend alerts on %v", got, want)
+	}
+}
+
+// TestWebhookEnvelopeIsWhatWardReads: a receiver decoding the body with kit
+// gets a valid envelope that agrees with the legacy event, with this
+// installation's name, and the message carries the same envelope for the
+// other providers.
+func TestWebhookEnvelopeIsWhatWardReads(t *testing.T) {
+	at := time.Date(2026, 10, 20, 9, 30, 0, 123456789, time.FixedZone("UTC+3", 3*60*60))
+	for _, instance := range []string{"eu-1", ""} {
+		ev := core.Event{ID: 42, OrgID: 1, Type: "heartbeat.missed", Source: "heartbeat", Payload: "db-backup", CreatedAt: at}
+		m := messageFor(ev, instance)
+		body, err := json.Marshal(m.Webhook)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		w, err := event.ParseTendWebhook(body)
+		if err != nil || w.Marsad == nil {
+			t.Fatalf("ParseTendWebhook = %+v, %v (envelope error %v)", w, err, w.EnvelopeError())
+		}
+		env := *w.Marsad
+		if env.Source != (event.Source{Tool: "tend", Instance: instance}) {
+			t.Errorf("source = %+v, want tend/%q", env.Source, instance)
+		}
+		if want := fmt.Sprintf("heartbeat.missed:db-backup@%d", at.UnixNano()); env.DedupKey != want {
+			t.Errorf("dedup_key = %q, want %q", env.DedupKey, want)
+		}
+		if env.Sequence != at.UnixNano() || !env.OccurredAt.Equal(at) || env.ID != "42" {
+			t.Errorf("sequence %d, occurred_at %v, id %q; want %d, %v, 42", env.Sequence, env.OccurredAt, env.ID, at.UnixNano(), at)
+		}
+		if m.Event == nil || m.Event.DedupKey != env.DedupKey {
+			t.Errorf("Message.Event = %+v, want the envelope", m.Event)
+		}
+	}
+}
+
+// TestWebhookEnvelopeLeftOutWhenItCannotBeBuilt: an event that cannot make a
+// valid envelope is still delivered, with the legacy body alone, exactly as
+// before the envelope existed.
+func TestWebhookEnvelopeLeftOutWhenItCannotBeBuilt(t *testing.T) {
+	at := time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
+	for name, ev := range map[string]core.Event{
+		"run payload without job_id": {ID: 1, OrgID: 1, Type: "run.failed", Source: "jobs.runner", Payload: `{"job_name":"x"}`, CreatedAt: at},
+		"run payload not JSON":       {ID: 2, OrgID: 1, Type: "run.recovered", Source: "jobs.runner", Payload: "junk", CreatedAt: at},
+		"job payload not an object":  {ID: 3, OrgID: 1, Type: "job.removed", Source: "jobs", Payload: `[7]`, CreatedAt: at},
+		"unnamed heartbeat":          {ID: 4, OrgID: 1, Type: "heartbeat.missed", Source: "heartbeat", Payload: "", CreatedAt: at},
+		"no CreatedAt":               {ID: 5, OrgID: 1, Type: "heartbeat.recovered", Source: "heartbeat", Payload: "db-backup"},
+		"not alertable":              {ID: 6, OrgID: 1, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"job_id":7}`, CreatedAt: at},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := messageFor(ev, "primary")
+			w := m.Webhook.(event.TendWebhook)
+			if w.Marsad != nil || m.Event != nil {
+				t.Fatalf("envelope = %+v, want none", w.Marsad)
+			}
+			got := postedWebhookBody(t, ev)
+			want, err := json.Marshal(map[string]any{"subject": m.Subject, "body": m.Body, "event": ev})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Errorf("posted body:\n got %s\nwant the legacy body %s", got, want)
+			}
+		})
 	}
 }
 
@@ -116,7 +193,7 @@ func TestWebhookBodyIsTheLegacyEncoding(t *testing.T) {
 		{ID: 4, OrgID: 1, Type: "weird.type", Source: "x", Payload: "<script>"},
 	}
 	for _, ev := range events {
-		m := messageFor(ev)
+		m := messageFor(ev, "primary")
 		w, ok := m.Webhook.(event.TendWebhook)
 		if !ok {
 			t.Fatalf("messageFor(%s).Webhook is %T, want event.TendWebhook", ev.Type, m.Webhook)
