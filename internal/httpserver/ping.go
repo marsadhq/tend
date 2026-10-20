@@ -133,7 +133,7 @@ func parsePing(path string, query map[string][]string) (pingRequest, error) {
 		req.create = len(query["create"]) > 0 && query["create"][0] == "1"
 	}
 	if rids, ok := query["rid"]; ok {
-		rid, ok := canonicalUUID(rids[0])
+		rid, ok := heartbeat.CanonicalUUID(rids[0])
 		if !ok {
 			return pingRequest{}, errPingRID
 		}
@@ -169,28 +169,6 @@ func pingAction(seg string) (in heartbeat.PingInput, ok bool, err error) {
 	return heartbeat.PingInput{Kind: kind, ExitStatus: &n}, true, nil
 }
 
-// canonicalUUID returns s, a UUID in its canonical text form (8-4-4-4-12 hex
-// digits, either letter case, no braces), in lower case; ok is false for
-// anything else.
-func canonicalUUID(s string) (string, bool) {
-	if len(s) != 36 {
-		return "", false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case i == 8 || i == 13 || i == 18 || i == 23:
-			if c != '-' {
-				return "", false
-			}
-		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
-		default:
-			return "", false
-		}
-	}
-	return strings.ToLower(s), true
-}
-
 // validSlug reports whether s may name a heartbeat a slug ping creates:
 // Healthchecks' slug alphabet (lower-case letters, digits, '-' and '_'), at
 // most 100 characters.
@@ -211,7 +189,7 @@ func validSlug(s string) bool {
 // of a UUID (a check imported from Healthchecks keeps its UUID as its token)
 // matches in either letter case, as a UUID does; any other token is exact.
 func normalizeToken(token string) string {
-	if u, ok := canonicalUUID(token); ok {
+	if u, ok := heartbeat.CanonicalUUID(token); ok {
 		return u
 	}
 	return token

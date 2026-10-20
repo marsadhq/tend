@@ -1,6 +1,7 @@
 package heartbeat
 
 import (
+	"strings"
 	"time"
 
 	"github.com/marsadhq/tend/internal/core"
@@ -69,4 +70,27 @@ type PingResult struct {
 	// heartbeat.recovered for a success that brought it back up. It is nil
 	// when the ping changed no status that alerts.
 	Event *core.Event
+}
+
+// CanonicalUUID returns s, a UUID in its canonical text form (8-4-4-4-12 hex
+// digits, either letter case, no braces), in lower case; ok is false for
+// anything else. It is the form of a ?rid=, and of the ping token a check
+// imported from Healthchecks keeps.
+func CanonicalUUID(s string) (string, bool) {
+	if len(s) != 36 {
+		return "", false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			if c != '-' {
+				return "", false
+			}
+		case '0' <= c && c <= '9', 'a' <= c && c <= 'f', 'A' <= c && c <= 'F':
+		default:
+			return "", false
+		}
+	}
+	return strings.ToLower(s), true
 }
