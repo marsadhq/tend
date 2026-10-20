@@ -114,7 +114,33 @@ type jobSpec struct {
 	MaxRetries      int               `yaml:"max_retries"`
 	Enabled         *bool             `yaml:"enabled"` // nil when omitted → default true
 	Env             map[string]string `yaml:"env"`
+
+	// tls, domain, expiry
+	WarnDays *int `yaml:"warn_days"` // nil when omitted → the type's default
+	// tls
+	Host               string   `yaml:"host"`
+	Port               int      `yaml:"port"`
+	ServerName         string   `yaml:"server_name"`
+	StartTLS           string   `yaml:"starttls"`
+	InsecureSkipVerify bool     `yaml:"insecure_skip_verify"`
+	CAFile             string   `yaml:"ca_file"`
+	RenewAfterFraction *float64 `yaml:"renew_after_fraction"` // nil → 2/3; 0 turns the check off
+	// domain
+	Domain  string `yaml:"domain"`
+	RDAPURL string `yaml:"rdap_url"`
+	// expiry
+	ExpiresAt     string `yaml:"expires_at"` // RFC 3339 or a bare date
+	ExpiryCommand string `yaml:"expiry_command"`
+	// drill
+	Restore            string   `yaml:"restore"`
+	Checks             []string `yaml:"checks"`
+	Cleanup            string   `yaml:"cleanup"`
+	ScratchDir         string   `yaml:"scratch_dir"`
+	MaxDurationSeconds int      `yaml:"max_duration_seconds"`
 }
+
+// jobTypeList names the job types a config may use, for error messages.
+const jobTypeList = "shell, http, tls, domain, expiry or drill"
 
 // -------------------------------------------------------------------
 // Parse
@@ -231,10 +257,16 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 		if spec.HTTPURL == "" {
 			return jobs.Job{}, fmt.Errorf("configfile: %s: http_url is required for http jobs", ref)
 		}
+	case "tls", "domain", "expiry", "drill":
+		jt = jobs.JobType(spec.Type)
 	case "":
-		return jobs.Job{}, fmt.Errorf("configfile: %s: type is required (shell or http)", ref)
+		return jobs.Job{}, fmt.Errorf("configfile: %s: type is required (%s)", ref, jobTypeList)
 	default:
-		return jobs.Job{}, fmt.Errorf("configfile: %s: unknown type %q (must be shell or http)", ref, spec.Type)
+		return jobs.Job{}, fmt.Errorf("configfile: %s: unknown type %q (must be %s)", ref, spec.Type, jobTypeList)
+	}
+	settings, err := specFor(jt, spec)
+	if err != nil {
+		return jobs.Job{}, fmt.Errorf("configfile: %s: %w", ref, err)
 	}
 
 	// --- timeout ---
@@ -292,8 +324,56 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 		MaxRetries:      spec.MaxRetries,
 		Enabled:         enabled,
 		Env:             spec.Env,
+		Spec:            settings,
 	}
 	return j, nil
+}
+
+// specFor builds the settings of a job of type t from its YAML entry, with
+// the type's defaults for what the entry leaves out, and validates them. Only
+// the fields of type t are kept; shell and http jobs get none (nil).
+func specFor(t jobs.JobType, spec jobSpec) (*jobs.Spec, error) {
+	if !jobs.HasSpec(t) {
+		return nil, nil
+	}
+	s := jobs.Spec{WarnDays: jobs.DefaultWarnDays(t)}
+	if spec.WarnDays != nil && t != jobs.Drill {
+		s.WarnDays = *spec.WarnDays
+	}
+	switch t {
+	case jobs.TLS:
+		s.Host, s.Port, s.ServerName, s.StartTLS = spec.Host, spec.Port, spec.ServerName, spec.StartTLS
+		s.InsecureSkipVerify, s.CAFile = spec.InsecureSkipVerify, spec.CAFile
+		s.RenewAfterFraction = jobs.DefaultRenewAfterFraction
+		if spec.RenewAfterFraction != nil {
+			s.RenewAfterFraction = *spec.RenewAfterFraction
+		}
+	case jobs.Domain:
+		s.Domain, s.RDAPURL = spec.Domain, spec.RDAPURL
+		if d, err := jobs.NormalizeDomain(spec.Domain); err == nil {
+			s.Domain = d
+		}
+	case jobs.Expiry:
+		s.ExpiryCommand = spec.ExpiryCommand
+		if spec.ExpiresAt != "" {
+			at, err := jobs.ParseExpiryDate(spec.ExpiresAt)
+			if err != nil {
+				return nil, fmt.Errorf("expires_at: %w", err)
+			}
+			s.ExpiresAt = at
+		}
+	case jobs.Drill:
+		s.WarnDays = 0
+		s.Restore, s.Checks, s.Cleanup = spec.Restore, append([]string(nil), spec.Checks...), spec.Cleanup
+		s.ScratchDir, s.MaxDurationSeconds = spec.ScratchDir, spec.MaxDurationSeconds
+		if len(s.Checks) == 0 {
+			s.Checks = nil
+		}
+	}
+	if err := jobs.ValidateSpec(t, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 // -------------------------------------------------------------------
