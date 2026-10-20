@@ -219,8 +219,8 @@ func parseServeFlags(args []string, stderr io.Writer) (serveOptions, error) {
 const watcherInterval = 30 * time.Second
 
 // retentionSweepInterval is how often serve's retention sweep prunes old rows
-// from the audit tables (events, job_runs, finalized deliveries), which
-// otherwise grow without bound. The sweep also runs once at startup.
+// from the audit tables (events, job_runs, finalized deliveries, heartbeat
+// pings), which otherwise grow without bound. The sweep also runs once at startup.
 const retentionSweepInterval = 24 * time.Hour
 
 // sweeper runs serve's retention sweep. It remembers whether it has already
@@ -257,6 +257,7 @@ func (sw *sweeper) run(ctx context.Context, now time.Time) {
 	prune("events", st.PruneEvents, ret.Events)
 	prune("job runs", st.PruneJobRuns, ret.JobRuns)
 	prune("deliveries", st.PruneDeliveries, ret.Deliveries)
+	prune("heartbeat pings", st.PruneHeartbeatPings, ret.Pings)
 	if deleted == 0 || ctx.Err() != nil {
 		return
 	}
@@ -1738,8 +1739,8 @@ Runs these components until interrupted (Ctrl-C):
     body of up to 100 kB is logged), /healthz, and the dashboard/API
   - the heartbeat watcher (flags missed dead-man's-switch pings)
   - the notification delivery worker
-  - a daily retention sweep (prunes old events, job runs, and deliveries,
-    then gives the space back on SQLite)
+  - a daily retention sweep (prunes old events, job runs, deliveries and
+    heartbeat pings, then gives the space back on SQLite)
 
 serve refuses to start without TEND_MASTER_KEY: channel configs are encrypted
 with it, so without it nothing can be alerted on, and the dashboard needs it
@@ -1758,6 +1759,8 @@ Environment:
   TEND_RETENTION_EVENTS_DAYS      days of events to keep (default 30; 0 = forever)
   TEND_RETENTION_RUNS_DAYS        days of finished job runs to keep (default 90; 0 = forever)
   TEND_RETENTION_DELIVERIES_DAYS  days of finished deliveries to keep (default 7; 0 = forever)
+  TEND_RETENTION_PINGS_DAYS       days of heartbeat ping logs to keep (default 30; 0 = forever;
+                                  each heartbeat also keeps only its newest 1000 pings)
   TEND_DELIVERY_HOLD_MINUTES      how long a failing notification may hold back the
                                   later ones on its channel (default 15; 0 = no ordering)
   TEND_INSTANCE        this installation's name in webhook notifications

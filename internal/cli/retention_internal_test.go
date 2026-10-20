@@ -19,6 +19,7 @@ import (
 	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/config"
 	"github.com/marsadhq/tend/internal/core"
+	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/store"
@@ -169,7 +170,17 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			}
 			backdate("deliveries", ds[0].ID, 8*24*time.Hour)
 
-			ret := config.Retention{Events: 0, JobRuns: 90 * 24 * time.Hour, Deliveries: 7 * 24 * time.Hour}
+			_, tok, err := s.CreateHeartbeat(ctx, heartbeat.Heartbeat{OrgID: org.ID, Name: "hb", Token: "tok-sweep", PeriodSeconds: 60})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, age := range []time.Duration{20 * 24 * time.Hour, 40 * 24 * time.Hour} {
+				if _, err := s.RecordHeartbeatPing(ctx, tok, heartbeat.PingInput{Kind: heartbeat.PingLog}, now.Add(-age)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			ret := config.Retention{Events: 0, JobRuns: 90 * 24 * time.Hour, Deliveries: 7 * 24 * time.Hour, Pings: 30 * 24 * time.Hour}
 			(&sweeper{st: s, ret: ret, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}).run(ctx, now)
 
 			if n := count("job_runs"); n != 1 {
@@ -180,6 +191,9 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			}
 			if n := count("deliveries"); n != 0 {
 				t.Errorf("deliveries after the sweep = %d, want 0", n)
+			}
+			if n := count("heartbeat_pings"); n != 1 {
+				t.Errorf("heartbeat pings after the sweep = %d, want 1 (20 days old kept, 40 days old pruned)", n)
 			}
 		})
 	}
@@ -192,6 +206,9 @@ type tooLargeStore struct{ store.Store }
 func (tooLargeStore) PruneEvents(context.Context, time.Time) (int64, error)     { return 1, nil }
 func (tooLargeStore) PruneJobRuns(context.Context, time.Time) (int64, error)    { return 0, nil }
 func (tooLargeStore) PruneDeliveries(context.Context, time.Time) (int64, error) { return 0, nil }
+func (tooLargeStore) PruneHeartbeatPings(context.Context, time.Time) (int64, error) {
+	return 0, nil
+}
 func (tooLargeStore) ReclaimSpace(context.Context) (int64, error) {
 	return 0, fmt.Errorf("%w: 900 MiB of the 1200 MiB file is free", store.ErrCompactTooLarge)
 }
