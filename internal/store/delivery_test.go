@@ -23,9 +23,10 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 			t.Fatalf("BootstrapDefaultOrg: %v", err)
 		}
 
-		// Channel 10: org-wide rule AND a job-scoped rule (dedupe case).
-		// Channel 11: rule for another event type (must not match).
-		// Channel 12: disabled rule (must not match).
+		// Channel ch10: org-wide rule AND a job-scoped rule (dedupe case).
+		// Channel ch11: rule for another event type (must not match).
+		// Channel ch12: disabled rule (must not match).
+		ch10, ch11, ch12 := newChannel(t, ctx, s, org.ID, "ch10"), newChannel(t, ctx, s, org.ID, "ch11"), newChannel(t, ctx, s, org.ID, "ch12")
 		mustRule := func(chID int64, evType string, jobID int64, enabled bool) {
 			t.Helper()
 			if _, err := s.CreateRule(ctx, notify.Rule{
@@ -34,10 +35,10 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 				t.Fatalf("CreateRule: %v", err)
 			}
 		}
-		mustRule(10, "run.failed", 0, true)
-		mustRule(10, "run.failed", 42, true)
-		mustRule(11, "heartbeat.missed", 0, true)
-		mustRule(12, "run.failed", 0, false)
+		mustRule(ch10, "run.failed", 0, true)
+		mustRule(ch10, "run.failed", 42, true)
+		mustRule(ch11, "heartbeat.missed", 0, true)
+		mustRule(ch12, "run.failed", 0, false)
 
 		if _, err := s.EmitEvent(ctx, core.Event{
 			OrgID: org.ID, Type: "run.failed", Source: "test",
@@ -51,11 +52,11 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
 		if len(due) != 1 {
-			t.Fatalf("claimed %d deliveries, want exactly 1 (deduped channel 10)", len(due))
+			t.Fatalf("claimed %d deliveries, want exactly 1 (deduped channel ch10)", len(due))
 		}
 		d := due[0]
-		if d.ChannelID != 10 {
-			t.Errorf("channel: got %d want 10", d.ChannelID)
+		if d.ChannelID != ch10 {
+			t.Errorf("channel: got %d want %d", d.ChannelID, ch10)
 		}
 		if d.Attempts != 1 {
 			t.Errorf("attempts after claim: got %d want 1", d.Attempts)
@@ -85,7 +86,7 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 
 		// A non-alertable event never enqueues - even with a matching rule
 		// shape for it.
-		mustRule(10, "run.succeeded", 0, true)
+		mustRule(ch10, "run.succeeded", 0, true)
 		if _, err := s.EmitEvent(ctx, core.Event{
 			OrgID: org.ID, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"job_id":42}`,
 		}); err != nil {
@@ -114,7 +115,7 @@ func TestDeliveryFinalization(t *testing.T) {
 			t.Fatalf("BootstrapDefaultOrg: %v", err)
 		}
 		if _, err := s.CreateRule(ctx, notify.Rule{
-			OrgID: org.ID, ChannelID: 10, EventType: "heartbeat.missed", Enabled: true,
+			OrgID: org.ID, ChannelID: newChannel(t, ctx, s, org.ID, "ops"), EventType: "heartbeat.missed", Enabled: true,
 		}); err != nil {
 			t.Fatalf("CreateRule: %v", err)
 		}
@@ -168,4 +169,15 @@ func TestDeliveryFinalization(t *testing.T) {
 			t.Fatalf("after resumeAt: %v (%d rows), want the rescheduled delivery", err, len(ds))
 		}
 	})
+}
+
+// newChannel creates a real channel (the enqueue only routes to channels that
+// exist) and returns its ID.
+func newChannel(t *testing.T, ctx context.Context, s store.Store, orgID int64, name string) int64 {
+	t.Helper()
+	id, err := s.CreateChannel(ctx, notify.Channel{OrgID: orgID, Name: name, Kind: notify.Webhook}, "blob")
+	if err != nil {
+		t.Fatalf("CreateChannel %q: %v", name, err)
+	}
+	return id
 }

@@ -261,8 +261,11 @@ heartbeat `up` and the next check tries again instead of losing the alert.
 
 **Notifications are a durable queue.** Every event insert (`EmitEvent`,
 `FinishRunAndEmit`, `ReapStaleRun`, `SetHeartbeatStatusIfAndEmit`) also inserts, in the same transaction, one
-`pending` row in the `deliveries` table for each channel that has an enabled
-rule matching the event: org-wide rules plus rules scoped to the event's job.
+`pending` row in the `deliveries` table for each existing channel that has an
+enabled rule matching the event: org-wide rules plus rules scoped to the
+event's job. Deleting a channel deletes its rules and finalizes its pending
+deliveries in the same transaction, so nothing is ever queued for a channel
+that is gone.
 Because the delivery commits atomically with the event, neither a crash nor a
 slow destination can lose a matched notification. Overlapping rules for the
 same channel produce a single delivery.

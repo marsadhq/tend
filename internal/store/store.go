@@ -144,9 +144,10 @@ type Store interface {
 	ReclaimSpace(ctx context.Context) (int64, error)
 
 	// durable notification deliveries. Pending rows are enqueued transactionally
-	// by every event insert (EmitEvent / FinishRunAndEmit / ReapStaleRun) for
-	// alertable event types with matching enabled rules; the notify.Worker
-	// drains them. See notify.WorkerStore for the claim/lease semantics.
+	// by every event insert (EmitEvent / FinishRunAndEmit / ReapStaleRun / ...)
+	// for alertable event types with matching enabled rules whose channel
+	// exists; the notify.Worker drains them. See notify.WorkerStore for the
+	// claim/lease semantics.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error)
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
@@ -160,7 +161,7 @@ type Store interface {
 	CreateChannel(ctx context.Context, ch notify.Channel, configBlob string) (int64, error) // upsert by (org,name); returns row ID
 	GetChannel(ctx context.Context, orgID, id int64) (notify.Channel, string, error)        // channel + encrypted blob; ErrNotFound if absent
 	ListChannels(ctx context.Context, orgID int64) ([]notify.Channel, error)                // metadata only (no blob)
-	DeleteChannel(ctx context.Context, orgID, id int64) error                               // org-scoped delete
+	DeleteChannel(ctx context.Context, orgID, id int64) error                               // org-scoped delete; also deletes its rules and fails its pending deliveries
 
 	// notification rules (event_type -> channel bindings; job_id 0 = all jobs)
 	CreateRule(ctx context.Context, r notify.Rule) (int64, error)                                         // upsert by (org,channel,event,job); returns row ID
