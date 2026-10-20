@@ -360,7 +360,7 @@ func eventStatusClass(eventType string) string {
 	switch {
 	case eventType == "run.failed", strings.HasPrefix(eventType, "heartbeat.missed"):
 		return "st-fail"
-	case eventType == "run.succeeded", strings.HasPrefix(eventType, "heartbeat.recovered"):
+	case eventType == "run.succeeded", eventType == "run.recovered", strings.HasPrefix(eventType, "heartbeat.recovered"):
 		return "st-ok"
 	case eventType == "run.started", eventType == "run.running":
 		return "st-run"

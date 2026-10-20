@@ -75,3 +75,24 @@ func TestEventJobIDPayloadShapes(t *testing.T) {
 		})
 	}
 }
+
+// TestMessageForRunRecovered asserts run.recovered names the job in the
+// subject and is alertable, unlike run.succeeded.
+func TestMessageForRunRecovered(t *testing.T) {
+	m := messageFor(core.Event{
+		Type:    "run.recovered",
+		Payload: `{"run_id":4,"job_id":2,"job_name":"nightly","status":"succeeded","exit_code":0}`,
+	})
+	if m.Subject != "Job recovered: nightly" {
+		t.Fatalf("subject = %q, want %q", m.Subject, "Job recovered: nightly")
+	}
+	if !strings.Contains(m.Body, "succeeded") {
+		t.Fatalf("body should mention the status: %q", m.Body)
+	}
+	if m2 := messageFor(core.Event{Type: "run.recovered", Payload: "junk"}); m2.Subject != "Job recovered" {
+		t.Fatalf("unparseable payload subject = %q, want %q", m2.Subject, "Job recovered")
+	}
+	if !Alertable("run.recovered") || Alertable("run.succeeded") {
+		t.Fatal("run.recovered must be alertable and run.succeeded must not")
+	}
+}

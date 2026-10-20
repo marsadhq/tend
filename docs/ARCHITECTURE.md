@@ -222,17 +222,20 @@ the runner, watcher, and notifier together.
 
 Event types currently emitted:
 
-- **Runs:** `run.started` (best-effort), `run.succeeded`, `run.failed`. Timeouts
-  surface as `run.failed` with the precise status in the payload, so the
-  `run.*` type vocabulary stays small.
+- **Runs:** `run.started` (best-effort), `run.succeeded`, `run.failed`,
+  `run.recovered`. Timeouts surface as `run.failed` with the precise status in
+  the payload, so the `run.*` type vocabulary stays small. `run.recovered` is
+  recorded next to `run.succeeded` (same payload, dedup key
+  `run:<run_id>:run.recovered`) when the job's previous finished run had not
+  succeeded: failed, timed out or reaped.
 - **Heartbeats:** `heartbeat.missed`, `heartbeat.recovered`. A heartbeat that
   was never pinged is armed from its creation time, so `heartbeat.missed` also
   covers a first ping that never arrives.
 - **Notifications:** `notification.failed` (emitted when delivery is exhausted).
 
 **Terminal run events are written atomically with the run.** The runner records
-the terminal run state and appends the terminal event in one transaction via
-`FinishRunAndEmit`. This closes the lost-event gap where `FinishRun` could commit
+the terminal run state and appends the terminal event (and, for a recovery,
+`run.recovered`) in one transaction via `FinishRunAndEmit`. This closes the lost-event gap where `FinishRun` could commit
 but a separate `EmitEvent` then fail. (`run.started` is explicitly *not* terminal
 and is best-effort; a lost start event is non-critical because the terminal
 event is guaranteed.) A heartbeat's transitions get the same treatment: the

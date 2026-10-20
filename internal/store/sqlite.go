@@ -611,9 +611,10 @@ func (s *SQLiteStore) FinishRun(ctx context.Context, runID int64, status jobs.Ru
 
 // FinishRunAndEmit atomically records the terminal run state AND appends the
 // terminal lifecycle event in a single transaction, preventing a lost terminal
-// event if EmitEvent would fail after FinishRun committed. Like FinishRun it
-// returns jobs.ErrRunNotRunning, writing neither, when the run is no longer
-// 'running'.
+// event if EmitEvent would fail after FinishRun committed. A run that
+// succeeded after the job's previous finished run did not also gets
+// run.recovered, in the same transaction. Like FinishRun it returns
+// jobs.ErrRunNotRunning, writing neither, when the run is no longer 'running'.
 func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status jobs.RunStatus, exitCode, attempt int, output string, ev core.Event) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -632,10 +633,47 @@ func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status 
 	if err != nil {
 		return 0, err
 	}
+	if status == jobs.StatusSucceeded {
+		prev, found, err := previousRunStatusTx(ctx, tx, runID, "?")
+		if err != nil {
+			return 0, err
+		}
+		if found && prev != jobs.StatusSucceeded {
+			if _, err := emitEventTx(ctx, tx, jobs.RecoveredEvent(ev, runID)); err != nil {
+				return 0, err
+			}
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("finish run and emit commit: %w", err)
 	}
 	return id, nil
+}
+
+// previousRunStatusSQL selects the status of the finished run of the same job
+// that ended last before run $1 (or ?): what the job's outcome was until now.
+// Runs still pending or running have no outcome yet and are skipped. %s is the
+// placeholder of the dialect.
+const previousRunStatusSQL = `SELECT p.status FROM job_runs p
+	JOIN job_runs r ON r.id = %s
+	WHERE p.org_id = r.org_id AND p.job_id = r.job_id AND p.id <> r.id
+	  AND p.status NOT IN ('pending', 'running') AND p.ended_at IS NOT NULL
+	ORDER BY p.ended_at DESC, p.id DESC
+	LIMIT 1`
+
+// previousRunStatusTx returns the status of the job's previous finished run
+// (see previousRunStatusSQL) on tx, and false when the job has none. Shared by
+// both backends; placeholder is "?" or "$1".
+func previousRunStatusTx(ctx context.Context, tx *sql.Tx, runID int64, placeholder string) (jobs.RunStatus, bool, error) {
+	var status string
+	err := tx.QueryRowContext(ctx, fmt.Sprintf(previousRunStatusSQL, placeholder), runID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("previous run status: %w", err)
+	}
+	return jobs.RunStatus(status), true, nil
 }
 
 // ListRunningRuns returns every run currently in 'running' (all orgs), for the

@@ -3,7 +3,12 @@
 // on top of these types by later tasks; this file holds only the data shapes.
 package jobs
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/marsadhq/tend/internal/core"
+)
 
 // JobType identifies the kind of work a Job performs.
 type JobType string
@@ -61,4 +66,28 @@ type Run struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 	CreatedAt time.Time
+}
+
+// Event types of a run's lifecycle. Every run.* event carries the same small
+// JSON payload (run_id, job_id, job_name, status, exit_code) and the dedup key
+// run:<run_id>:<type>.
+const (
+	EventRunStarted   = "run.started"
+	EventRunSucceeded = "run.succeeded"
+	EventRunFailed    = "run.failed"
+	// EventRunRecovered is recorded next to run.succeeded when the job's
+	// previous finished run had not succeeded (failed, timed out or reaped).
+	EventRunRecovered = "run.recovered"
+)
+
+// RecoveredEvent derives the run.recovered event of run runID from its
+// run.succeeded event: the same org, source and payload, its own type and
+// dedup key. The store records it in the transaction that finishes the run,
+// where it can see the job's previous outcome.
+func RecoveredEvent(succeeded core.Event, runID int64) core.Event {
+	ev := succeeded
+	ev.ID = 0
+	ev.Type = EventRunRecovered
+	ev.DedupKey = fmt.Sprintf("run:%d:%s", runID, EventRunRecovered)
+	return ev
 }

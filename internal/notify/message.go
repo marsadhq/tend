@@ -15,6 +15,7 @@ import (
 // non-failures.
 var alertable = map[string]bool{
 	"run.failed":          true, // timeouts surface as run.failed (status in payload)
+	"run.recovered":       true, // a success after a run that did not succeed
 	"heartbeat.missed":    true,
 	"heartbeat.recovered": true,
 }
@@ -66,6 +67,27 @@ func messageFor(ev core.Event) Message {
 		return Message{
 			Subject: subject,
 			Body:    fmt.Sprintf("status=%s exit_code=%d", status, p.ExitCode),
+			Event:   ev,
+		}
+
+	case "run.recovered":
+		var p struct {
+			JobName  string `json:"job_name"`
+			Status   string `json:"status"`
+			ExitCode int    `json:"exit_code"`
+		}
+		_ = json.Unmarshal([]byte(ev.Payload), &p)
+		subject := "Job recovered"
+		if p.JobName != "" {
+			subject = "Job recovered: " + p.JobName
+		}
+		status := p.Status
+		if status == "" {
+			status = "succeeded"
+		}
+		return Message{
+			Subject: subject,
+			Body:    fmt.Sprintf("status=%s exit_code=%d; the previous run had not succeeded", status, p.ExitCode),
 			Event:   ev,
 		}
 
