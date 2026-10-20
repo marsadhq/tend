@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -28,9 +29,28 @@ import (
 	"github.com/marsadhq/tend/internal/secrets"
 )
 
-// workerID is the constant claimant name stamped on runs. This single-instance
-// runner has no peer workers, so a fixed identifier is sufficient.
+// workerID is the claimant name stamped on the runs serve's runner claims
+// (Runner.Claimant left empty). serve is single-instance, so a fixed name is
+// enough to tell its runs from those of a one-off `tend run`.
 const workerID = "runner"
+
+// ManualClaimantPrefix starts the claimant of every run claimed by a one-off
+// `tend run` process (see ManualClaimant). RequeueOrphanedRuns leaves such
+// runs alone: they belong to that process, not to a serve that crashed, and
+// requeueing one while it executes would run its job twice. A `tend run` that
+// died mid-run is failed by the reaper once the run's time limit has passed.
+const ManualClaimantPrefix = "run:"
+
+// ManualClaimant returns the claimant a `tend run` process stamps on the runs
+// it claims: ManualClaimantPrefix, then the host name and the process ID, so
+// claimed_by also says where the run is executing.
+func ManualClaimant() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown-host"
+	}
+	return fmt.Sprintf("%s%s:%d", ManualClaimantPrefix, host, os.Getpid())
+}
 
 // defaultTickInterval is the scheduler poll cadence when Runner.TickInterval is
 // left at its zero value.
@@ -165,6 +185,11 @@ type Runner struct {
 	TickInterval time.Duration
 	// Workers is the number of draining goroutines; defaults to 2 when < 1.
 	Workers int
+	// Claimant is the name stamped on the runs this runner claims
+	// (job_runs.claimed_by); empty means "runner", serve's own. `tend run`
+	// sets ManualClaimant(), so a serve that starts meanwhile does not
+	// requeue its run.
+	Claimant string
 
 	// EventSink, when non-nil, is invoked with each terminal run event
 	// (run.succeeded / run.failed) AFTER it has been durably recorded by
@@ -388,7 +413,11 @@ func (r *Runner) DrainOnce(ctx context.Context) error {
 // and the job are known, so callers must not log it a second time. (A claim
 // that keeps failing is logged only every so often; see claimErrors.)
 func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
-	run, ok, err := r.store.ClaimRun(ctx, workerID)
+	claimant := r.Claimant
+	if claimant == "" {
+		claimant = workerID
+	}
+	run, ok, err := r.store.ClaimRun(ctx, claimant)
 	if err != nil {
 		r.logClaimError(ctx, err)
 		return false, err
@@ -826,7 +855,8 @@ func (r *Runner) emit(ctx context.Context, run Run, job Job, typ string, status 
 // returns nil.
 //
 // I3: crash/DB-orphaned 'running' runs are recovered at startup via
-// RequeueOrphanedRuns (at-least-once). Runs orphaned while the process stays
+// RequeueOrphanedRuns (at-least-once); a run a `tend run` process claimed is
+// left to that process (and to the reaper, should the process have died). Runs orphaned while the process stays
 // up (worker goroutine lost mid-run) are failed by the periodic reaper
 // (ReapOnce) once the run's time limit plus reapSlack has passed, so an orphan
 // never blocks its job's no-overlap guard until the next restart.

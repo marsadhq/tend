@@ -148,9 +148,13 @@ oldest pending run; Postgres allows real connection concurrency so `FOR UPDATE
 SKIP LOCKED`-style claiming is meaningful. Both guarantee no two workers claim the
 same run.
 
-Crash recovery is at-least-once: `RequeueOrphanedRuns` resets any `running` rows
-back to `pending` at startup (the single-instance runner has no peers, so a
-`running` row found at boot was orphaned by a crash).
+Crash recovery is at-least-once: `RequeueOrphanedRuns` resets the `running`
+rows serve's own runner claimed back to `pending` at startup (serve is
+single-instance, so such a row found at boot was orphaned by a crash). A run a
+one-off `tend run` claimed is stamped `claimed_by = run:<host>:<pid>`
+(`jobs.ManualClaimant`) and left alone: that process may still be executing
+it, and requeueing it would run the job twice. Should the `tend run` process
+have died, the reaper below fails the run once its time limit has passed.
 
 While `serve` is up, the runner's reaper (`Runner.ReapOnce`, every minute)
 covers the other case: a run whose worker was lost without the process

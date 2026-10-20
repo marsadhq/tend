@@ -879,6 +879,9 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	logger := slog.New(slog.NewTextHandler(stderr, nil))
 	runner := jobs.NewRunner(st, jobs.NewExecutor(), box, clock.RealClock{})
 	runner.Logger = logger
+	// Claimed under this process's own name, so a serve that starts while the
+	// run executes does not requeue it and run the job a second time.
+	runner.Claimant = jobs.ManualClaimant()
 	if err := runner.DrainOnce(ctx); err != nil {
 		return fmt.Errorf("run: drain: %w", err)
 	}
