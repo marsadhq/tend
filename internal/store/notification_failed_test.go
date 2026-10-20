@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/notify"
-	"github.com/marsadhq/tend/internal/secrets"
 	"github.com/marsadhq/tend/internal/store"
 )
 

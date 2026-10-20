@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
-	"github.com/marsadhq/tend/internal/secrets"
 )
 
 // fakeWorkerStore is an in-memory WorkerStore. It records every call so tests

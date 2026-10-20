@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/notify"
-	"github.com/marsadhq/tend/internal/secrets"
 )
 
 // fakeChannelStore is a minimal in-memory ChannelStore that captures the

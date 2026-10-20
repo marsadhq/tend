@@ -25,8 +25,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/core"
-	"github.com/marsadhq/tend/internal/secrets"
 )
 
 // workerID is the claimant name stamped on the runs serve's runner claims

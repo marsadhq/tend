@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/auth"
 	"github.com/marsadhq/tend/internal/config"
 	"github.com/marsadhq/tend/internal/configfile"
@@ -30,7 +31,6 @@ import (
 	"github.com/marsadhq/tend/internal/httpserver"
 	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"
-	"github.com/marsadhq/tend/internal/secrets"
 	"github.com/marsadhq/tend/internal/store"
 )
 

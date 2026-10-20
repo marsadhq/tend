@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/marsadhq/tend/internal/secrets"
+	"github.com/marsadhq/kit/secrets"
 )
 
 // Channel is a configured notification destination. Tenant-scoped via OrgID and
