@@ -97,3 +97,40 @@ func TestHeartbeatShowAndHistoryShowThePingLog(t *testing.T) {
 		t.Errorf("history -limit 1 printed more than one line:\n%s", got)
 	}
 }
+
+// TestHeartbeatBodiesAreSafeOnATerminal: a logged body is what a token holder
+// sent, so the CLI prints it without its control characters (an escape
+// sequence could rewrite the operator's terminal); newlines and tabs stay.
+func TestHeartbeatBodiesAreSafeOnATerminal(t *testing.T) {
+	cfg := tempConfig(t)
+	ctx := context.Background()
+	var stdout, stderr bytes.Buffer
+	if err := cli.Run(ctx, cfg, []string{"heartbeat", "add", "-name", "esc", "-period", "60"}, nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	st := openTestStore(t, cfg.DSN)
+	org, _ := st.BootstrapDefaultOrg(ctx)
+	hb, err := st.GetHeartbeatByName(ctx, org.ID, "esc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordHeartbeatPing(ctx, hb.Token, heartbeat.PingInput{Kind: heartbeat.PingSuccess, Body: "ok\x1b[2J\x1b]0;owned\x07\tcol\r\nnext\x9b31m"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	for _, args := range [][]string{{"heartbeat", "show", "esc"}, {"heartbeat", "history", "esc", "-body"}} {
+		stdout.Reset()
+		if err := cli.Run(ctx, cfg, args, nil, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		out := stdout.String()
+		for _, bad := range []string{"\x1b", "\x07", "\r", "\u009b"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%v printed a control character %q:\n%q", args, bad, out)
+			}
+		}
+		if !strings.Contains(out, "\tcol") || !strings.Contains(out, "next") {
+			t.Errorf("%v lost the body's text:\n%q", args, out)
+		}
+	}
+}

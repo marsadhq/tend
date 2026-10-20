@@ -1532,7 +1532,7 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 		fmt.Fprintf(stdout, "slug url:  %s/ping/%s/%s\n", baseURL(), key, url.PathEscape(hb.Name))
 	}
 	if result != nil {
-		if tail := heartbeat.OutputTail(result.Body); tail != "" {
+		if tail := heartbeat.OutputTail(terminalSafe(result.Body)); tail != "" {
 			fmt.Fprintln(stdout, "output:")
 			for _, l := range strings.Split(tail, "\n") {
 				fmt.Fprintf(stdout, "  %s\n", l)
@@ -1540,6 +1540,22 @@ func cmdHeartbeatShow(ctx context.Context, st store.Store, orgID int64, args []s
 		}
 	}
 	return nil
+}
+
+// terminalSafe returns a logged ping body fit to print on a terminal: control
+// characters other than newline and tab (escape sequences, bells, carriage
+// returns, the C1 controls) are dropped. The body is whatever a holder of the
+// ping URL sent, and an escape sequence could rewrite the operator's screen.
+func terminalSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // showPingScan is how many of the newest pings `heartbeat show` looks through
@@ -1621,7 +1637,7 @@ func cmdHeartbeatHistory(ctx context.Context, st store.Store, orgID int64, args 
 		}
 		fmt.Fprintf(stdout, "%s  %s\n", p.CreatedAt.UTC().Format(time.RFC3339), strings.TrimRight(strings.Join(parts, "  "), " "))
 		if *withBody && p.Body != "" {
-			for _, l := range strings.Split(strings.TrimRight(p.Body, "\n"), "\n") {
+			for _, l := range strings.Split(strings.TrimRight(terminalSafe(p.Body), "\n"), "\n") {
 				fmt.Fprintf(stdout, "    %s\n", l)
 			}
 		}
