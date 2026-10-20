@@ -387,11 +387,11 @@ func pgEmitEventTx(ctx context.Context, tx *sql.Tx, e core.Event) (int64, error)
 	}
 	var id int64
 	err := tx.QueryRowContext(ctx, `INSERT INTO events
-		(org_id, type, source, payload, dedup_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		(org_id, type, source, payload, dedup_key, created_at, detail)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id`,
 		e.OrgID, e.Type, nullIfEmpty(e.Source), nullIfEmpty(e.Payload), nullIfEmpty(e.DedupKey),
-		created.UTC().Format(tsLayout)).Scan(&id)
+		created.UTC().Format(tsLayout), nullIfEmpty(pgText(e.Detail))).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("emit event: %w", err)
 	}
@@ -822,7 +822,7 @@ func (s *PostgresStore) ListEvents(ctx context.Context, orgID int64, limit int) 
 		limit = defaultListLimit
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		`SELECT `+eventColumns+`
 		 FROM events WHERE org_id = $1 ORDER BY id DESC LIMIT $2`, orgID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
@@ -853,7 +853,7 @@ func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, na
 		limit = defaultListLimit
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		`SELECT `+eventColumns+`
 		 FROM events WHERE org_id = $1 AND source = 'heartbeat' AND payload = $2
 		 ORDER BY id DESC LIMIT $3`, orgID, name, limit)
 	if err != nil {
@@ -926,7 +926,7 @@ func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, l
 
 	for i := range out {
 		row := tx.QueryRowContext(ctx,
-			`SELECT id, org_id, type, source, payload, dedup_key, created_at FROM events WHERE id = $1`,
+			`SELECT `+eventColumns+` FROM events WHERE id = $1`,
 			out[i].EventID)
 		ev, err := scanEvent(row)
 		if err != nil {

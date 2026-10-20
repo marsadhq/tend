@@ -542,10 +542,10 @@ func emitEventTx(ctx context.Context, tx *sql.Tx, e core.Event) (int64, error) {
 		created = time.Now()
 	}
 	res, err := tx.ExecContext(ctx, `INSERT INTO events
-		(org_id, type, source, payload, dedup_key, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		(org_id, type, source, payload, dedup_key, created_at, detail)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		e.OrgID, e.Type, nullIfEmpty(e.Source), nullIfEmpty(e.Payload), nullIfEmpty(e.DedupKey),
-		formatTime(created))
+		formatTime(created), nullIfEmpty(e.Detail))
 	if err != nil {
 		return 0, fmt.Errorf("emit event: %w", err)
 	}
@@ -1119,7 +1119,7 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, orgID int64, limit int) ([
 		limit = defaultListLimit
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		`SELECT `+eventColumns+`
 		 FROM events WHERE org_id = ? ORDER BY id DESC LIMIT ?`, orgID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
@@ -1128,9 +1128,12 @@ func (s *SQLiteStore) ListEvents(ctx context.Context, orgID int64, limit int) ([
 	return scanEvents(rows)
 }
 
-// scanEvent reads one core.Event from a row produced by a SELECT of the
-// standard event column list (id, org_id, type, source, payload, dedup_key,
-// created_at). Shared by both backends, like scanRun/scanHeartbeat.
+// eventColumns lists the events columns in SELECT order, matched positionally
+// by scanEvent. Shared with the Postgres backend.
+const eventColumns = `id, org_id, type, source, payload, dedup_key, created_at, detail`
+
+// scanEvent reads one core.Event from a row produced by a SELECT of
+// eventColumns. Shared by both backends, like scanRun/scanHeartbeat.
 func scanEvent(sc interface{ Scan(...any) error }) (core.Event, error) {
 	var (
 		e        core.Event
@@ -1138,13 +1141,15 @@ func scanEvent(sc interface{ Scan(...any) error }) (core.Event, error) {
 		payload  sql.NullString
 		dedupKey sql.NullString
 		created  sql.NullString
+		detail   sql.NullString
 	)
-	if err := sc.Scan(&e.ID, &e.OrgID, &e.Type, &source, &payload, &dedupKey, &created); err != nil {
+	if err := sc.Scan(&e.ID, &e.OrgID, &e.Type, &source, &payload, &dedupKey, &created, &detail); err != nil {
 		return core.Event{}, err
 	}
 	e.Source = source.String
 	e.Payload = payload.String
 	e.DedupKey = dedupKey.String
+	e.Detail = detail.String
 	var err error
 	if e.CreatedAt, err = parseTime(created); err != nil {
 		return core.Event{}, err
@@ -1152,29 +1157,15 @@ func scanEvent(sc interface{ Scan(...any) error }) (core.Event, error) {
 	return e, nil
 }
 
-// scanEvents reads core.Events from a SELECT of the standard event column list
-// (id, org_id, type, source, payload, dedup_key, created_at). It is shared by
+// scanEvents reads core.Events from a SELECT of eventColumns. It is shared by
 // both backends' ListEvents and ListHeartbeatEvents (the scan is dialect-free,
 // like scanHeartbeat/scanRun).
 func scanEvents(rows *sql.Rows) ([]core.Event, error) {
 	var out []core.Event
 	for rows.Next() {
-		var (
-			e        core.Event
-			source   sql.NullString
-			payload  sql.NullString
-			dedupKey sql.NullString
-			created  sql.NullString
-		)
-		if err := rows.Scan(&e.ID, &e.OrgID, &e.Type, &source, &payload, &dedupKey, &created); err != nil {
+		e, err := scanEvent(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan event: %w", err)
-		}
-		e.Source = source.String
-		e.Payload = payload.String
-		e.DedupKey = dedupKey.String
-		var err error
-		if e.CreatedAt, err = parseTime(created); err != nil {
-			return nil, err
 		}
 		out = append(out, e)
 	}
@@ -1277,7 +1268,7 @@ func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lea
 
 	for i := range out {
 		row := tx.QueryRowContext(ctx,
-			`SELECT id, org_id, type, source, payload, dedup_key, created_at FROM events WHERE id = ?`,
+			`SELECT `+eventColumns+` FROM events WHERE id = ?`,
 			out[i].EventID)
 		ev, err := scanEvent(row)
 		if err != nil {
@@ -1605,7 +1596,7 @@ func (s *SQLiteStore) ListHeartbeatEvents(ctx context.Context, orgID int64, name
 		limit = defaultListLimit
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, org_id, type, source, payload, dedup_key, created_at
+		`SELECT `+eventColumns+`
 		 FROM events WHERE org_id = ? AND source = 'heartbeat' AND payload = ?
 		 ORDER BY id DESC LIMIT ?`, orgID, name, limit)
 	if err != nil {
