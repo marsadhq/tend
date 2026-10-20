@@ -80,7 +80,7 @@ Code the Marsad tools share comes from the
 | `kit/secrets` | The AES-256-GCM `Box` used to encrypt/decrypt secret values and channel config. |
 | `kit/auth` | Cryptographic identity primitives: argon2id passwords, API token generation and hashing, signed session cookies, CSRF tokens. |
 | `kit/httpx` | The security-headers middleware (the CSP), the HTTP server with every connection phase bounded, and the keyed token-bucket rate limiter with its client-address keying. |
-| `kit/notify` | The `Provider` contract and `Message`, the providers (webhook, Slack, Discord, SMTP, Telegram), `BuildProvider` from a channel's config, permanent-error classification, and the durable delivery `Worker` with its leases, backoff and give-up. |
+| `kit/notify` | The `Provider` contract and `Message`, the providers (webhook, Slack, Discord, SMTP, Telegram, ntfy, Pushover), `BuildProvider` from a channel's config, permanent-error classification, and the durable delivery `Worker` with its leases, backoff and give-up. |
 | `kit/event` | `TendWebhook`, the body Tend's webhook channel posts, with the golden fixtures that pin it byte for byte. |
 | `kit/urlredact` | Stdlib-only helpers that reduce a URL to its host and a request error to its cause, used by the notification providers and the HTTP job executor so secret-bearing URLs stay out of logs and run output. |
 
@@ -437,8 +437,8 @@ careful.
   proxy.
 - **URLs are kept out of error text.** A failed outbound request surfaces as a
   `*url.Error` that quotes the full URL. `kit/urlredact` reduces it to the
-  host and the underlying cause; the webhook, Slack, Discord, and Telegram
-  providers and the HTTP job executor all go through it, so a token embedded in
+  host and the underlying cause; the webhook, Slack, Discord, Telegram, ntfy
+  and Pushover providers and the HTTP job executor all go through it, so a token embedded in
   a URL reaches neither the logs nor `job_runs.output`. Two causes would quote
   a few characters of the URL themselves, a bad percent-escape and a character
   that is not allowed in a host name (`url.EscapeError`,

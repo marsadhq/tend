@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/kit/secrets"
 	"github.com/marsadhq/tend/internal/configfile"
 	"github.com/marsadhq/tend/internal/notify"
@@ -411,7 +412,7 @@ func TestReconcileRefusesRulesThatNeverFire(t *testing.T) {
 }
 
 // TestParseUnknownChannelTypeNamesTheValidOnes: the error for a channel type
-// Tend does not know lists every type it does, telegram included.
+// Tend does not know lists every type it does.
 func TestParseUnknownChannelTypeNamesTheValidOnes(t *testing.T) {
 	yaml := `
 notifications:
@@ -424,15 +425,100 @@ notifications:
 	if err == nil {
 		t.Fatal("Parse accepted an unknown channel type")
 	}
-	for _, want := range []string{`"pager"`, `"carrier-pigeon"`, "webhook", "slack", "discord", "smtp", "telegram"} {
+	for _, want := range []string{`"pager"`, `"carrier-pigeon"`, "webhook", "slack", "discord", "smtp", "telegram", "ntfy", "pushover"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %s", err, want)
 		}
 	}
-	for _, typ := range []string{"webhook", "slack", "discord", "smtp", "telegram"} {
+	for _, typ := range []string{"webhook", "slack", "discord", "smtp", "telegram", "ntfy", "pushover"} {
 		ok := strings.Replace(yaml, "carrier-pigeon", typ, 1)
 		if _, err := configfile.Parse([]byte(ok)); err != nil {
 			t.Errorf("Parse refused a %s channel: %v", typ, err)
+		}
+	}
+}
+
+// TestReconcileNtfyAndPushoverChannels: ntfy and Pushover channels sync from
+// YAML like the others: secret references resolved, list and number values
+// kept, the config stored encrypted, and a provider built from it.
+func TestReconcileNtfyAndPushoverChannels(t *testing.T) {
+	st, orgID := reconcileTestStore(t)
+	box := newBox(t)
+	ctx := context.Background()
+	clk := clock.NewFake(time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+
+	for name, val := range map[string]string{"ntfy_token": "tk_REALTOKEN", "pushover_token": "aREALAPPTOKEN", "pushover_user": "uREALUSERKEY"} {
+		ct, err := box.Encrypt([]byte(val))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.PutSecret(ctx, orgID, name, ct); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := configfile.Parse([]byte(`
+notifications:
+  channels:
+    - name: phone
+      type: ntfy
+      config:
+        url: "https://ntfy.example.com/tend-alerts"
+        token: "{{ secret.ntfy_token }}"
+        priority: 4
+        tags: [warning, tend]
+    - name: pager
+      type: pushover
+      config:
+        token: "{{ secret.pushover_token }}"
+        user: "{{ secret.pushover_user }}"
+        priority: 2
+        retry: 60
+        expire: 3600
+  rules:
+    - channel: phone
+      events: [run.failed]
+    - channel: pager
+      events: [heartbeat.missed]
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := configfile.Reconcile(ctx, st, orgID, clk, box, cfg, true); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	channels, err := st.ListChannels(ctx, orgID)
+	if err != nil || len(channels) != 2 {
+		t.Fatalf("ListChannels = %v, %v; want 2", channels, err)
+	}
+	want := map[string]struct {
+		kind kitnotify.ChannelType
+		cfg  string
+	}{
+		"phone": {kitnotify.Ntfy, `{"priority":4,"tags":["warning","tend"],"token":"tk_REALTOKEN","url":"https://ntfy.example.com/tend-alerts"}`},
+		"pager": {kitnotify.Pushover, `{"expire":3600,"priority":2,"retry":60,"token":"aREALAPPTOKEN","user":"uREALUSERKEY"}`},
+	}
+	for _, ch := range channels {
+		w, ok := want[ch.Name]
+		if !ok || ch.Kind != w.kind {
+			t.Errorf("channel %q kind %q, want %+v", ch.Name, ch.Kind, w)
+			continue
+		}
+		_, blob, err := st.GetChannel(ctx, orgID, ch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(blob, "REAL") {
+			t.Errorf("channel %q config is stored in plaintext", ch.Name)
+		}
+		_, plain, err := notify.GetChannelDecrypted(ctx, st, box, orgID, ch.ID)
+		if err != nil {
+			t.Fatalf("GetChannelDecrypted %q: %v", ch.Name, err)
+		}
+		if string(plain) != w.cfg {
+			t.Errorf("channel %q config = %s, want %s", ch.Name, plain, w.cfg)
+		}
+		if _, err := kitnotify.BuildProvider(ch.Kind, plain); err != nil {
+			t.Errorf("BuildProvider(%q): %v", ch.Name, err)
 		}
 	}
 }
