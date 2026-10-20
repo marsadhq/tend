@@ -182,3 +182,20 @@ func TestServeBannerShowsRetention(t *testing.T) {
 		t.Errorf("banner = %q, want the retention windows", banner)
 	}
 }
+
+// TestServeRefusesAnInvalidDeliveryHold: like the retention windows, a hold
+// that is not a whole number of minutes stops serve before it opens the
+// database.
+func TestServeRefusesAnInvalidDeliveryHold(t *testing.T) {
+	t.Setenv("TEND_ADDR", "127.0.0.1:0")
+	t.Setenv("TEND_DELIVERY_HOLD_MINUTES", "15m")
+	cfg := keyedConfig(t)
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "TEND_DELIVERY_HOLD_MINUTES") {
+		t.Fatalf("serve with TEND_DELIVERY_HOLD_MINUTES=15m: err = %v, want an error naming the variable", err)
+	}
+	if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+		t.Errorf("a refused serve must not create the database (stat err = %v)", statErr)
+	}
+}

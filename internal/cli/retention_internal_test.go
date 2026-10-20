@@ -157,7 +157,7 @@ func TestRetentionSweepHonoursTheConfiguredWindows(t *testing.T) {
 			if _, err := s.EmitEvent(ctx, core.Event{OrgID: org.ID, Type: "run.failed", Source: "test"}); err != nil {
 				t.Fatal(err)
 			}
-			ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Minute), time.Minute, 10)
+			ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Minute), time.Minute, notify.DefaultHold, 10)
 			if err != nil || len(ds) != 1 {
 				t.Fatalf("ClaimDueDeliveries = %v, %v", ds, err)
 			}

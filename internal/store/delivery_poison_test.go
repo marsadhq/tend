@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
@@ -101,6 +102,193 @@ func TestRejectedHeadDoesNotBlockItsChannel(t *testing.T) {
 		}
 		if pending != 0 {
 			t.Fatalf("%d of the channel's deliveries still pending, want none", pending)
+		}
+	})
+}
+
+// TestHeldChannelIsReleasedAfterTheHold is the bounded hold at claim level: a
+// failing head holds back the deliveries behind it on its channel only until
+// it was first attempted more than hold ago. After that they are claimed
+// while the head keeps retrying, and ordering resumes among them.
+func TestHeldChannelIsReleasedAfterTheHold(t *testing.T) {
+	ctx := context.Background()
+	const hold = 15 * time.Minute
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		seedAlertChannel(t, ctx, s, org.ID, "ward", "run.failed", "heartbeat.missed", "heartbeat.recovered")
+		emit := func(ev core.Event) {
+			t.Helper()
+			if _, err := s.EmitEvent(ctx, ev); err != nil {
+				t.Fatalf("EmitEvent: %v", err)
+			}
+		}
+		emit(core.Event{OrgID: org.ID, Type: "run.failed", Source: "jobs.runner", Payload: `{"job_id":1}`}) // the head that keeps failing
+		emit(heartbeat.MissedEvent(org.ID, "backup"))
+
+		t0 := time.Now().Add(time.Second)
+		claim := func(at time.Time) []notify.Delivery {
+			t.Helper()
+			ds, err := s.ClaimDueDeliveries(ctx, at, time.Minute, hold, 10)
+			if err != nil {
+				t.Fatalf("ClaimDueDeliveries: %v", err)
+			}
+			return ds
+		}
+		types := func(ds []notify.Delivery) []string {
+			var out []string
+			for _, d := range ds {
+				out = append(out, d.Event.Type)
+			}
+			return out
+		}
+
+		first := claim(t0)
+		if got := types(first); len(got) != 1 || got[0] != "run.failed" {
+			t.Fatalf("first claim = %v, want only the head", got)
+		}
+		head := first[0].ID
+		fail := func(at time.Time) {
+			t.Helper()
+			if err := s.RescheduleDelivery(ctx, head, at.Add(time.Second)); err != nil {
+				t.Fatalf("RescheduleDelivery: %v", err)
+			}
+		}
+		fail(t0)
+
+		// Inside the hold the head retries alone.
+		if got := types(claim(t0.Add(10 * time.Minute))); len(got) != 1 || got[0] != "run.failed" {
+			t.Fatalf("claim inside the hold = %v, want only the head's retry", got)
+		}
+		fail(t0.Add(10 * time.Minute))
+
+		// Past the hold the miss goes out beside the head's next retry.
+		past := t0.Add(hold + time.Minute)
+		got := claim(past)
+		if ts := types(got); len(ts) != 2 || ts[0] != "run.failed" || ts[1] != "heartbeat.missed" {
+			t.Fatalf("claim past the hold = %v, want the head's retry and the heartbeat.missed", ts)
+		}
+		missed := got[1].ID
+
+		// Ordering resumes behind the released delivery: a recovery queued
+		// after the miss waits for it, then goes even though the old head is
+		// still pending.
+		emit(heartbeat.RecoveredEvent(org.ID, "backup"))
+		if ts := types(claim(past)); len(ts) != 0 {
+			t.Fatalf("claim while the miss is in flight = %v, want nothing", ts)
+		}
+		if err := s.MarkDeliveryDelivered(ctx, missed); err != nil {
+			t.Fatal(err)
+		}
+		if ts := types(claim(past)); len(ts) != 1 || ts[0] != "heartbeat.recovered" {
+			t.Fatalf("claim after the miss was delivered = %v, want the heartbeat.recovered", ts)
+		}
+	})
+}
+
+// TestZeroHoldTurnsOrderingOff: with hold 0 every due delivery is claimed.
+func TestZeroHoldTurnsOrderingOff(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatalf("BootstrapDefaultOrg: %v", err)
+		}
+		seedAlertChannel(t, ctx, s, org.ID, "ward", "heartbeat.missed", "heartbeat.recovered")
+		for _, ev := range []core.Event{heartbeat.MissedEvent(org.ID, "b"), heartbeat.RecoveredEvent(org.ID, "b")} {
+			if _, err := s.EmitEvent(ctx, ev); err != nil {
+				t.Fatal(err)
+			}
+		}
+		ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, 0, 10)
+		if err != nil || len(ds) != 2 {
+			t.Fatalf("claim with hold 0 = %d deliveries (err %v), want both", len(ds), err)
+		}
+	})
+}
+
+// TestFailingHeadReleasesItsChannelWithinTheHold is the scenario end to end:
+// a delivery the destination keeps failing (a 500, so it is retried) sits
+// ahead of a heartbeat.missed. The miss must go out once the hold has passed,
+// not after the head's 24-hour give-up, while the head keeps retrying.
+func TestFailingHeadReleasesItsChannelWithinTheHold(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		p := &poisonProvider{poison: "run.failed"}
+		_, w := poisonedChannel(t, ctx, s, p)
+		w.Hold = 300 * time.Millisecond
+
+		if _, err := w.DrainOnce(ctx); err != nil {
+			t.Fatalf("DrainOnce: %v", err)
+		}
+		if got := p.sent(); len(got) != 0 {
+			t.Fatalf("delivered %v inside the hold, want nothing (the miss waits behind the head)", got)
+		}
+
+		time.Sleep(1100 * time.Millisecond) // past the hold and the head's first 1s backoff
+		if _, err := w.DrainOnce(ctx); err != nil {
+			t.Fatalf("DrainOnce: %v", err)
+		}
+		if got := p.sent(); len(got) != 1 || got[0] != "heartbeat.missed" {
+			t.Fatalf("delivered %v after the hold, want the heartbeat.missed", got)
+		}
+		var headState string
+		var attempts int
+		if err := store.RawDB(s).QueryRowContext(ctx,
+			`SELECT d.state, d.attempts FROM deliveries d JOIN events e ON e.id = d.event_id WHERE e.type = 'run.failed'`).Scan(&headState, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if headState != "pending" || attempts != 2 {
+			t.Fatalf("head state=%s attempts=%d, want pending after 2 attempts (it keeps retrying)", headState, attempts)
+		}
+	})
+}
+
+// TestMigrationDatesAttemptedDeliveries: deliveries already attempted when
+// migration 0007 runs count as first attempted at their creation, so they do
+// not hold their channel for ever.
+func TestMigrationDatesAttemptedDeliveries(t *testing.T) {
+	ctx := context.Background()
+
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedAlertChannel(t, ctx, s, org.ID, "ward", "heartbeat.missed")
+		for _, name := range []string{"tried", "untried"} {
+			if _, err := s.EmitEvent(ctx, heartbeat.MissedEvent(org.ID, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db := store.RawDB(s)
+		// As an older version left them: the first attempted, the second not.
+		if _, err := db.ExecContext(ctx, `UPDATE deliveries SET attempts = 1 WHERE id = (SELECT MIN(id) FROM deliveries)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `ALTER TABLE deliveries DROP COLUMN first_attempt_at`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 7`); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Migrate(ctx); err != nil {
+			t.Fatalf("Migrate: %v", err)
+		}
+		var dated, undated int
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE first_attempt_at = created_at`).Scan(&dated); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries WHERE first_attempt_at IS NULL`).Scan(&undated); err != nil {
+			t.Fatal(err)
+		}
+		if dated != 1 || undated != 1 {
+			t.Fatalf("dated=%d undated=%d, want the attempted delivery dated from its creation and the other left unattempted", dated, undated)
 		}
 	})
 }

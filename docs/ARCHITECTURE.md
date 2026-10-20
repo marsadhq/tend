@@ -297,14 +297,16 @@ HTTP 4xx other than 408 and 429, an SMTP 5xx reply) is given up the same way on
 the spot, since retrying cannot change the answer. Delivery is at-least-once: a send that succeeded but could not be
 marked delivered is repeated after the lease.
 
-**Delivery is ordered per channel.** The claim only takes a channel's oldest
-pending delivery; the next one becomes claimable once that one is delivered or
-given up. A delivery that is backing off after a failure therefore holds back
-the ones queued behind it on its channel (and only on its channel), so a
-receiver sees events in the order they happened, `heartbeat.missed` before its
-`heartbeat.recovered`, even after an outage. The cost is head-of-line blocking:
-a delivery the destination keeps rejecting holds its channel until it is
-given up (24 hours).
+**Delivery is ordered per channel, for a bounded time.** A pending delivery
+holds back the ones queued after it on its channel (and only on its channel)
+until it is delivered or given up, so a receiver sees events in the order they
+happened, `heartbeat.missed` before its `heartbeat.recovered`, even after a
+short outage. The hold is bounded so that one delivery cannot silence the
+channel: once the holding delivery was first attempted (`first_attempt_at`)
+more than `Worker.Hold` ago (15 minutes, `TEND_DELIVERY_HOLD_MINUTES`), the
+claim takes the deliveries behind it while it keeps retrying until its own
+give-up, and ordering resumes among those. A destination's permanent refusal
+is given up at once and holds nothing. A hold of 0 turns ordering off.
 
 **The runner's `EventSink`** (`Runner.EventSink func(context.Context,
 core.Event)`) is the seam through which the runner signals that a terminal event

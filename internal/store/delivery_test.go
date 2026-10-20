@@ -47,7 +47,7 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 			t.Fatalf("EmitEvent: %v", err)
 		}
 
-		due, err := s.ClaimDueDeliveries(ctx, time.Now(), time.Minute, 10)
+		due, err := s.ClaimDueDeliveries(ctx, time.Now(), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -66,7 +66,7 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 		}
 
 		// The claim leased the row into the future: nothing is due now.
-		again, err := s.ClaimDueDeliveries(ctx, time.Now(), time.Minute, 10)
+		again, err := s.ClaimDueDeliveries(ctx, time.Now(), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries again: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 		}
 
 		// ...but it becomes due again once the lease expires (crash recovery).
-		after, err := s.ClaimDueDeliveries(ctx, time.Now().Add(2*time.Minute), time.Minute, 10)
+		after, err := s.ClaimDueDeliveries(ctx, time.Now().Add(2*time.Minute), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries after lease: %v", err)
 		}
@@ -92,7 +92,7 @@ func TestEmitEventEnqueuesDeliveries(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("EmitEvent run.succeeded: %v", err)
 		}
-		none, err := s.ClaimDueDeliveries(ctx, time.Now().Add(10*time.Minute), time.Minute, 10)
+		none, err := s.ClaimDueDeliveries(ctx, time.Now().Add(10*time.Minute), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}
@@ -129,7 +129,7 @@ func TestDeliveryFinalization(t *testing.T) {
 		}
 		claimOne := func(at time.Time) notify.Delivery {
 			t.Helper()
-			ds, err := s.ClaimDueDeliveries(ctx, at, time.Minute, 10)
+			ds, err := s.ClaimDueDeliveries(ctx, at, time.Minute, notify.DefaultHold, 10)
 			if err != nil || len(ds) != 1 {
 				t.Fatalf("ClaimDueDeliveries: %v (%d rows)", err, len(ds))
 			}
@@ -161,10 +161,10 @@ func TestDeliveryFinalization(t *testing.T) {
 			t.Fatalf("RescheduleDelivery: %v", err)
 		}
 
-		if ds, err := s.ClaimDueDeliveries(ctx, resumeAt.Add(-time.Second), time.Minute, 10); err != nil || len(ds) != 0 {
+		if ds, err := s.ClaimDueDeliveries(ctx, resumeAt.Add(-time.Second), time.Minute, notify.DefaultHold, 10); err != nil || len(ds) != 0 {
 			t.Fatalf("before resumeAt: %v (%d rows), want 0", err, len(ds))
 		}
-		ds, err := s.ClaimDueDeliveries(ctx, resumeAt.Add(time.Second), time.Minute, 10)
+		ds, err := s.ClaimDueDeliveries(ctx, resumeAt.Add(time.Second), time.Minute, notify.DefaultHold, 10)
 		if err != nil || len(ds) != 1 || ds[0].ID != d.ID {
 			t.Fatalf("after resumeAt: %v (%d rows), want the rescheduled delivery", err, len(ds))
 		}

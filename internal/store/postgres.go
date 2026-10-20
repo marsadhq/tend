@@ -871,11 +871,11 @@ func (s *PostgresStore) ListHeartbeatEvents(ctx context.Context, orgID int64, na
 // FOR UPDATE SKIP LOCKED keeps concurrent claimers (serve worker + a manual
 // `tend run` drain) from double-claiming a row.
 //
-// Delivery is ordered per channel, as on SQLite: only a channel's oldest
-// pending delivery can be claimed. SKIP LOCKED does not weaken that: a
-// channel's head that another claimer has locked is skipped, but it is still
-// pending, so the NOT EXISTS keeps the deliveries behind it out of reach too.
-func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
+// Delivery is ordered per channel, with the same bounded hold as on SQLite.
+// SKIP LOCKED does not weaken the ordering: a channel's head that another
+// claimer has locked is skipped, but it is still pending, so the NOT EXISTS
+// keeps the deliveries behind it out of reach too.
+func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]notify.Delivery, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
@@ -885,19 +885,27 @@ func (s *PostgresStore) ClaimDueDeliveries(ctx context.Context, now time.Time, l
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// held: see the SQLite twin.
+	held := `AND NOT EXISTS (
+		       SELECT 1 FROM deliveries o
+		       WHERE o.channel_id = d.channel_id AND o.state = $2 AND o.id < d.id
+		         AND (o.first_attempt_at IS NULL OR o.first_attempt_at > $5)
+		     )`
+	args := []any{formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit, formatTime(now.Add(-hold))}
+	if hold <= 0 {
+		held = ""
+		args = args[:4]
+	}
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = $1
+		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = $1,
+		        first_attempt_at = COALESCE(first_attempt_at, $3)
 		 WHERE id IN (
 		   SELECT d.id FROM deliveries d
 		   WHERE d.state = $2 AND d.next_attempt_at <= $3
-		     AND NOT EXISTS (
-		       SELECT 1 FROM deliveries o
-		       WHERE o.channel_id = d.channel_id AND o.state = $2 AND o.id < d.id
-		     )
+		     `+held+`
 		   ORDER BY d.id LIMIT $4 FOR UPDATE OF d SKIP LOCKED
 		 )
-		 RETURNING `+deliveryColumns,
-		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), limit)
+		 RETURNING `+deliveryColumns, args...)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}

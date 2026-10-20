@@ -101,7 +101,7 @@ func TestRunnerRecordsRunRecovered(t *testing.T) {
 			t.Errorf("payload = %+v, want run %d of job %d (flaky), succeeded, exit 0", p, recoveredRun, jobID)
 		}
 
-		ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, 10)
+		ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, notify.DefaultHold, 10)
 		if err != nil {
 			t.Fatalf("ClaimDueDeliveries: %v", err)
 		}

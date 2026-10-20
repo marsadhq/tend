@@ -1215,13 +1215,15 @@ func scanDelivery(sc interface{ Scan(...any) error }) (notify.Delivery, error) {
 // crashed worker's claims become due again after the lease (at-least-once).
 // Each claimed delivery is returned with its originating event joined in.
 //
-// Delivery is ordered per channel: only the oldest pending delivery of each
-// channel can be claimed, and the next one waits until it is delivered or
-// given up. A delivery that failed and is backing off therefore holds back the
-// ones queued behind it on its channel, so after an outage a channel receives
-// heartbeat.missed before the heartbeat.recovered that followed it. Other
-// channels are not held up.
-func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]notify.Delivery, error) {
+// Delivery is ordered per channel: a pending delivery holds back the ones
+// queued after it on its channel until it is delivered or given up, so after
+// an outage a channel receives heartbeat.missed before the heartbeat.recovered
+// that followed it. Other channels are not held up. The hold is bounded: once
+// the held delivery was first attempted more than hold ago, the ones behind it
+// may be claimed while it keeps retrying until its own give-up, so one
+// delivery the destination keeps failing cannot silence the channel. hold <= 0
+// turns ordering off.
+func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]notify.Delivery, error) {
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
@@ -1231,19 +1233,29 @@ func (s *SQLiteStore) ClaimDueDeliveries(ctx context.Context, now time.Time, lea
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// held: an older pending delivery on the same channel that has not been
+	// attempted yet, or was first attempted within the hold.
+	held := `AND NOT EXISTS (
+		       SELECT 1 FROM deliveries o
+		       WHERE o.channel_id = d.channel_id AND o.state = ? AND o.id < d.id
+		         AND (o.first_attempt_at IS NULL OR o.first_attempt_at > ?)
+		     )`
+	args := []any{formatTime(now.Add(lease)), formatTime(now), notify.DeliveryPending, formatTime(now),
+		notify.DeliveryPending, formatTime(now.Add(-hold)), limit}
+	if hold <= 0 {
+		held = ""
+		args = []any{formatTime(now.Add(lease)), formatTime(now), notify.DeliveryPending, formatTime(now), limit}
+	}
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ?
+		`UPDATE deliveries SET attempts = attempts + 1, next_attempt_at = ?,
+		        first_attempt_at = COALESCE(first_attempt_at, ?)
 		 WHERE id IN (
 		   SELECT d.id FROM deliveries d
 		   WHERE d.state = ? AND d.next_attempt_at <= ?
-		     AND NOT EXISTS (
-		       SELECT 1 FROM deliveries o
-		       WHERE o.channel_id = d.channel_id AND o.state = ? AND o.id < d.id
-		     )
+		     `+held+`
 		   ORDER BY d.id LIMIT ?
 		 )
-		 RETURNING `+deliveryColumns,
-		formatTime(now.Add(lease)), notify.DeliveryPending, formatTime(now), notify.DeliveryPending, limit)
+		 RETURNING `+deliveryColumns, args...)
 	if err != nil {
 		return nil, fmt.Errorf("claim deliveries: %w", err)
 	}
