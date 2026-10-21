@@ -170,3 +170,14 @@ func TestHeadOfKeepsASecretEndingInPartOfACharacter(t *testing.T) {
 		t.Errorf("redacted %q", got)
 	}
 }
+
+// A capture that lost nothing can still be cut: redacting a secret shorter
+// than "***" makes the text longer, and then it is held to its size. That cut
+// is marked like any other.
+func TestCutRedactedMarksACutAfterRedacting(t *testing.T) {
+	b := []byte(strings.Repeat("ab", maxExpiryStderr/2)) // 16384 bytes, nothing lost
+	got := cutRedacted(b, false, maxExpiryStderr, []string{"ab"}, "\n... [stderr truncated]")
+	if !strings.HasSuffix(got, "\n... [stderr truncated]") || len(got) != maxExpiryStderr+len("\n... [stderr truncated]") {
+		t.Errorf("got %d bytes ending %q, want %d bytes and the marker", len(got), got[max(0, len(got)-30):], maxExpiryStderr)
+	}
+}
