@@ -116,6 +116,10 @@ type Executor struct {
 	// that names each TLD's RDAP server; empty means IANA's
 	// (IANABootstrapURL). Tests point it at a local server.
 	RDAPBootstrapURL string
+
+	// RDAPTransport, if non-nil, carries the domain probes' requests in place
+	// of Go's default transport. Tests set it to trust their TLS servers.
+	RDAPTransport http.RoundTripper
 }
 
 // NewExecutor returns a ready-to-use Executor with default backoff.

@@ -598,7 +598,10 @@ These limits are constants in the code, not configuration.
   sends data before the handshake. A `domain` probe reads at most 1 MiB of
   RDAP answer and 4 MiB of IANA bootstrap file, which is cached in memory for
   a day per process (`rdapBootstraps`) and used past that when IANA cannot be
-  reached. A drill keeps the first and last 32 KiB of each step's output
+  reached. It takes only the https servers of the bootstrap file (a plain-http
+  one only as an explicit `rdap_url`), and its client (`rdapClient`) refuses a
+  redirect to another host or from https to http, so no one but the registry
+  that was asked can answer for it. A drill keeps the first and last 32 KiB of each step's output
   (`headTail`); its cleanup runs however the restore ended, detached from the
   attempt's context and bounded by `drillCleanupTimeout` (one minute), and its
   scratch directory is removed after it, made writable first when a restore

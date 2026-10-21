@@ -34,13 +34,19 @@ type fakeRDAP struct {
 	code    int            // when non-zero, every answer is this status
 	hits    atomic.Int64
 	delay   time.Duration
+	// redirects maps a request path to the URL it is redirected to.
+	redirects map[string]string
 }
 
 func newFakeRDAP(t *testing.T) *fakeRDAP {
 	t.Helper()
-	f := &fakeRDAP{answers: map[string]any{}}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := &fakeRDAP{answers: map[string]any{}, redirects: map[string]string{}}
+	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
+		if to, ok := f.redirects[r.URL.Path]; ok {
+			http.Redirect(w, r, to, http.StatusFound)
+			return
+		}
 		if f.delay > 0 {
 			select {
 			case <-time.After(f.delay):
@@ -106,14 +112,14 @@ func newFakeBootstrap(t *testing.T, base string, tlds ...string) *fakeBootstrap 
 	return f
 }
 
-// domainSetup is a fake registry for .test and .example and an executor that
-// finds it through a fake bootstrap file. (The fake serves plain http, which
-// the probe uses when a TLD's entry lists no https:// URL.)
+// domainSetup is a fake registry for .test and .example, served over https,
+// and an executor that finds it through a fake bootstrap file and trusts its
+// test certificate (every httptest TLS server has the same one).
 func domainSetup(t *testing.T) (*fakeRDAP, *fakeBootstrap, *Executor) {
 	t.Helper()
 	rdap := newFakeRDAP(t)
 	boot := newFakeBootstrap(t, rdap.base(), "test", "example")
-	ex := &Executor{RDAPBootstrapURL: boot.srv.URL + "/dns.json"}
+	ex := &Executor{RDAPBootstrapURL: boot.srv.URL + "/dns.json", RDAPTransport: rdap.srv.Client().Transport}
 	return rdap, boot, ex
 }
 
@@ -142,6 +148,71 @@ func TestRDAPBootstrapLookup(t *testing.T) {
 	}
 	if got, ok := b.lookup("example.de"); ok {
 		t.Errorf("lookup(example.de) = %q, want no server", got)
+	}
+	// A TLD whose entry lists plain-http servers only has no server the
+	// probe will use on its own.
+	plain := rdapBootstrap{services: []rdapService{{tlds: []string{"xx"}, urls: []string{"http://rdap.xx.invalid/"}}}}
+	if got, ok := plain.lookup("example.xx"); ok {
+		t.Errorf("lookup(example.xx) = %q, want no server (plain http only)", got)
+	}
+	if !plain.listsPlainHTTP("example.xx") {
+		t.Error("listsPlainHTTP(example.xx) = false")
+	}
+}
+
+func TestRDAPPlainHTTPOnlyWhenAskedFor(t *testing.T) {
+	// A bootstrap entry with plain http only is refused, with the way out.
+	plain := newFakeBootstrap(t, "http://127.0.0.1:1/rdap/", "test")
+	ex := &Executor{RDAPBootstrapURL: plain.srv.URL + "/dns.json"}
+	res := ex.Run(context.Background(), domainJob("example.test", 30), nil)
+	if res.Status != StatusFailed || res.ExitCode != -1 || !strings.Contains(res.Output, "plain http") || !strings.Contains(res.Output, "rdap_url") {
+		t.Fatalf("status %s exit %d, output:\n%s", res.Status, res.ExitCode, res.Output)
+	}
+
+	// An rdap_url the user gave with http:// is used as given.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rdapAnswer("example.test", map[string]string{"expiration": time.Now().Add(100 * day).UTC().Format(time.RFC3339)}))
+	}))
+	t.Cleanup(srv.Close)
+	j := domainJob("example.test", 30)
+	j.Spec.RDAPURL = srv.URL + "/"
+	if res := NewExecutor().Run(context.Background(), j, nil); res.Status != StatusSucceeded {
+		t.Fatalf("explicit http rdap_url: status %s, output:\n%s", res.Status, res.Output)
+	}
+}
+
+func TestRDAPRedirects(t *testing.T) {
+	exp := time.Now().Add(100 * day).UTC().Format(time.RFC3339)
+
+	// Within the same host: followed.
+	rdap, _, ex := domainSetup(t)
+	rdap.answers["example.test"] = rdapAnswer("example.test", map[string]string{"expiration": exp})
+	rdap.redirects["/rdap/domain/old.test"] = "/rdap/domain/example.test"
+	if res := ex.Run(context.Background(), domainJob("old.test", 30), nil); res.Status != StatusSucceeded {
+		t.Fatalf("same-host redirect: status %s, output:\n%s", res.Status, res.Output)
+	}
+
+	// To another host: refused, and the other host is never asked.
+	other := newFakeRDAP(t)
+	other.answers["example.test"] = rdapAnswer("example.test", map[string]string{"expiration": exp})
+	rdap.redirects["/rdap/domain/elsewhere.test"] = other.base() + "domain/example.test"
+	res := ex.Run(context.Background(), domainJob("elsewhere.test", 30), nil)
+	if res.Status != StatusFailed || res.ExitCode != -1 || !strings.Contains(res.Output, "another host") {
+		t.Fatalf("cross-host redirect: status %s exit %d, output:\n%s", res.Status, res.ExitCode, res.Output)
+	}
+	if n := other.hits.Load(); n != 0 {
+		t.Fatalf("the other host was asked %d times", n)
+	}
+
+	// From https to http: refused.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rdapAnswer("example.test", map[string]string{"expiration": exp}))
+	}))
+	t.Cleanup(plain.Close)
+	rdap.redirects["/rdap/domain/downgrade.test"] = plain.URL + "/rdap/domain/example.test"
+	res = ex.Run(context.Background(), domainJob("downgrade.test", 30), nil)
+	if res.Status != StatusFailed || !strings.Contains(res.Output, "from https to http") {
+		t.Fatalf("downgrade: status %s, output:\n%s", res.Status, res.Output)
 	}
 }
 
