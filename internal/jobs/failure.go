@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/marsadhq/tend/internal/core"
@@ -16,6 +17,10 @@ type FailureDetail struct {
 	// lines, at most core.OutputTailBytes, of which an alert shows as many
 	// lines as it is set to.
 	Output string `json:"output,omitempty"`
+	// Truncated is set when the run's output was cut at 1 MiB: Output is
+	// then the tail of what came before the cut, not the end of what the run
+	// printed, and the line the cut fell in is left out of it.
+	Truncated bool `json:"truncated,omitempty"`
 	// TimeoutSeconds is the per-attempt timeout a timed-out run reached.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
@@ -23,7 +28,13 @@ type FailureDetail struct {
 // failureDetail is the Detail of the run.failed of a run of job that ended in
 // status with the stored output out, or "" when there is nothing to say.
 func failureDetail(job Job, status RunStatus, out string) string {
-	d := FailureDetail{Output: core.TailLines(out, core.MaxOutputTailLines)}
+	var d FailureDetail
+	if body, cut := strings.CutSuffix(out, truncationMarker); cut {
+		// The cut can fall inside anything, part of a secret printed in a
+		// form redaction does not recognise included: its line stays out.
+		out, d.Truncated = dropLastLine(body), true
+	}
+	d.Output = core.TailLines(out, core.MaxOutputTailLines)
 	if status == StatusTimedOut {
 		timeout := seconds(job.TimeoutSeconds)
 		if timeout <= 0 {
@@ -39,4 +50,13 @@ func failureDetail(job Job, status RunStatus, out string) string {
 		return "" // cannot happen for this struct; the alert then says less
 	}
 	return string(b)
+}
+
+// dropLastLine returns s without its last line ("" for a single line).
+func dropLastLine(s string) string {
+	i := strings.LastIndexByte(s, '\n')
+	if i < 0 {
+		return ""
+	}
+	return s[:i]
 }
