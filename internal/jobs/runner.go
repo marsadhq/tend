@@ -770,11 +770,12 @@ func (r *Runner) resolveEnv(ctx context.Context, job Job) (map[string]string, []
 // The cap is applied last. Cleaning can grow the text (one invalid byte
 // becomes the three bytes of U+FFFD) and so can redaction (a secret shorter
 // than "***"), and this cut, being made after redaction, cannot leave the
-// first half of a secret behind. The executor's cap on what it captures is a
-// different matter: it falls on the raw bytes, before any of this, so the
-// first part of a secret that straddles the end of a capture cut at
-// maxOutputBytes is captured without the rest, matches nothing and is stored.
-// That is a known limitation.
+// first half of a secret behind. The executor's capture of a shell job keeps
+// a secret's length past maxOutputBytes and extends its own cut to the end of
+// a secret printed across it (shellOutput), so such a secret reaches this
+// function whole. One printed with NUL bytes between its characters across
+// that point is not recognised there and can still be stored in part; the
+// alert of a failed run leaves the cut line out of its tail (failureDetail).
 func storedOutput(raw string, secretValues []string) string {
 	var bytewise, cleaned []string
 	for _, v := range secretValues {

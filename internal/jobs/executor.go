@@ -207,10 +207,10 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 }
 
 // run is Run with the plaintext values of the secrets in env. The runner
-// passes them so that an expiry command's and a drill's output, which are cut
-// to a size before they are stored, are redacted before the cut: a secret
-// that straddled a cut would otherwise be kept in part, which no longer
-// matches the secret when the runner redacts the stored output.
+// passes them so that a shell job's, an expiry command's and a drill's output,
+// which are cut to a size before they are stored, are redacted before the cut:
+// a secret that straddled a cut would otherwise be kept in part, which no
+// longer matches the secret when the runner redacts the stored output.
 func (e *Executor) run(ctx context.Context, j Job, env map[string]string, secrets []string) RunResult {
 	maxAttempts := j.MaxRetries + 1
 	if maxAttempts < 1 {
@@ -278,28 +278,62 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, se
 	case Drill:
 		return e.runOnceDrill(cctx, j, env, secrets, attempt, started)
 	default: // Shell or empty/default
-		return e.runOnceShell(cctx, j, env, attempt, started)
+		return e.runOnceShell(cctx, j, env, secrets, attempt, started)
 	}
 }
 
-// runOnceShell runs the shell branch of runOnce.
-func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]string, attempt int, started time.Time) RunResult {
+// runOnceShell runs the shell branch of runOnce. The capture keeps the
+// longest secret's length past maxOutputBytes, so that a secret the cap
+// falls inside is captured whole (shellOutput).
+func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]string, secrets []string, attempt int, started time.Time) RunResult {
 	cmd := shellCommand(cctx, j.Command, env)
 
-	buf := &cappedBuffer{max: maxOutputBytes}
+	buf := &cappedBuffer{max: maxOutputBytes + secretMargin(secrets)}
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 
 	err := cmd.Run()
 
 	res := RunResult{
-		Output:  buf.String(),
+		Output:  shellOutput(buf, secrets),
 		Attempt: attempt,
 		Started: started,
 		Ended:   time.Now(),
 	}
 	res.Status, res.ExitCode = shellOutcome(cctx, err)
 	return res
+}
+
+// shellOutput is what a shell job's capture c hands the runner, which redacts
+// the job's secrets and then cuts the text to maxOutputBytes (storedOutput).
+// When the job printed no more than c keeps, that is all of it: every secret
+// in it is whole. When it printed more, it is the first maxOutputBytes,
+// extended to the end of any secret that straddles that point (the bytes c
+// keeps past it are there for that), followed by the truncation marker. A
+// secret the capture itself cut starts after that point, and is left out
+// with the rest: once the secrets before it are redacted the text is shorter,
+// and would otherwise have room under the cap for the part that was caught.
+func shellOutput(c *cappedBuffer, secrets []string) string {
+	b := c.buf.Bytes()
+	if !c.truncated {
+		return string(b)
+	}
+	end := min(maxOutputBytes, len(b))
+	for _, v := range secrets {
+		if len(v) < 2 {
+			continue // one byte cannot straddle a point
+		}
+		lo, hi := max(0, maxOutputBytes-len(v)+1), min(len(b), maxOutputBytes+len(v)-1)
+		for i := lo; i < hi; {
+			at := bytes.Index(b[i:hi], []byte(v))
+			if at < 0 || i+at >= maxOutputBytes {
+				break
+			}
+			end = max(end, i+at+len(v))
+			i += at + 1
+		}
+	}
+	return string(trimPartialRune(b[:end])) + truncationMarker
 }
 
 // shellCommand builds the command every shell-backed step runs: a shell job's
