@@ -130,3 +130,21 @@ func TestPhoneTabBarLeavesRoomForFocus(t *testing.T) {
 		t.Errorf("app.css uses env(safe-area-inset-*), which is 0 without viewport-fit=cover in the viewport meta")
 	}
 }
+
+// On a phone the table header row is hidden from sight but not from screen
+// readers (no display: none), which announce each cell with its column's
+// header; the column names shown in front of the cells have empty alt text,
+// so a screen reader does not read them a second time.
+func TestPhoneCardsKeepHeadersForScreenReaders(t *testing.T) {
+	raw, err := os.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	phone := mediaBlock(t, string(raw), "(max-width: 640px)")
+	if regexp.MustCompile(`thead \{[^}]*display: none`).MatchString(phone) {
+		t.Errorf("the phone block hides the table headers with display: none, which hides them from screen readers too")
+	}
+	if !strings.Contains(phone, `content: attr(data-label) / "";`) {
+		t.Errorf(`the cards' column names should be generated with empty alt text (content: attr(data-label) / "";)`)
+	}
+}

@@ -14,22 +14,22 @@
      markup. */}}
 {{if .Events}}
 <div class="table-scroll">
-<table class="grid-table event-table">
-  <thead>
-    <tr>
-      <th>Type</th>
-      <th>Source</th>
-      <th>Detail</th>
-      <th class="col-status">When</th>
+<table role="table" class="grid-table event-table">
+  <thead role="rowgroup">
+    <tr role="row">
+      <th role="columnheader">Type</th>
+      <th role="columnheader">Source</th>
+      <th role="columnheader">Detail</th>
+      <th role="columnheader" class="col-status">When</th>
     </tr>
   </thead>
-  <tbody>
+  <tbody role="rowgroup">
     {{range .Events}}
-    <tr class="{{if .IsAlert}}is-alert{{end}}">
-      <td><span class="pill {{.Class}}">{{.Type}}</span></td>
-      <td class="cell-mono cell-muted">{{.Source}}</td>
-      <td class="cell-mono cell-payload">{{.Payload}}</td>
-      <td class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
+    <tr role="row" class="{{if .IsAlert}}is-alert{{end}}">
+      <td role="cell"><span class="pill {{.Class}}">{{.Type}}</span></td>
+      <td role="cell" class="cell-mono cell-muted">{{.Source}}</td>
+      <td role="cell" class="cell-mono cell-payload">{{.Payload}}</td>
+      <td role="cell" class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
     </tr>
     {{end}}
   </tbody>

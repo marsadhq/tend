@@ -526,11 +526,21 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
 
   /* Tables become a list of cards: a row wraps its cells onto as many lines
      as it needs, and a cell with a data-label shows its column's name in
-     front of it, in place of the header row. */
+     front of it, in place of the header row. The header row is hidden from
+     sight only: with the roles the templates give every table element, a
+     screen reader still reads the cards as a table, each cell with its
+     column, so the shown names have empty alt text and are not read twice. */
   .grid-table,
   .grid-table tbody,
   .grid-table td { display: block; }
-  .grid-table thead { display: none; }
+  .grid-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .grid-table tbody tr {
     display: flex;
     flex-wrap: wrap;
@@ -543,6 +553,7 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .grid-table tbody td { padding: 0; margin: 4px 0; border-bottom: none; min-width: 0; }
   .grid-table td[data-label]::before {
     content: attr(data-label);
+    content: attr(data-label) / "";
     margin-right: 7px;
     font-family: var(--mono);
     font-size: 10px;

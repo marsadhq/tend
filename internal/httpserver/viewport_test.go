@@ -92,3 +92,47 @@ func TestEveryPageSetsTheViewport(t *testing.T) {
 	}
 	checkViewport(t, "login", rec.Body.String())
 }
+
+// TestDashboardTablesKeepTheirRoles: on a phone the tables are shown as cards
+// (display: block and flex), which makes some browsers drop their table
+// semantics, so every table, row group, row, header and cell carries its
+// role explicitly and screen readers keep the structure. The row fragment the
+// htmx actions return is checked too.
+func TestDashboardTablesKeepTheirRoles(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	jobID := seedJob(t, ts, ts.orgID, "roles-job")
+	seedRun(t, ts, ts.orgID, jobID, "failed", "boom")
+	hb := seedPings(t, ts, "roles-hb", "tok-roles")
+	codec := testCodec()
+	h := newAuthServer(t, ts.store, &httpserver.AuthConfig{Codec: codec}).Handler()
+	cookie, csrf := validSessionCookie(t, as, codec)
+
+	id := func(n int64) string { return strconv.FormatInt(n, 10) }
+	bodies := map[string]string{}
+	for _, path := range []string{"/", "/partials/jobs", "/jobs/" + id(jobID), "/heartbeats", "/heartbeats/" + id(hb.ID), "/events"} {
+		bodies[path] = dashGet(t, h, cookie, path).Body.String()
+	}
+	bodies["run-now fragment"] = dashPostCSRF(t, h, cookie, csrf, "/jobs/"+id(jobID)+"/run").Body.String()
+
+	for _, tc := range []struct {
+		tag  *regexp.Regexp
+		role string
+	}{
+		{regexp.MustCompile(`<table[ >]`), `<table role="table"`},
+		{regexp.MustCompile(`<thead[ >]`), `<thead role="rowgroup"`},
+		{regexp.MustCompile(`<tbody[ >]`), `<tbody role="rowgroup"`},
+		{regexp.MustCompile(`<tr[ >]`), `<tr role="row"`},
+		{regexp.MustCompile(`<th[ >]`), `<th role="columnheader"`},
+		{regexp.MustCompile(`<td[ >]`), `<td role="cell"`},
+	} {
+		for page, body := range bodies {
+			if all, with := len(tc.tag.FindAllString(body, -1)), strings.Count(body, tc.role); all != with {
+				t.Errorf("%s: %d of %d %s elements lack %s", page, all-with, all, tc.tag, tc.role)
+			}
+		}
+	}
+	if strings.Count(bodies["/"], `<td role="cell"`) == 0 || strings.Count(bodies["/heartbeats/"+id(hb.ID)], `<th role="columnheader"`) == 0 {
+		t.Fatal("the pages rendered no tables; the check above proved nothing")
+	}
+}
