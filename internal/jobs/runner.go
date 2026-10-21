@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -834,8 +835,19 @@ func capOutput(s string) string {
 // redact replaces every non-empty secret value in s with "***". This is a
 // literal substring replacement; it will NOT catch secret values the job
 // re-encodes (base64, URL-encode, JSON) before printing - accepted v1 limitation.
+//
+// The longest secrets are redacted first (and secrets of one length in
+// order), so that secrets which overlap in the text are redacted the same way
+// whatever order they come in: a job's env is a map.
 func redact(s string, secretValues []string) string {
-	for _, v := range secretValues {
+	vs := slices.Clone(secretValues)
+	slices.SortFunc(vs, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	for _, v := range vs {
 		if v == "" {
 			continue
 		}
