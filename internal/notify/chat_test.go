@@ -321,7 +321,7 @@ func TestChatTextSaysTheHTTPStatus(t *testing.T) {
 
 // plain is the text of m as a channel that shows plain text (Telegram, ntfy,
 // email) gets it: the body, then the output.
-func plain(m kitnotify.Message) string { return forChannel(kitnotify.Telegram, m).Body }
+func plain(m kitnotify.Message) string { return joinParts(m.Body, m.Output) }
 
 // Output is text Tend did not write: a job's output, a ping's logged body.
 // Slack and Discord get it apart from the body, as Message.Output, which kit
@@ -331,43 +331,85 @@ func TestChatTextKeepsOutputApart(t *testing.T) {
 	ev := core.Event{Type: "run.failed",
 		Payload: `{"run_id":17,"job_id":2,"job_name":"nightly","status":"failed","exit_code":3}`,
 		Detail:  `{"output":"<!channel> [re-login](https://evil.example)\nboom"}`}
-	m := messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 10})
+	chat := ChatOptions{BaseURL: "https://tend.example", OutputLines: 10}
 	for _, kind := range []kitnotify.ChannelType{kitnotify.Slack, kitnotify.Discord} {
-		got := forChannel(kind, m)
+		got := channelMessage(kind, ev, "primary", chat)
 		if got.Body != "https://tend.example/runs/17" || got.Output != "Last output:\n<!channel> [re-login](https://evil.example)\nboom" {
 			t.Errorf("%s: body %q output %q", kind, got.Body, got.Output)
 		}
 	}
 	for _, kind := range []kitnotify.ChannelType{kitnotify.Telegram, kitnotify.Ntfy, kitnotify.SMTP, kitnotify.Pushover} {
-		got := forChannel(kind, m)
+		got := channelMessage(kind, ev, "primary", chat)
 		if want := "https://tend.example/runs/17\n\nLast output:\n<!channel> [re-login](https://evil.example)\nboom"; got.Body != want || got.Output != "" {
 			t.Errorf("%s: body %q output %q, want body %q", kind, got.Body, got.Output, want)
 		}
 	}
 }
 
-// Pushover keeps 1024 characters of a message: an alert's output is cut from
-// its start to fit after the rest, so the link and the end of the output,
-// where the error usually is, both arrive.
-func TestChatTextFitsPushover(t *testing.T) {
+// longFailure is a drill's run.failed whose verdict is fails FAIL: lines and
+// whose output tail is 50 long lines, the last one the error.
+func longFailure(fails int) core.Event {
 	var lines []string
 	for i := 1; i <= 50; i++ {
-		lines = append(lines, fmt.Sprintf("uploading chunk %02d of 50 to the offsite bucket", i))
+		lines = append(lines, fmt.Sprintf("checking table %02d of 50: %s", i, strings.Repeat("`row` ", 14)))
 	}
-	lines[49] = "ERROR: chunk 50 failed: RequestTimeout"
-	detail, _ := json.Marshal(map[string]string{"output": core.TailLines(strings.Join(lines, "\n"), 50)})
-	ev := core.Event{Type: "run.failed", Detail: string(detail),
-		Payload: `{"run_id":17,"job_id":2,"job_name":"nightly","status":"failed","exit_code":3}`}
-	m := forChannel(kitnotify.Pushover, messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 50}))
-	if n := utf8.RuneCountInString(m.Body); n > 1024 {
-		t.Errorf("body has %d characters, want at most 1024", n)
+	lines[49] = "ERROR: table 50 is empty"
+	verdict := []string{"FAIL: check 1 failed (exit 1): test -s \"$TEND_SCRATCH/app.db\""}
+	for i := 2; i <= fails; i++ {
+		verdict = append(verdict, fmt.Sprintf("FAIL: check %d failed (exit 1): test \"$(sqlite3 app.db 'SELECT count(*) FROM t%d')\" -gt 0", i, i))
 	}
-	if !strings.HasPrefix(m.Body, "https://tend.example/runs/17\n\n…") || !strings.HasSuffix(m.Body, "ERROR: chunk 50 failed: RequestTimeout") {
-		t.Errorf("body = %q", m.Body)
+	detail, _ := json.Marshal(map[string]string{
+		"verdict": strings.Join(verdict, "\n"),
+		"output":  core.TailLines(strings.Join(lines, "\n"), core.MaxOutputTailLines),
+	})
+	return core.Event{Type: "run.failed", Detail: string(detail),
+		Payload: `{"run_id":17,"job_id":2,"job_name":"app-db-restore-drill","status":"failed","exit_code":1}`}
+}
+
+// Pushover keeps 1024 characters of a message. An alert's output is fitted
+// to what is left after the rest: the verdict whole, then the tail cut from
+// its start, so the link, the reason the run failed and the end of its
+// output, where the error usually is, all arrive.
+func TestChatTextFitsPushover(t *testing.T) {
+	ev := longFailure(3)
+	for _, lines := range []int{10, 50} {
+		m := channelMessage(kitnotify.Pushover, ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: lines})
+		if n := utf8.RuneCountInString(m.Body); n > 1024 {
+			t.Errorf("%d lines: body has %d characters, want at most 1024", lines, n)
+		}
+		if !strings.HasPrefix(m.Body, "https://tend.example/runs/17\n\nFAIL: check 1 failed (exit 1)") ||
+			!strings.Contains(m.Body, "FAIL: check 3 failed") || !strings.HasSuffix(m.Body, "ERROR: table 50 is empty") ||
+			(lines == 50) != strings.Contains(m.Body, "\n\nLast output:\n…") {
+			t.Errorf("%d lines: body = %q", lines, m.Body)
+		}
 	}
 	// A short alert is left as it is.
-	short := forChannel(kitnotify.Pushover, messageFor(ev, "primary", ChatOptions{OutputLines: 2}))
-	if short.Body != "Last output:\nuploading chunk 49 of 50 to the offsite bucket\nERROR: chunk 50 failed: RequestTimeout" {
+	short := channelMessage(kitnotify.Pushover, longFailure(1), "primary", ChatOptions{OutputLines: 2})
+	if short.Body != "FAIL: check 1 failed (exit 1): test -s \"$TEND_SCRATCH/app.db\"\n\nLast output:\nERROR: table 50 is empty" {
 		t.Errorf("short body = %q", short.Body)
+	}
+}
+
+// Discord takes 2000 UTF-16 units of content, and kit sends each backtick of
+// the output with a zero-width space: the output is fitted to the room kit
+// reports, the verdict kept whole and the tail cut from its start.
+func TestChatTextFitsDiscord(t *testing.T) {
+	ev := longFailure(12)
+	m := channelMessage(kitnotify.Discord, ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 50})
+	if n, room := kitnotify.DiscordOutputLength(m.Output), kitnotify.DiscordOutputRoom(m); n > room {
+		t.Errorf("output takes %d of Discord's limit, the room is %d", n, room)
+	}
+	if !strings.HasPrefix(m.Output, "FAIL: check 1 failed (exit 1)") || !strings.Contains(m.Output, "\n\nLast output:\n…") ||
+		!strings.HasSuffix(m.Output, "ERROR: table 50 is empty") {
+		t.Errorf("output = %q", m.Output)
+	}
+}
+
+// A verdict too long for the room on its own is cut at its end.
+func TestChatTextCutsAnOverlongVerdict(t *testing.T) {
+	out := alertOutput{verdict: strings.Repeat("FAIL: x\n", 40), tail: "boom"}
+	got := out.fit(50, 30, utf8.RuneCountInString)
+	if utf8.RuneCountInString(got) > 30 || !strings.HasPrefix(got, "FAIL: x\nFAIL: x") || !strings.HasSuffix(got, "…") {
+		t.Errorf("fit = %q", got)
 	}
 }

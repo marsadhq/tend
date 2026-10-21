@@ -39,10 +39,9 @@ type ChatOptions struct {
 // elsewhere, so a channel that cuts long messages cuts the output, not the
 // link. Events that already read well keep render's text. The webhook posts
 // render's text, byte for byte, whatever this says.
-func chatText(ev core.Event, chat ChatOptions) (subject, body, output string) {
+func chatText(ev core.Event, chat ChatOptions) (subject, body string, out alertOutput) {
 	subject, body = render(ev)
 	var lead, page string
-	var out alertOutput
 	switch ev.Type {
 	case "run.failed":
 		subject, lead, out = chatRunFailed(ev)
@@ -57,9 +56,9 @@ func chatText(ev core.Event, chat ChatOptions) (subject, body, output string) {
 			page = fmt.Sprintf("/heartbeats/%d", id)
 		}
 	default:
-		return subject, body, ""
+		return subject, body, alertOutput{}
 	}
-	return subject, joinParts(lead, link(chat.BaseURL, page)), out.text(chat.OutputLines)
+	return subject, joinParts(lead, link(chat.BaseURL, page)), out
 }
 
 // joinParts joins the parts that are not empty with a blank line.
@@ -77,35 +76,33 @@ func joinParts(parts ...string) string {
 // cuts the rest off its end.
 const pushoverMaxMessage = 1024
 
-// forChannel is m as a channel of kind gets it. Slack and Discord show
-// m.Output themselves, apart from the text Tend wrote: in a code block, where
-// it can neither mention anyone nor make a link with a label of its own (kit).
-// The other channels show plain text, so the output follows the body after a
-// blank line; for Pushover it is cut from its start to fit what Pushover
-// keeps, so that the link before it and the end of the output, where the
-// error usually is, both arrive.
-func forChannel(kind kitnotify.ChannelType, m kitnotify.Message) kitnotify.Message {
+// channelMessage is the message for ev as a channel of kind gets it. Slack
+// and Discord show m.Output themselves, apart from the text Tend wrote: in a
+// code block, where it can neither mention anyone nor make a link with a
+// label of its own (kit). The other channels show plain text, so the output
+// follows the body after a blank line. Where a channel keeps only so much
+// (Discord's 2000 units, Pushover's 1024 characters) the output is fitted to
+// the room the rest leaves (alertOutput.fit): a probe's or drill's verdict
+// whole, and the tail cut from its start, so the link, the reason the run
+// failed and the end of its output all arrive.
+func channelMessage(kind kitnotify.ChannelType, ev core.Event, instance string, chat ChatOptions) kitnotify.Message {
+	m, out := compose(ev, instance, chat)
+	lines := chat.OutputLines
 	switch kind {
-	case kitnotify.Slack, kitnotify.Discord, kitnotify.Webhook:
-		return m
+	case kitnotify.Slack, kitnotify.Webhook:
+		m.Output = out.text(lines)
+	case kitnotify.Discord:
+		m.Output = out.fit(lines, kitnotify.DiscordOutputRoom(m), kitnotify.DiscordOutputLength)
 	case kitnotify.Pushover:
-		m.Output = fitEnd(m.Output, pushoverMaxMessage-utf8.RuneCountInString(m.Body)-2)
+		room := pushoverMaxMessage - utf8.RuneCountInString(m.Body)
+		if m.Body != "" {
+			room -= 2 // the blank line between them
+		}
+		m.Body = joinParts(m.Body, out.fit(lines, room, utf8.RuneCountInString))
+	default:
+		m.Body = joinParts(m.Body, out.text(lines))
 	}
-	m.Body, m.Output = joinParts(m.Body, m.Output), ""
 	return m
-}
-
-// fitEnd is s within room characters: as it is when it fits, otherwise its
-// end after "…", or nothing when there is no room for that.
-func fitEnd(s string, room int) string {
-	if utf8.RuneCountInString(s) <= room {
-		return s
-	}
-	if room < 2 {
-		return ""
-	}
-	r := []rune(s)
-	return "…" + string(r[len(r)-(room-1):])
 }
 
 // link is the URL of the dashboard page at path under base, or "" without
@@ -157,6 +154,62 @@ func (o alertOutput) text(lines int) string {
 		parts = append(parts, label+"\n"+tail)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// fit is text held to budget, as length measures it: when the whole does not
+// fit, the verdict is kept and the tail is cut from its start (after "…") to
+// fill what is left; a verdict that alone does not fit is cut at its end.
+func (o alertOutput) fit(lines, budget int, length func(string) int) string {
+	full := o.text(lines)
+	if length(full) <= budget {
+		return full
+	}
+	verdict := core.HeadLines(o.verdict, lines)
+	if verdict != "" && length(verdict) >= budget {
+		return cutEnd(verdict, budget, length)
+	}
+	label := "Last output:"
+	if o.truncated {
+		label = "Last output before the 1 MiB cut:"
+	}
+	head := label + "\n…"
+	if verdict != "" {
+		head = verdict + "\n\n" + head
+		lines -= strings.Count(verdict, "\n") + 1
+	}
+	room := budget - length(head)
+	tail := core.TailLines(o.tail, lines)
+	if room <= 0 || tail == "" {
+		return verdict
+	}
+	return head + cutStart(tail, room, length)
+}
+
+// cutStart is the longest end of s, whole characters, that length counts at
+// most room.
+func cutStart(s string, room int, length func(string) int) string {
+	used, start := 0, len(s)
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:start])
+		if used += length(string(r)); used > room {
+			break
+		}
+		start -= size
+	}
+	return s[start:]
+}
+
+// cutEnd is the longest start of s, whole characters, that fits budget
+// together with the "…" it ends with.
+func cutEnd(s string, budget int, length func(string) int) string {
+	room := budget - length("…")
+	used := 0
+	for i, r := range s {
+		if used += length(string(r)); used > room {
+			return s[:i] + "…"
+		}
+	}
+	return s
 }
 
 // runFailure is the part of a run.failed's detail an alert uses (the
