@@ -177,7 +177,7 @@ func TestHeldChannelIsReleasedAfterTheHold(t *testing.T) {
 		// Ordering resumes behind the released delivery: a recovery queued
 		// after the miss waits for it, then goes even though the old head is
 		// still pending.
-		emit(heartbeat.RecoveredEvent(org.ID, "backup"))
+		emit(heartbeat.RecoveredEvent(org.ID, 0, "backup"))
 		if ts := types(claim(past)); len(ts) != 0 {
 			t.Fatalf("claim while the miss is in flight = %v, want nothing", ts)
 		}
@@ -200,7 +200,7 @@ func TestZeroHoldTurnsOrderingOff(t *testing.T) {
 			t.Fatalf("BootstrapDefaultOrg: %v", err)
 		}
 		seedAlertChannel(t, ctx, s, org.ID, "ward", "heartbeat.missed", "heartbeat.recovered")
-		for _, ev := range []core.Event{heartbeat.MissedEvent(org.ID, "b"), heartbeat.RecoveredEvent(org.ID, "b")} {
+		for _, ev := range []core.Event{heartbeat.MissedEvent(org.ID, "b"), heartbeat.RecoveredEvent(org.ID, 0, "b")} {
 			if _, err := s.EmitEvent(ctx, ev); err != nil {
 				t.Fatal(err)
 			}

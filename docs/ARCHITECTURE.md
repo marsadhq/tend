@@ -289,7 +289,9 @@ Event types currently emitted:
   id (`heartbeat.OverdueEvent` for a heartbeat that stopped pinging, with its
   last ping, period and grace; `heartbeat.FailedEvent`;
   `heartbeat.OverranEvent`), and the subject reads `Heartbeat failed: <name>
-  (exit 3)` or `Heartbeat missed: <name> (run did not finish)`. Every heartbeat event carries the plain heartbeat name as its
+  (exit 3)` or `Heartbeat missed: <name> (run did not finish)`. A
+  `heartbeat.recovered` names the heartbeat's id in its `Detail`
+  (`{"heartbeat_id":…}`, read by `heartbeat.IDOf`) for the alert's link. Every heartbeat event carries the plain heartbeat name as its
   payload; there are no other heartbeat event types.
 - **Removals:** `job.removed` (payload `{"job_id":…,"job_name":…}`, dedup key
   `job:<id>:removed`) and `heartbeat.removed` are recorded by the store's

@@ -43,12 +43,13 @@ func chatText(ev core.Event, chat ChatOptions) (subject, body string) {
 		page = runPage(ev)
 	case "run.recovered":
 		lead, page = "Its previous run had not succeeded.", runPage(ev)
-	case "heartbeat.missed":
-		lead, output = chatMissed(ev)
-		if d, ok := heartbeat.ParseMissDetail(ev.Detail); ok && d.HeartbeatID > 0 {
-			page = fmt.Sprintf("/heartbeats/%d", d.HeartbeatID)
+	case "heartbeat.missed", "heartbeat.recovered":
+		if ev.Type == "heartbeat.missed" {
+			lead, output = chatMissed(ev)
 		}
-	case "heartbeat.recovered":
+		if id := heartbeat.IDOf(ev.Detail); id > 0 {
+			page = fmt.Sprintf("/heartbeats/%d", id)
+		}
 	default:
 		return subject, body
 	}

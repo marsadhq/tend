@@ -242,3 +242,31 @@ func TestChatTextOutputLines(t *testing.T) {
 		}
 	}
 }
+
+// A recovery links to its heartbeat too, and the detail that names it does
+// not reach the webhook's body.
+func TestChatTextLinksARecovery(t *testing.T) {
+	at := time.Date(2026, 10, 21, 14, 10, 0, 0, time.UTC)
+	ev := heartbeat.RecoveredEvent(1, 4, "db-backup")
+	ev.ID, ev.CreatedAt = 12, at
+	m := messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 10})
+	if m.Subject != "Heartbeat recovered: db-backup" || m.Body != "https://tend.example/heartbeats/4" {
+		t.Errorf("subject %q body %q", m.Subject, m.Body)
+	}
+	if m := messageFor(ev, "primary", chat10); m.Body != "" {
+		t.Errorf("without a base URL: body %q, want none", m.Body)
+	}
+	plain := ev
+	plain.Detail = ""
+	got, err := json.Marshal(messageFor(ev, "primary", chat10).Webhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(messageFor(plain, "primary", chat10).Webhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("the detail changed the webhook body:\n got %s\nwant %s", got, want)
+	}
+}

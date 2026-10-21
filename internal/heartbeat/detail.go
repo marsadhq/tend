@@ -90,6 +90,19 @@ func encodeDetail(d MissDetail) string {
 	return string(b)
 }
 
+// IDOf returns the id of the heartbeat a heartbeat event's Detail names (a
+// miss's or a recovery's), 0 when it names none: an event recorded before
+// details carried it, or one that is not a heartbeat's.
+func IDOf(detail string) int64 {
+	var d struct {
+		HeartbeatID int64 `json:"heartbeat_id"`
+	}
+	if detail == "" || json.Unmarshal([]byte(detail), &d) != nil {
+		return 0
+	}
+	return d.HeartbeatID
+}
+
 // ParseMissDetail decodes the Detail of a heartbeat.missed. It reports false
 // for a plain miss (no detail) and for anything that is not a detail with a
 // reason.
