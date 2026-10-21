@@ -789,8 +789,15 @@ func storedOutput(raw string, secretValues []string) string {
 			cleaned = append(cleaned, c)
 		}
 	}
-	out := cleanOutput(redact(dropNULs(raw), bytewise))
-	return capOutput(redact(out, cleaned))
+	// The truncation marker is Tend's, not the job's: it is taken off before
+	// the output is redacted and put back after, so that no secret can match
+	// part of it.
+	body, cut := strings.CutSuffix(raw, truncationMarker)
+	out := redact(cleanOutput(redact(dropNULs(body), bytewise)), cleaned)
+	if cut {
+		out += truncationMarker
+	}
+	return capOutput(out)
 }
 
 // cleanOutput makes captured output plain text: NUL bytes are dropped, then

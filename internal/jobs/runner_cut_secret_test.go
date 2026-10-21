@@ -68,3 +68,17 @@ func TestRunnerRedactsAUTF16SecretAcrossTheOutputCap(t *testing.T) {
 		}
 	})
 }
+
+// TestRunnerMarksTruncationAfterRedacting: the marker of a cut output is
+// Tend's text, added after the output is redacted, so a secret that happens
+// to read like part of it ("output truncated") cannot redact the marker away.
+func TestRunnerMarksTruncationAfterRedacting(t *testing.T) {
+	const secret = "output truncated"
+	cases := []outputJob{{name: "secret-like-the-marker", raw: strings.Repeat(secret+" ", 70000), secret: secret}}
+	forEachStore(t, func(t *testing.T, s store.Store) {
+		out := runOutputJobs(t, context.Background(), s, cases)["secret-like-the-marker"]
+		if !strings.HasSuffix(out, "***\n... [output truncated at 1MiB]") || strings.Count(out, "[output truncated at 1MiB]") != 1 {
+			t.Errorf("stored output ends %q, want the marker once, whole", clip(out[max(0, len(out)-80):]))
+		}
+	})
+}
