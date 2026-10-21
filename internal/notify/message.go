@@ -89,11 +89,12 @@ func EventJobID(ev core.Event) int64 {
 // render's text too, added under "marsad" when it has one (see envelope).
 // The webhook provider posts Webhook and ignores Subject and Body, so its
 // bytes do not change with the chat text. instance names this installation
-// in the envelope's source.
-func messageFor(ev core.Event, instance string) kitnotify.Message {
+// in the envelope's source; base is Tend's external URL for the chat text's
+// link ("" for none).
+func messageFor(ev core.Event, instance, base string) kitnotify.Message {
 	subject, body := render(ev)
 	env := envelope(ev, subject, body, instance)
-	chatSubject, chatBody := chatText(ev)
+	chatSubject, chatBody := chatText(ev, base)
 	return kitnotify.Message{
 		Subject: chatSubject,
 		Body:    chatBody,

@@ -169,7 +169,7 @@ tend import healthchecks --api-key-file ~/hc-api-key [--url https://healthchecks
 | `TEND_DB`            | *(required)*            | SQLite file path **or** a `postgres://` / `postgresql://` URL. There is no default: every command that opens the database refuses to run while it is unset (`tend version`, `tend help`, and `tend serve -h` are the exceptions). Use an absolute path for SQLite. The Docker image sets it to `/data/tend.db` and the shipped system unit to `/var/lib/tend/tend.db`. |
 | `TEND_MASTER_KEY`    | *(required by `serve`)* | Base64-encoded 32-byte key. Required for alerting, the dashboard, session signing, and secrets encryption. Generate once with `head -c 32 /dev/urandom \| base64`. **Must be stable** across restarts; changing it invalidates all sessions and makes all stored secrets unreadable. |
 | `TEND_ADDR`          | `:8080`                 | TCP listen address for the HTTP server. |
-| `TEND_BASE_URL`      | `http://localhost:8080` | Externally-reachable base URL. Used when printing heartbeat ping URLs. Set this when Tend is behind a reverse proxy. |
+| `TEND_BASE_URL`      | `http://localhost:8080` | Externally-reachable base URL. Used when printing heartbeat ping URLs. Set this when Tend is behind a reverse proxy. When it is set, chat alerts end with a link to the run's or the heartbeat's page in the dashboard; unset, they carry no link (the localhost default is only for ping URLs), and a value that is not an `http` or `https` URL is reported by `serve` and leaves the links out. |
 | `TEND_COOKIE_SECURE` | `false`                 | Set to `1`, `true`, `yes`, or `on` to mark session cookies as `Secure` (HTTPS-only). Leave `false` when TLS is terminated at a reverse proxy. |
 | `TEND_RETENTION_EVENTS_DAYS` / `TEND_RETENTION_RUNS_DAYS` / `TEND_RETENTION_DELIVERIES_DAYS` / `TEND_RETENTION_PINGS_DAYS` | `30` / `90` / `7` / `30` | Days of events, finished job runs, finished notification deliveries, and heartbeat ping logs the [retention sweep](#limits-and-housekeeping) keeps; `0` keeps that history forever. |
 | `TEND_DELIVERY_HOLD_MINUTES` | `15` | How long a notification that keeps failing may hold back the later ones on its channel, counted from its first attempt (see [Delivery](#alerting)); `0` turns per-channel ordering off. A whole number of minutes up to 1440; `serve` refuses anything else. |
@@ -316,14 +316,20 @@ Secrets in a channel's config (tokens, keys, webhook URLs) can come from `{{ sec
 ```text
 Heartbeat missed: db-backup
 No ping for 1d 1h, since 2026-10-20 13:09 UTC; one is expected every 1d, with 1h of grace.
+
+https://tend.example/heartbeats/4
 ```
 
 ```text
 Job failed: nightly-backup (exit 3)
+https://tend.example/runs/1742
+
 Last output:
 uploading chunk 40/40 to s3://backups/primary/chunk-40.bin
 UploadError: chunk 41 failed after 5 attempts: RequestTimeout
 ```
+
+The link to the run's or the heartbeat's page is there when `TEND_BASE_URL` is set; it comes before the output, so a channel that cuts long messages (Pushover, at 1024 characters) cuts the output and keeps the link.
 
 The output in an alert is the tail of what the run stored (its last 10 lines, at most 1000 bytes), with the job's secret values already redacted as they are in the stored output, and it goes to every channel a rule routes `run.failed` to; keep other secrets out of what a job prints. `job.removed`, `heartbeat.removed` and `notification.failed` read as their subject and a line saying what it means. The webhook channel posts the subject and body Tend has always sent (`Job failed: nightly-backup`, `status=failed exit_code=3`), byte for byte, not this text.
 

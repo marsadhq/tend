@@ -92,7 +92,7 @@ func TestChatTextSaysWhatHappenedOnce(t *testing.T) {
 			body:        "Its previous run had not succeeded.",
 			legacyTitle: "Job recovered: nightly", legacyBody: "status=succeeded exit_code=0; the previous run had not succeeded"},
 	} {
-		m := messageFor(tc.ev, "primary")
+		m := messageFor(tc.ev, "primary", "")
 		if m.Subject != tc.subject || m.Body != tc.body {
 			t.Errorf("%s:\n got subject %q body %q\nwant subject %q body %q", tc.name, m.Subject, m.Body, tc.subject, tc.body)
 		}
@@ -125,7 +125,7 @@ func TestChatTextKeepsTheRest(t *testing.T) {
 		{Type: "notification.failed", Payload: "run.failed"},
 		{Type: "weird.event", Payload: "x"},
 	} {
-		m := messageFor(ev, "primary")
+		m := messageFor(ev, "primary", "")
 		w := m.Webhook.(event.TendWebhook)
 		if m.Subject != w.Subject || m.Body != w.Body {
 			t.Errorf("%s: chat %q / %q, webhook %q / %q; want the same", ev.Type, m.Subject, m.Body, w.Subject, w.Body)
@@ -147,6 +147,54 @@ func TestSpan(t *testing.T) {
 	} {
 		if got := span(d); got != want {
 			t.Errorf("span(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+// With Tend's external URL set, an alert links to the page that says more:
+// the run, or the heartbeat, after what happened and before any output, so a
+// channel that cuts long messages cuts the output and keeps the link. Without
+// it, or for an event with no page to link to, there is no link line.
+func TestChatTextLinksToThePage(t *testing.T) {
+	at := time.Date(2026, 10, 21, 14, 10, 0, 0, time.UTC)
+	quiet := heartbeat.OverdueEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "db-backup", Status: "up",
+		LastSeenAt: at.Add(-2 * time.Hour), PeriodSeconds: 3600})
+	quiet.CreatedAt = at
+	failed := core.Event{Type: "run.failed", CreatedAt: at,
+		Payload: `{"run_id":17,"job_id":2,"job_name":"nightly","status":"failed","exit_code":3}`,
+		Detail:  `{"output":"boom"}`}
+	recovered := core.Event{Type: "run.recovered", CreatedAt: at,
+		Payload: `{"run_id":18,"job_id":2,"job_name":"nightly","status":"succeeded","exit_code":0}`}
+	const base = "https://tend.example/ops"
+	for _, tc := range []struct {
+		name string
+		ev   core.Event
+		base string
+		want string
+	}{
+		{"missed heartbeat", quiet, base,
+			"No ping for 2h, since 2026-10-21 12:10 UTC; one is expected every 1h, with no grace.\n\nhttps://tend.example/ops/heartbeats/4"},
+		{"failed run", failed, base, "https://tend.example/ops/runs/17\n\nLast output:\nboom"},
+		{"recovered run", recovered, base, "Its previous run had not succeeded.\n\nhttps://tend.example/ops/runs/18"},
+		{"no base URL", failed, "", "Last output:\nboom"},
+		{"timed out run", core.Event{Type: "run.failed", Payload: `{"run_id":20,"job_id":3,"job_name":"report","status":"timed_out","exit_code":-1}`,
+			Detail: `{"output":"querying...","timeout_seconds":60}`}, base,
+			"It was stopped after its 1m timeout.\n\nhttps://tend.example/ops/runs/20\n\nLast output:\nquerying..."},
+		{"failure ping", heartbeat.FailedEvent(1, 4, "db-backup", nil, "boom\n"), base,
+			"https://tend.example/ops/heartbeats/4\n\nLast output:\nboom"},
+		{"failed run without output", core.Event{Type: "run.failed", Payload: `{"run_id":19,"job_id":2,"job_name":"x","status":"failed","exit_code":-1}`}, base,
+			"https://tend.example/ops/runs/19"},
+		{"miss recorded without a detail", core.Event{Type: "heartbeat.missed", Payload: "old"}, base, ""},
+		{"recovered heartbeat", core.Event{Type: "heartbeat.recovered", Payload: "db-backup"}, base, ""},
+		{"removed job", core.Event{Type: "job.removed", Payload: `{"job_id":7,"job_name":"nightly"}`}, base,
+			"the job was deleted; it will not run or alert again"},
+	} {
+		m := messageFor(tc.ev, "primary", tc.base)
+		if m.Body != tc.want {
+			t.Errorf("%s: body %q, want %q", tc.name, m.Body, tc.want)
+		}
+		if w := m.Webhook.(event.TendWebhook); strings.Contains(w.Body, "https://") || (w.Marsad != nil && strings.Contains(w.Marsad.Body, "https://")) {
+			t.Errorf("%s: the link reached the webhook's text: %q", tc.name, w.Body)
 		}
 	}
 }

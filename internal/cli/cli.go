@@ -414,7 +414,9 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var dispatch func(context.Context, core.Event)
 	var worker *notify.Worker
 	if box != nil {
-		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), logger)
+		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), alertLinkBase(func(err error) {
+			logger.Warn("serve: alerts carry no links", "err", err)
+		}), logger)
 		worker.Hold = opts.deliveryHold
 		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
@@ -1029,7 +1031,9 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// makes the overlap safe. Without a master key the channel configs cannot
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
-		w := notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), logger)
+		w := notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), alertLinkBase(func(err error) {
+			fmt.Fprintf(stderr, "run: warning: %v; alerts carry no links\n", err)
+		}), logger)
 		if hold, err := config.LoadDeliveryHold(); err != nil {
 			fmt.Fprintf(stderr, "run: warning: %v; using the default\n", err)
 		} else {
@@ -1394,6 +1398,18 @@ func cmdRuleList(ctx context.Context, st store.Store, orgID int64, args []string
 // -------------------------------------------------------------------
 // heartbeat
 // -------------------------------------------------------------------
+
+// alertLinkBase is the base of the links in chat alerts (config.LoadBaseURL):
+// TEND_BASE_URL, or "" when it is unset. A value that is not an http or https
+// URL is handed to warn, and the alerts then go out without links rather
+// than with broken ones.
+func alertLinkBase(warn func(error)) string {
+	base, err := config.LoadBaseURL()
+	if err != nil {
+		warn(err)
+	}
+	return base
+}
 
 // baseURL returns the externally-reachable base for ping URLs, from
 // TEND_BASE_URL or the localhost default.
@@ -2188,6 +2204,8 @@ Environment:
                                   later ones on its channel (default 15; 0 = no ordering)
   TEND_INSTANCE        this installation's name in webhook notifications
                        (default: the host name)
+  TEND_BASE_URL        Tend's external URL, e.g. https://tend.example: chat
+                       alerts link to the run or heartbeat page (unset: no links)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity

@@ -58,7 +58,7 @@ func postedWebhookBody(t *testing.T, ev core.Event) []byte {
 		channel: Channel{ID: 7, OrgID: ev.OrgID, Name: "ward", Kind: kitnotify.Webhook},
 		blob:    blob,
 	}
-	w := NewWorker(fs, box, kitnotify.BuildProvider, "primary", discardLogger())
+	w := NewWorker(fs, box, kitnotify.BuildProvider, "primary", "", discardLogger())
 	w.Clock = clock.NewFake(time.Now())
 	if n, err := w.DrainOnce(context.Background()); err != nil || n != 1 {
 		t.Fatalf("DrainOnce = %d, %v; want the delivery sent", n, err)
@@ -102,7 +102,7 @@ func TestWebhookBodyMatchesTheFixtures(t *testing.T) {
 			if got := postedWebhookBody(t, ev); !bytes.Equal(got, want) {
 				t.Errorf("posted body differs from %s:\n got %s\nwant %s", event.TendFixtureName(typ, true), got, want)
 			}
-			w := messageFor(ev, "primary").Webhook.(event.TendWebhook)
+			w := messageFor(ev, "primary", "").Webhook.(event.TendWebhook)
 			w.Marsad = nil
 			if got, err := json.Marshal(w); err != nil || !bytes.Equal(got, legacy) {
 				t.Errorf("body without the envelope differs from %s (%v):\n got %s\nwant %s", event.TendFixtureName(typ, false), err, got, legacy)
@@ -122,7 +122,7 @@ func TestWebhookEnvelopeIsWhatWardReads(t *testing.T) {
 	at := time.Date(2026, 10, 20, 9, 30, 0, 123456789, time.FixedZone("UTC+3", 3*60*60))
 	for _, instance := range []string{"eu-1", ""} {
 		ev := core.Event{ID: 42, OrgID: 1, Type: "heartbeat.missed", Source: "heartbeat", Payload: "db-backup", CreatedAt: at}
-		m := messageFor(ev, instance)
+		m := messageFor(ev, instance, "")
 		body, err := json.Marshal(m.Webhook)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
@@ -161,7 +161,7 @@ func TestWebhookEnvelopeLeftOutWhenItCannotBeBuilt(t *testing.T) {
 		"not alertable":              {ID: 6, OrgID: 1, Type: "run.succeeded", Source: "jobs.runner", Payload: `{"job_id":7}`, CreatedAt: at},
 	} {
 		t.Run(name, func(t *testing.T) {
-			m := messageFor(ev, "primary")
+			m := messageFor(ev, "primary", "")
 			w := m.Webhook.(event.TendWebhook)
 			if w.Marsad != nil || m.Event != nil {
 				t.Fatalf("envelope = %+v, want none", w.Marsad)
@@ -200,7 +200,7 @@ func TestWebhookBodyIsTheLegacyEncoding(t *testing.T) {
 		{ID: 4, OrgID: 1, Type: "weird.type", Source: "x", Payload: "<script>"},
 	}
 	for _, ev := range events {
-		m := messageFor(ev, "primary")
+		m := messageFor(ev, "primary", "")
 		w, ok := m.Webhook.(event.TendWebhook)
 		if !ok {
 			t.Fatalf("messageFor(%s).Webhook is %T, want event.TendWebhook", ev.Type, m.Webhook)
