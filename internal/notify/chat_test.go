@@ -282,3 +282,27 @@ func TestChatTextLabelsATruncatedTail(t *testing.T) {
 		t.Errorf("body %q, want %q", m.Body, want)
 	}
 }
+
+// A probe's or a drill's alert shows its verdict (its FAIL: lines, or why it
+// could not check) before the tail of what followed it, within the same line
+// budget: the verdict first, the tail with what is left.
+func TestChatTextLeadsWithTheVerdict(t *testing.T) {
+	ev := core.Event{Type: "run.failed",
+		Payload: `{"run_id":9,"job_id":4,"job_name":"web-cert","status":"failed","exit_code":1}`,
+		Detail: `{"verdict":"FAIL: expires in 4 days\nFAIL: renewal missed\nFAIL: chain does not verify",` +
+			`"output":"subject: CN=tend.test\nissuer: CN=Test CA\nnot_after: 2026-10-25\nchain: verified"}`}
+	for _, tc := range []struct {
+		lines int
+		want  string
+	}{
+		{10, "FAIL: expires in 4 days\nFAIL: renewal missed\nFAIL: chain does not verify\n\n" +
+			"Last output:\nsubject: CN=tend.test\nissuer: CN=Test CA\nnot_after: 2026-10-25\nchain: verified"},
+		{4, "FAIL: expires in 4 days\nFAIL: renewal missed\nFAIL: chain does not verify\n\nLast output:\nchain: verified"},
+		{2, "FAIL: expires in 4 days\nFAIL: renewal missed"},
+		{0, ""},
+	} {
+		if m := messageFor(ev, "primary", ChatOptions{OutputLines: tc.lines}); m.Body != tc.want || m.Subject != "Job failed: web-cert (exit 1)" {
+			t.Errorf("%d lines: subject %q body\n%q\nwant\n%q", tc.lines, m.Subject, m.Body, tc.want)
+		}
+	}
+}
