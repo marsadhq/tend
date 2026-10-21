@@ -550,20 +550,25 @@ These limits are constants in the code, not configuration.
   are answered before that check, so they need no configuration and never
   create a database file or start the daemon. Every other subcommand parses its flags
   after the store is open, so its `-h` still needs `TEND_DB`.
-- **Bounded captured output.** The executor keeps at most `maxOutputBytes`
+- **Bounded captured output.** The executor keeps about `maxOutputBytes`
   (1 MiB) per attempt: shell jobs write through a `cappedBuffer` that discards
   the excess without ever returning an error (so a chatty child is not killed by
-  a full pipe), and HTTP jobs read the body through an `io.LimitReader`. A
-  truncation marker is appended, after backing the cut off to a character
-  boundary so truncation never produces invalid UTF-8; status and exit code are
-  unaffected. A run stores the output of its last attempt. Replacing invalid
-  bytes and redacting a short secret can make the text longer than the bytes
-  that were captured, so the runner applies the cap once more to what it is
-  about to store: the stored output, the `HTTP <status>` line of an HTTP job
-  included, never exceeds 1 MiB plus the marker. That second cut comes after
-  redaction. The capture cap does not: it falls on the raw bytes, so the first
-  part of a secret that straddles the end of a capture cut at 1 MiB matches
-  nothing and is stored. This is a known limitation.
+  a full pipe) and drops NUL bytes as they come (stored output never keeps
+  them, so they do not count against the cap), and HTTP jobs read the body
+  through an `io.LimitReader`. A shell job's capture keeps the longest
+  secret's length past the cap, and when the job printed more, the cut is
+  made in the captured bytes, before redaction (`headOf`): at the cap,
+  extended to the end of a secret printed across it (so it can end a few
+  bytes past 1 MiB), and everything after it is dropped, so that a piece of a
+  secret the capture itself cut cannot slide under the cap once the secrets
+  before it are redacted. A plain cut is backed off to a character boundary.
+  The truncation marker is added after the output is redacted, so no secret
+  can match part of it; status and exit code are unaffected. A run stores
+  the output of its last attempt. Replacing invalid bytes and redacting a
+  short secret can make the text longer than the bytes that were captured,
+  so the runner applies the cap once more to what it is about to store: the
+  stored output, the `HTTP <status>` line of an HTTP job included, never
+  exceeds 1 MiB plus the marker. That second cut comes after redaction.
 - **Retention sweep.** `serve` prunes at startup and every 24 hours: by default
   events older than 30 days, terminal job runs older than 90 days, finalized
   deliveries older than 7 days, heartbeat ping log entries older than 30 days
@@ -607,12 +612,13 @@ These limits are constants in the code, not configuration.
   one only as an explicit `rdap_url`), and its client (`rdapClient`) refuses a
   redirect to another host or from https to http, so no one but the registry
   that was asked can answer for it. A drill keeps the first and last 32 KiB
-  of each step's output (`headTail`). Unlike the 1 MiB capture of a shell
-  job, these cuts (and the 16 KiB of an expiry command's stderr) are made
-  after the job's secrets are redacted: the runner hands the executor the
-  secret values, each capture keeps the longest secret's length past its
-  cut, and a secret straddling a cut is redacted whole before the cut is
-  made. A drill's checks run only when the scratch directory is still the
+  of each step's output (`headTail`). These cuts, the 16 KiB of an expiry
+  command's stderr and the 1 MiB of a shell job's output are made the same
+  way: the runner hands the executor the secret values, each capture keeps
+  the longest secret's length past its cut, the cut is found in the captured
+  bytes and moved to take in whole any secret across it (`headOf`,
+  `tailOf`), what lies outside is dropped, and only then is the rest
+  redacted. A drill's checks run only when the scratch directory is still the
   directory Tend made (`os.Lstat`: a restore that replaced it with a symbolic
   link fails the run). Its cleanup runs however the restore ended, in the
   directory that holds the scratch directory, detached from the attempt's
