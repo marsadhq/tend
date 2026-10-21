@@ -71,6 +71,10 @@ type Store interface {
 	CreateJob(ctx context.Context, j jobs.Job) (int64, error)                     // returns new job ID
 	GetJob(ctx context.Context, orgID, id int64) (jobs.Job, error)                // ErrNotFound if absent
 	GetJobByName(ctx context.Context, orgID int64, name string) (jobs.Job, error) // ErrNotFound if absent
+	// ListJobs and DueJobs skip a row that is there but cannot be read (an env
+	// or settings column that does not decode) and name it in a
+	// *jobs.UnreadableJobsError returned along with the jobs they could read;
+	// GetJob and GetJobByName return a *jobs.UnreadableJobError for one.
 	ListJobs(ctx context.Context, orgID int64) ([]jobs.Job, error)
 	UpdateJob(ctx context.Context, j jobs.Job) error
 	// DeleteJob removes a job and ALL of its dependent rows (its job_runs and any
@@ -82,6 +86,10 @@ type Store interface {
 	// doesn't exist for the org (no side effect: the transaction is rolled back).
 	DeleteJob(ctx context.Context, orgID, id int64) error
 	DueJobs(ctx context.Context, now time.Time) ([]jobs.Job, error) // enabled jobs with NextRun <= now AND no pending/running run
+	// FailUnreadableJob records a failed run and its run.failed for a due job
+	// whose row cannot be read, in one transaction, and clears its next_run so
+	// it is not due again until repaired. It returns the event.
+	FailUnreadableJob(ctx context.Context, orgID, jobID int64, name, output string) (core.Event, error)
 
 	// run queue + history
 	EnqueueRun(ctx context.Context, orgID, jobID int64) (int64, error)   // inserts a 'pending' job_run, returns run ID

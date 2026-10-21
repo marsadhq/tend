@@ -315,26 +315,60 @@ func scanJob(sc interface{ Scan(...any) error }) (jobs.Job, error) {
 	j.Cron = cron.String
 	j.Enabled = enabled != 0
 
+	// The row is there; a column that does not decode makes the job
+	// unreadable, which the error says with what could be read.
+	unreadable := func(err error) (jobs.Job, error) {
+		return j, &jobs.UnreadableJobError{OrgID: j.OrgID, JobID: j.ID, Name: j.Name, Err: err}
+	}
 	var err error
 	if j.RunAt, err = parseTime(runAt); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	if j.NextRunAt, err = parseTime(nextRun); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	if j.CreatedAt, err = parseTime(created); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	if j.UpdatedAt, err = parseTime(updated); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	if j.Env, err = decodeEnv(env); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	if j.Spec, err = decodeSpec(spec); err != nil {
-		return jobs.Job{}, err
+		return unreadable(err)
 	}
 	return j, nil
+}
+
+// scanJobs reads every job of rows (a SELECT of jobColumns). A row that is
+// found but cannot be read is skipped and named in the *jobs.UnreadableJobsError
+// returned with the others; any other error ends the read. what names the
+// query in errors.
+func scanJobs(rows *sql.Rows, what string) ([]jobs.Job, error) {
+	defer rows.Close()
+	var out []jobs.Job
+	var bad []*jobs.UnreadableJobError
+	for rows.Next() {
+		j, err := scanJob(rows)
+		var u *jobs.UnreadableJobError
+		if errors.As(err, &u) {
+			bad = append(bad, u)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("scan %s: %w", what, err)
+		}
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", what, err)
+	}
+	if len(bad) > 0 {
+		return out, &jobs.UnreadableJobsError{Jobs: bad}
+	}
+	return out, nil
 }
 
 // GetJob returns the job with the given ID scoped to orgID, or ErrNotFound.
@@ -366,27 +400,15 @@ func (s *SQLiteStore) GetJobByName(ctx context.Context, orgID int64, name string
 	return j, nil
 }
 
-// ListJobs returns all jobs for an org ordered by ID.
+// ListJobs returns all jobs for an org ordered by ID; rows that cannot be read
+// are named in a *jobs.UnreadableJobsError returned with the others.
 func (s *SQLiteStore) ListJobs(ctx context.Context, orgID int64) ([]jobs.Job, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+jobColumns+` FROM jobs WHERE org_id = ? ORDER BY id`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
-	defer rows.Close()
-
-	var out []jobs.Job
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
-		}
-		out = append(out, j)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate jobs: %w", err)
-	}
-	return out, nil
+	return scanJobs(rows, "jobs")
 }
 
 // UpdateJob persists all mutable fields of a job, scoped to its OrgID and ID.
@@ -484,21 +506,50 @@ func (s *SQLiteStore) DueJobs(ctx context.Context, now time.Time) ([]jobs.Job, e
 	if err != nil {
 		return nil, fmt.Errorf("due jobs: %w", err)
 	}
-	defer rows.Close()
-
-	var out []jobs.Job
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan due job: %w", err)
-		}
-		out = append(out, j)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate due jobs: %w", err)
-	}
-	return out, nil
+	return scanJobs(rows, "due jobs")
 }
+
+// FailUnreadableJob records, for a due job whose row cannot be read, a failed
+// run with output and its run.failed event (with the deliveries rules route
+// it to) in one transaction, and clears the job's next_run, which needs no
+// decoding, so the job is not due again until it is repaired.
+func (s *SQLiteStore) FailUnreadableJob(ctx context.Context, orgID, jobID int64, name, output string) (core.Event, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	now := nowStr()
+	res, err := tx.ExecContext(ctx, `INSERT INTO job_runs
+		(org_id, job_id, status, attempt, exit_code, output, claimed_by, started_at, ended_at, created_at)
+		VALUES (?, ?, ?, 1, -1, ?, ?, ?, ?, ?)`,
+		orgID, jobID, string(jobs.StatusFailed), output, workerName, now, now, now)
+	if err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job: insert run: %w", err)
+	}
+	runID, err := res.LastInsertId()
+	if err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job: run id: %w", err)
+	}
+	ev, err := jobs.RunEvent(jobs.Run{ID: runID, OrgID: orgID, JobID: jobID}, name, jobs.EventRunFailed, jobs.StatusFailed, -1)
+	if err != nil {
+		return core.Event{}, err
+	}
+	if ev.ID, err = emitEventTx(ctx, tx, ev); err != nil {
+		return core.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET next_run = NULL WHERE org_id = ? AND id = ?`, orgID, jobID); err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job: unschedule: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job commit: %w", err)
+	}
+	return ev, nil
+}
+
+// workerName is the claimant recorded on the failed run of a job that cannot
+// be read: serve's runner, which found it due.
+const workerName = "runner"
 
 // --- run queue + history -------------------------------------------------
 

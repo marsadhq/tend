@@ -623,6 +623,11 @@ func cmdJobRm(ctx context.Context, st store.Store, orgID int64, args []string, s
 
 	name := fs.Arg(0)
 	j, err := st.GetJobByName(ctx, orgID, name)
+	var unreadable *jobs.UnreadableJobError
+	if errors.As(err, &unreadable) {
+		// A job whose row cannot be read can still be removed: its ID is known.
+		j, err = jobs.Job{ID: unreadable.JobID}, nil
+	}
 	if err != nil {
 		return fmt.Errorf("job rm: get job %q: %w", name, err)
 	}
@@ -683,12 +688,19 @@ func cmdJobList(ctx context.Context, st store.Store, orgID int64, args []string,
 	}
 
 	jbs, err := st.ListJobs(ctx, orgID)
+	var unreadable *jobs.UnreadableJobsError
+	if errors.As(err, &unreadable) {
+		err = nil
+		defer printUnreadable(stdout, unreadable, "")
+	}
 	if err != nil {
 		return fmt.Errorf("job list: %w", err)
 	}
 
 	if len(jbs) == 0 {
-		fmt.Fprintln(stdout, "(no jobs)")
+		if unreadable == nil {
+			fmt.Fprintln(stdout, "(no jobs)")
+		}
 		return nil
 	}
 
@@ -711,6 +723,14 @@ func cmdJobList(ctx context.Context, st store.Store, orgID int64, args []string,
 			j.Name, string(j.Type), sched, enabled, nextRun)
 	}
 	return nil
+}
+
+// printUnreadable writes a line per job whose row cannot be read, saying how
+// to fix it, each line starting with prefix.
+func printUnreadable(w io.Writer, u *jobs.UnreadableJobsError, prefix string) {
+	for _, j := range u.Jobs {
+		fmt.Fprintf(w, "%s%v; fix it with tend sync, or remove it with tend job rm %s\n", prefix, j, j.Name)
+	}
 }
 
 func scheduleStr(j jobs.Job) string {
@@ -1408,6 +1428,10 @@ func redactDSN(driver, dsn string) string {
 // caller already resolved via the standard config.Load + store.Open path.
 func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.Org, args []string, stdout, stderr io.Writer) error {
 	jl, err := st.ListJobs(ctx, org.ID)
+	var unreadable *jobs.UnreadableJobsError
+	if errors.As(err, &unreadable) {
+		err = nil
+	}
 	if err != nil {
 		return fmt.Errorf("doctor: list jobs: %w", err)
 	}
@@ -1455,6 +1479,9 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 		if msg := jobProblem(j); msg != "" {
 			fmt.Fprintf(stdout, "warning: job %q: %s\n", j.Name, msg)
 		}
+	}
+	if unreadable != nil {
+		printUnreadable(stdout, unreadable, "warning: ")
 	}
 	return nil
 }

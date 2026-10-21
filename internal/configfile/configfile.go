@@ -520,7 +520,14 @@ func reconcileJobs(ctx context.Context, s ReconcileStore, orgID int64, clk clock
 		parsedByName[j.Name] = j
 	}
 
+	// A job whose row cannot be read is not among existingJobs: one in the
+	// file is overwritten below, which repairs it; one absent from it is left
+	// as it is (prune cannot rewrite a row it cannot read).
 	existingJobs, err := s.ListJobs(ctx, orgID)
+	var unreadableRows *jobs.UnreadableJobsError
+	if errors.As(err, &unreadableRows) {
+		err = nil
+	}
 	if err != nil {
 		return fmt.Errorf("reconcile: list jobs: %w", err)
 	}
@@ -529,6 +536,19 @@ func reconcileJobs(ctx context.Context, s ReconcileStore, orgID int64, clk clock
 		pj.OrgID = orgID
 
 		existing, lookupErr := s.GetJobByName(ctx, orgID, pj.Name)
+		var unreadable *jobs.UnreadableJobError
+		if errors.As(lookupErr, &unreadable) {
+			// The row is there but cannot be read: the file's entry replaces
+			// it in place (same ID, so its runs and rules stay with it), and
+			// it is scheduled afresh.
+			pj.ID = unreadable.JobID
+			pj.NextRunAt = mustNextRun(pj, now)
+			if err := s.UpdateJob(ctx, pj); err != nil {
+				return fmt.Errorf("reconcile: repair job %q: %w", pj.Name, err)
+			}
+			result.Updated++
+			continue
+		}
 		if lookupErr != nil {
 			if !errors.Is(lookupErr, store.ErrNotFound) {
 				return fmt.Errorf("reconcile: get job %q: %w", pj.Name, lookupErr)

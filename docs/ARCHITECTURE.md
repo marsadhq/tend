@@ -148,6 +148,16 @@ dialects force it:
   version never runs it; it is for a Tend older than v0.5 after a rollback,
   which runs a job of a type it does not know as a shell job and would
   otherwise run an empty command and report success.
+- **A job row that cannot be read** (an `env` or `spec` that does not decode,
+  from a hand edit or a bug) does not take the others down with it.
+  `scanJob` returns a `*jobs.UnreadableJobError` carrying the ID and name;
+  `ListJobs` and `DueJobs` skip such rows and name them in a
+  `*jobs.UnreadableJobsError` returned along with the jobs they could read.
+  The runner logs a due one, records a failed run with `run.failed` for it in
+  one transaction (`FailUnreadableJob`), and clears its `next_run`, so the
+  other jobs keep running and the broken one is reported once rather than on
+  every tick. `tend sync` repairs it (the entry overwrites the row in place),
+  `tend job rm` removes it, and `tend job list` and `tend doctor` name it.
 - **`ErrNotFound`.** `Get*` methods return the sentinel `store.ErrNotFound` when
   no row matches; callers use `errors.Is`.
 - **Explicit transactional deletes.** Cascading deletes are done in an explicit

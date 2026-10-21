@@ -152,27 +152,15 @@ func (s *PostgresStore) GetJobByName(ctx context.Context, orgID int64, name stri
 	return j, nil
 }
 
-// ListJobs returns all jobs for an org ordered by ID.
+// ListJobs returns all jobs for an org ordered by ID; rows that cannot be read
+// are named in a *jobs.UnreadableJobsError returned with the others.
 func (s *PostgresStore) ListJobs(ctx context.Context, orgID int64) ([]jobs.Job, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+jobColumns+` FROM jobs WHERE org_id = $1 ORDER BY id`, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
-	defer rows.Close()
-
-	var out []jobs.Job
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
-		}
-		out = append(out, j)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate jobs: %w", err)
-	}
-	return out, nil
+	return scanJobs(rows, "jobs")
 }
 
 // UpdateJob persists all mutable fields of a job, scoped to its OrgID and ID.
@@ -270,20 +258,41 @@ func (s *PostgresStore) DueJobs(ctx context.Context, now time.Time) ([]jobs.Job,
 	if err != nil {
 		return nil, fmt.Errorf("due jobs: %w", err)
 	}
-	defer rows.Close()
+	return scanJobs(rows, "due jobs")
+}
 
-	var out []jobs.Job
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan due job: %w", err)
-		}
-		out = append(out, j)
+// FailUnreadableJob records, for a due job whose row cannot be read, a failed
+// run with output and its run.failed event (with the deliveries rules route
+// it to) in one transaction, and clears the job's next_run, which needs no
+// decoding, so the job is not due again until it is repaired.
+func (s *PostgresStore) FailUnreadableJob(ctx context.Context, orgID, jobID int64, name, output string) (core.Event, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job begin tx: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate due jobs: %w", err)
+	defer tx.Rollback() //nolint:errcheck
+	now := nowStr()
+	var runID int64
+	if err := tx.QueryRowContext(ctx, `INSERT INTO job_runs
+		(org_id, job_id, status, attempt, exit_code, output, claimed_by, started_at, ended_at, created_at)
+		VALUES ($1, $2, $3, 1, -1, $4, $5, $6, $7, $8) RETURNING id`,
+		orgID, jobID, string(jobs.StatusFailed), pgText(output), workerName, now, now, now).Scan(&runID); err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job: insert run: %w", err)
 	}
-	return out, nil
+	ev, err := jobs.RunEvent(jobs.Run{ID: runID, OrgID: orgID, JobID: jobID}, name, jobs.EventRunFailed, jobs.StatusFailed, -1)
+	if err != nil {
+		return core.Event{}, err
+	}
+	if ev.ID, err = pgEmitEventTx(ctx, tx, ev); err != nil {
+		return core.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET next_run = NULL WHERE org_id = $1 AND id = $2`, orgID, jobID); err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job: unschedule: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return core.Event{}, fmt.Errorf("fail unreadable job commit: %w", err)
+	}
+	return ev, nil
 }
 
 // --- run queue + history -------------------------------------------------
