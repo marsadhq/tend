@@ -35,8 +35,8 @@ type drillStep struct {
 
 // runDrillStep runs one of a drill's commands exactly as a shell job's command
 // runs (shellCommand), in the scratch directory.
-func runDrillStep(ctx context.Context, label, command string, env map[string]string, dir string) drillStep {
-	out := &headTail{max: drillStepOutput}
+func runDrillStep(ctx context.Context, label, command string, env map[string]string, secrets []string, dir string) drillStep {
+	out := &headTail{max: drillStepOutput, margin: secretMargin(secrets)}
 	cmd := shellCommand(ctx, command, env)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = out, out
@@ -44,7 +44,7 @@ func runDrillStep(ctx context.Context, label, command string, env map[string]str
 	err := cmd.Run()
 	took := time.Since(start)
 	status, code := shellOutcome(ctx, err)
-	return drillStep{label: label, command: command, status: status, code: code, took: took, output: out.String()}
+	return drillStep{label: label, command: command, status: status, code: code, took: took, output: out.text(secrets)}
 }
 
 // runOnceDrill runs the drill branch of runOnce.
@@ -62,7 +62,7 @@ func runDrillStep(ctx context.Context, label, command string, env map[string]str
 // directory cannot be removed; it times out when the restore or a check runs
 // into the job's timeout. Its exit code is that of the first step that
 // failed (1 for max_duration, -1 for the scratch directory).
-func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]string, attempt int, started time.Time) RunResult {
+func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]string, secrets []string, attempt int, started time.Time) RunResult {
 	s := specOf(j)
 	if err := ValidateSpec(Drill, &s); err != nil {
 		return probeErrorResult(ctx, attempt, started, err)
@@ -94,7 +94,7 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 	}
 	var steps []drillStep
 
-	restore := runDrillStep(ctx, "restore", s.Restore, stepEnv, scratch)
+	restore := runDrillStep(ctx, "restore", s.Restore, stepEnv, secrets, scratch)
 	steps = append(steps, restore)
 	switch restore.status {
 	case StatusSucceeded:
@@ -120,7 +120,7 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 			r.add(label, "not run (the job's timeout was reached)")
 			continue
 		}
-		c := runDrillStep(ctx, label, command, stepEnv, scratch)
+		c := runDrillStep(ctx, label, command, stepEnv, secrets, scratch)
 		steps = append(steps, c)
 		switch c.status {
 		case StatusSucceeded:
@@ -147,7 +147,7 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 		// Detached from ctx, whose deadline may well have passed already: the
 		// cleanup runs however the restore ended, within its own bound.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drillCleanupTimeout)
-		c := runDrillStep(cctx, "cleanup", s.Cleanup, stepEnv, scratch)
+		c := runDrillStep(cctx, "cleanup", s.Cleanup, stepEnv, secrets, scratch)
 		cancel()
 		steps = append(steps, c)
 		switch c.status {
@@ -246,17 +246,24 @@ func removeScratch(dir string) error {
 // headTail keeps the first and the last max bytes written to it, and counts
 // the bytes skipped in between. Write never fails, so a chatty step is never
 // stopped by a full pipe, and costs the same however small the writes are.
+//
+// Each end is captured margin bytes longer than it is shown (margin is the
+// length of the longest secret), so text redacts the secrets before it makes
+// the cuts: a secret that straddled one is then redacted whole instead of
+// being kept in part.
 type headTail struct {
-	max  int
-	head []byte
-	ring []byte // the last bytes written after head filled up, wrapping at pos
-	pos  int
-	rest int64 // bytes written after head filled up
+	max    int
+	margin int
+	head   []byte
+	ring   []byte // the last bytes written after head filled up, wrapping at pos
+	pos    int
+	rest   int64 // bytes written after head filled up
 }
 
 func (h *headTail) Write(p []byte) (int, error) {
 	n := len(p)
-	if room := h.max - len(h.head); room > 0 {
+	keep := h.max + h.margin
+	if room := keep - len(h.head); room > 0 {
 		k := min(room, len(p))
 		h.head = append(h.head, p[:k]...)
 		p = p[k:]
@@ -265,30 +272,56 @@ func (h *headTail) Write(p []byte) (int, error) {
 		return n, nil
 	}
 	if h.ring == nil {
-		h.ring = make([]byte, h.max)
+		h.ring = make([]byte, keep)
 	}
 	h.rest += int64(len(p))
-	if len(p) >= h.max {
-		copy(h.ring, p[len(p)-h.max:])
+	if len(p) >= keep {
+		copy(h.ring, p[len(p)-keep:])
 		h.pos = 0
 		return n, nil
 	}
 	k := copy(h.ring[h.pos:], p)
 	copy(h.ring, p[k:])
-	h.pos = (h.pos + len(p)) % h.max
+	h.pos = (h.pos + len(p)) % keep
 	return n, nil
 }
 
-// String returns what was kept, with a marker where bytes were skipped. Cuts
-// fall on character boundaries.
-func (h *headTail) String() string {
-	if h.rest <= int64(h.max) {
-		return string(h.head) + string(h.ring[:h.rest])
+// String is text with no secrets to redact.
+func (h *headTail) String() string { return h.text(nil) }
+
+// text returns what was kept with secrets redacted, then cut to its first and
+// last max bytes with a marker where bytes were skipped. Cuts fall on
+// character boundaries.
+func (h *headTail) text(secrets []string) string {
+	keep := int64(h.max + h.margin)
+	var tail []byte
+	if h.rest <= keep {
+		tail = h.ring[:h.rest]
+	} else {
+		tail = append(append([]byte(nil), h.ring[h.pos:]...), h.ring[:h.pos]...)
 	}
-	tail := append(append([]byte(nil), h.ring[h.pos:]...), h.ring[:h.pos]...)
-	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
-		tail = tail[1:]
+	if h.rest <= keep {
+		// Nothing was lost: redact the whole and cut it once, if at all.
+		whole := redact(string(h.head)+string(tail), secrets)
+		if len(whole) <= 2*h.max {
+			return whole
+		}
+		return cutMiddle(whole[:h.max], whole[len(whole)-h.max:], int64(len(whole)-2*h.max))
 	}
-	return string(trimPartialRune(h.head)) +
-		fmt.Sprintf("\n... [%d bytes skipped] ...\n", h.rest-int64(h.max)) + string(tail)
+	head := redact(string(h.head), secrets)
+	end := redact(string(tail), secrets)
+	head = head[:min(len(head), h.max)]
+	end = end[max(0, len(end)-h.max):]
+	skipped := h.rest + int64(len(h.head)) - int64(len(head)) - int64(len(end))
+	return cutMiddle(head, end, skipped)
+}
+
+// cutMiddle joins the kept start and end of an output around the marker for
+// the bytes skipped in between, trimming each to whole characters.
+func cutMiddle(head, tail string, skipped int64) string {
+	t := []byte(tail)
+	for len(t) > 0 && !utf8.RuneStart(t[0]) {
+		t = t[1:]
+	}
+	return string(trimPartialRune([]byte(head))) + fmt.Sprintf("\n... [%d bytes skipped] ...\n", skipped) + string(t)
 }

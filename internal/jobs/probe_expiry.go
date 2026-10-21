@@ -42,7 +42,7 @@ func ParseExpiryDate(s string) (time.Time, error) {
 // it prints on stdout is only ever parsed as a date: it is never run, never
 // spliced into anything, and refused when it is not a single date. Its stderr
 // is kept in the output.
-func (e *Executor) runOnceExpiry(ctx context.Context, j Job, env map[string]string, attempt int, started time.Time) RunResult {
+func (e *Executor) runOnceExpiry(ctx context.Context, j Job, env map[string]string, secrets []string, attempt int, started time.Time) RunResult {
 	s := specOf(j)
 	if err := ValidateSpec(Expiry, &s); err != nil {
 		return probeErrorResult(ctx, attempt, started, err)
@@ -52,7 +52,9 @@ func (e *Executor) runOnceExpiry(ctx context.Context, j Job, env map[string]stri
 	}
 
 	stdout := &cappedBuffer{max: maxExpiryStdout}
-	stderr := &cappedBuffer{max: maxExpiryStderr}
+	// stderr keeps a secret's length more than it shows, so that a secret
+	// across the cut is redacted whole first (cutRedacted).
+	stderr := &cappedBuffer{max: maxExpiryStderr + secretMargin(secrets)}
 	cmd := shellCommand(ctx, s.ExpiryCommand, env)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	status, code := shellOutcome(ctx, cmd.Run())
@@ -71,7 +73,8 @@ func (e *Executor) runOnceExpiry(ctx context.Context, j Job, env map[string]stri
 			res = e.judgeExpiry(t, "printed by expiry_command", s.WarnDays, attempt, started)
 		}
 	}
-	if errText := strings.TrimSpace(stderr.String()); errText != "" {
+	errText := cutRedacted(stderr.buf.Bytes(), stderr.truncated, maxExpiryStderr, secrets, "\n... [stderr truncated]")
+	if errText = strings.TrimSpace(errText); errText != "" {
 		res.Output += "\n\nstderr:\n" + errText
 	}
 	return res
@@ -92,10 +95,10 @@ func expiryFromStdout(stdout *cappedBuffer) (time.Time, error) {
 	}
 	t, err := ParseExpiryDate(out)
 	if err != nil {
-		if len(out) > 100 {
-			out = out[:100] + "..."
-		}
-		return time.Time{}, fmt.Errorf("expiry_command printed %q, which is not an RFC 3339 date (2027-01-31T00:00:00Z) or a date (2027-01-31)", out)
+		// The line is shown whole (at most maxExpiryStdout bytes) and as it
+		// was printed, not quoted: cut or escaped, a secret in it would no
+		// longer match when the runner redacts the output.
+		return time.Time{}, fmt.Errorf("expiry_command printed \"%s\", which is not an RFC 3339 date (2027-01-31T00:00:00Z) or a date (2027-01-31)", out)
 	}
 	return t, nil
 }

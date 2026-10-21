@@ -203,6 +203,15 @@ func (e *Executor) maxRunDuration(j Job) time.Duration {
 // Worst-case wall time ≈ (MaxRetries+1)*TimeoutSeconds + Σ(i² for i in 1..MaxRetries)
 // seconds when using the default exponential backoff; see maxRunDuration.
 func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunResult {
+	return e.run(ctx, j, env, nil)
+}
+
+// run is Run with the plaintext values of the secrets in env. The runner
+// passes them so that an expiry command's and a drill's output, which are cut
+// to a size before they are stored, are redacted before the cut: a secret
+// that straddled a cut would otherwise be kept in part, which no longer
+// matches the secret when the runner redacts the stored output.
+func (e *Executor) run(ctx context.Context, j Job, env map[string]string, secrets []string) RunResult {
 	maxAttempts := j.MaxRetries + 1
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -210,7 +219,7 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 
 	var last RunResult
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		last = e.runOnce(ctx, j, env, attempt)
+		last = e.runOnce(ctx, j, env, secrets, attempt)
 		if last.Status == StatusSucceeded {
 			return last
 		}
@@ -247,7 +256,7 @@ func (e *Executor) Run(ctx context.Context, j Job, env map[string]string) RunRes
 // positive as unset: a negative one (which job input now refuses, but a row
 // written before that may still hold) used to time every attempt out at once
 // while the reaper allowed the run the default.
-func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, attempt int) RunResult {
+func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, secrets []string, attempt int) RunResult {
 	timeout := seconds(j.TimeoutSeconds)
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -265,9 +274,9 @@ func (e *Executor) runOnce(ctx context.Context, j Job, env map[string]string, at
 	case Domain:
 		return e.runOnceDomain(cctx, j, attempt, started)
 	case Expiry:
-		return e.runOnceExpiry(cctx, j, env, attempt, started)
+		return e.runOnceExpiry(cctx, j, env, secrets, attempt, started)
 	case Drill:
-		return e.runOnceDrill(cctx, j, env, attempt, started)
+		return e.runOnceDrill(cctx, j, env, secrets, attempt, started)
 	default: // Shell or empty/default
 		return e.runOnceShell(cctx, j, env, attempt, started)
 	}
