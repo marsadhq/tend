@@ -13,9 +13,10 @@ import (
 )
 
 // TestHeartbeatFailureSaysWhatHappened: a heartbeat that went down on a
-// failure ping keeps its heartbeat.missed type and plain-name payload, but its
-// subject says it failed, with the exit status, and its body carries the tail
-// of the logged output. The envelope stays valid and its data unchanged.
+// failure ping keeps its heartbeat.missed type and plain-name payload, but the
+// subject the webhook posts says it failed, with the exit status, and its body
+// carries the tail of the logged output. The envelope stays valid and its data
+// unchanged.
 func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	at := time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
 	three := 3
@@ -23,13 +24,13 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	ev.ID, ev.CreatedAt = 41, at
 
 	m := messageFor(ev, "primary")
-	if m.Subject != "Heartbeat failed: db-backup (exit 3)" {
-		t.Fatalf("subject = %q", m.Subject)
-	}
-	if !strings.Contains(m.Body, "exit status 3") || !strings.HasSuffix(m.Body, "pg_dump: error: connection refused") {
-		t.Fatalf("body = %q, want the exit status and the output tail", m.Body)
-	}
 	w := m.Webhook.(event.TendWebhook)
+	if w.Subject != "Heartbeat failed: db-backup (exit 3)" {
+		t.Fatalf("subject = %q", w.Subject)
+	}
+	if !strings.Contains(w.Body, "exit status 3") || !strings.HasSuffix(w.Body, "pg_dump: error: connection refused") {
+		t.Fatalf("body = %q, want the exit status and the output tail", w.Body)
+	}
 	if w.Event == nil || w.Event.Type != "heartbeat.missed" || w.Event.Payload != "db-backup" {
 		t.Fatalf("legacy event = %+v, want heartbeat.missed with the plain name", w.Event)
 	}
@@ -39,7 +40,7 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	if err := w.Marsad.Validate(); err != nil {
 		t.Fatalf("envelope invalid: %v", err)
 	}
-	if w.Marsad.Kind != "heartbeat.missed" || w.Marsad.Title != m.Subject || w.Marsad.Body != m.Body {
+	if w.Marsad.Kind != "heartbeat.missed" || w.Marsad.Title != w.Subject || w.Marsad.Body != w.Body {
 		t.Fatalf("envelope = %+v, want kind heartbeat.missed carrying the subject and body", w.Marsad)
 	}
 	if string(w.Marsad.Data) != `{"heartbeat":"db-backup"}` || w.Marsad.DedupKey != "heartbeat.missed:db-backup@"+itoa(at.UnixNano()) {
@@ -52,7 +53,7 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := json.Marshal(map[string]any{"subject": m.Subject, "body": m.Body, "event": ev})
+	want, err := json.Marshal(map[string]any{"subject": w.Subject, "body": w.Body, "event": ev})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +64,12 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 
 // TestHeartbeatFailureWithoutExitStatusOrOutput: /fail with no body.
 func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
-	m := messageFor(heartbeat.FailedEvent(1, 4, "sync", nil, ""), "primary")
-	if m.Subject != "Heartbeat failed: sync" {
-		t.Fatalf("subject = %q", m.Subject)
+	w := messageFor(heartbeat.FailedEvent(1, 4, "sync", nil, ""), "primary").Webhook.(event.TendWebhook)
+	if w.Subject != "Heartbeat failed: sync" {
+		t.Fatalf("subject = %q", w.Subject)
 	}
-	if m.Body != "sync reported a failure" {
-		t.Fatalf("body = %q", m.Body)
+	if w.Body != "sync reported a failure" {
+		t.Fatalf("body = %q", w.Body)
 	}
 }
 
@@ -76,22 +77,24 @@ func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
 // its grace.
 func TestHeartbeatOverranSaysSo(t *testing.T) {
 	at := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	m := messageFor(heartbeat.OverranEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "sync", GraceSeconds: 300, StartedAt: at}), "primary")
-	if m.Subject != "Heartbeat missed: sync (run did not finish)" {
-		t.Fatalf("subject = %q", m.Subject)
+	w := messageFor(heartbeat.OverranEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "sync", GraceSeconds: 300, StartedAt: at}), "primary").Webhook.(event.TendWebhook)
+	if w.Subject != "Heartbeat missed: sync (run did not finish)" {
+		t.Fatalf("subject = %q", w.Subject)
 	}
-	if m.Body != "sync started a run at 2026-10-20T10:00:00Z that did not finish within 5m0s" {
-		t.Fatalf("body = %q", m.Body)
+	if w.Body != "sync started a run at 2026-10-20T10:00:00Z that did not finish within 5m0s" {
+		t.Fatalf("body = %q", w.Body)
 	}
 }
 
-// TestPlainHeartbeatMissUnchanged: without a detail (the watcher's miss, and
-// every event stored before details existed) the text is what it always was.
+// TestPlainHeartbeatMissUnchanged: for a plain miss (the watcher's, with the
+// last ping, period and grace in its detail, and every event stored before
+// misses had one) the webhook's text is what it always was.
 func TestPlainHeartbeatMissUnchanged(t *testing.T) {
-	for _, detail := range []string{"", "junk", `{"reason":"something-new"}`} {
-		m := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup", Detail: detail}, "primary")
-		if m.Subject != "Heartbeat missed: db-backup" || m.Body != "db-backup" {
-			t.Errorf("detail %q: subject %q body %q, want the plain miss", detail, m.Subject, m.Body)
+	for _, detail := range []string{"", "junk", `{"reason":"something-new"}`,
+		`{"reason":"missed","heartbeat_id":4,"last_seen_at":"2026-10-20T03:00:00Z","period_seconds":86400,"grace_seconds":3600}`} {
+		w := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup", Detail: detail}, "primary").Webhook.(event.TendWebhook)
+		if w.Subject != "Heartbeat missed: db-backup" || w.Body != "db-backup" {
+			t.Errorf("detail %q: subject %q body %q, want the plain miss", detail, w.Subject, w.Body)
 		}
 	}
 }

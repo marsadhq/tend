@@ -167,7 +167,7 @@ func TestWebhookEnvelopeLeftOutWhenItCannotBeBuilt(t *testing.T) {
 				t.Fatalf("envelope = %+v, want none", w.Marsad)
 			}
 			got := postedWebhookBody(t, ev)
-			want, err := json.Marshal(map[string]any{"subject": m.Subject, "body": m.Body, "event": ev})
+			want, err := json.Marshal(legacyFields(ev))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,6 +176,13 @@ func TestWebhookEnvelopeLeftOutWhenItCannotBeBuilt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// legacyFields is the webhook body Tend has always posted for ev, as a map:
+// render's subject and body (never the chat text) around the stored event.
+func legacyFields(ev core.Event) map[string]any {
+	subject, body := render(ev)
+	return map[string]any{"subject": subject, "body": body, "event": ev}
 }
 
 // TestWebhookBodyIsTheLegacyEncoding: the webhook body is exactly what Tend's
@@ -203,7 +210,7 @@ func TestWebhookBodyIsTheLegacyEncoding(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
-		want, err := json.Marshal(map[string]any{"subject": m.Subject, "body": m.Body, "event": ev})
+		want, err := json.Marshal(legacyFields(ev))
 		if err != nil {
 			t.Fatalf("marshal legacy: %v", err)
 		}
