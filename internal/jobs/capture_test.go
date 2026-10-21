@@ -142,3 +142,15 @@ func TestCapturesDropNULs(t *testing.T) {
 		t.Errorf("headTail kept %q, want abcd", got)
 	}
 }
+
+// Secrets that overlap redact the same way whatever order they come in (the
+// job's env is a map): the longest first.
+func TestRedactLongestFirst(t *testing.T) {
+	const a, b = "SECRETAB", "TABLE_KEY_LONGER"
+	text := "key=SECRETABLE_KEY_LONGER"
+	for _, order := range [][]string{{a, b}, {b, a}} {
+		if got := redact(text, order); got != "key=SECRE***" {
+			t.Errorf("redact(%q, %q) = %q, want key=SECRE***", text, order, got)
+		}
+	}
+}
