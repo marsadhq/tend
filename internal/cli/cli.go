@@ -867,6 +867,21 @@ func cmdJobAdd(ctx context.Context, st store.Store, orgID int64, args []string, 
 		}
 	case "tls", "domain", "expiry", "drill":
 		jt = jobs.JobType(*typ)
+		// Refused rather than ignored, as by tend sync: an older Tend that
+		// does not know the type would run the job's command.
+		if *command != "" {
+			hint := ""
+			switch jt {
+			case jobs.Expiry:
+				hint = "; use -expiry-command"
+			case jobs.Drill:
+				hint = "; use -restore, -check and -cleanup"
+			}
+			return fmt.Errorf("job add: -command is not used by %s jobs%s", jt, hint)
+		}
+		if *httpURL != "" {
+			return fmt.Errorf("job add: -url is not used by %s jobs", jt)
+		}
 	default:
 		return fmt.Errorf("job add: unknown type %q (shell, http, tls, domain, expiry or drill)", *typ)
 	}

@@ -114,6 +114,9 @@ func TestJobAddRefusesBadProbes(t *testing.T) {
 		{[]string{"-type", "drill", "-restore", "true", "-scratch-dir", "tmp"}, "scratch_dir"},
 		{[]string{"-type", "drill", "-restore", "true", "-max-duration", "-1"}, "max_duration"},
 		{[]string{"-type", "ftp"}, "unknown type"},
+		{[]string{"-type", "drill", "-restore", "true", "-command", `cp x "$TEND_SCRATCH"`}, "-command is not used by drill jobs"},
+		{[]string{"-type", "expiry", "-expires-at", "2027-01-31", "-command", "date"}, "-expiry-command"},
+		{[]string{"-type", "tls", "-host", "example.com", "-url", "https://example.com"}, "-url is not used by tls jobs"},
 	}
 	for _, c := range cases {
 		dsn := filepath.Join(t.TempDir(), "tend.db")
