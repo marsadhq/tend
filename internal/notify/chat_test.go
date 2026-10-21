@@ -306,3 +306,13 @@ func TestChatTextLeadsWithTheVerdict(t *testing.T) {
 		}
 	}
 }
+
+// An http job's failure names the response's status in the subject.
+func TestChatTextSaysTheHTTPStatus(t *testing.T) {
+	ev := core.Event{Type: "run.failed",
+		Payload: `{"run_id":5,"job_id":2,"job_name":"api-health","status":"failed","exit_code":503}`,
+		Detail:  `{"http_status":503}`}
+	if m := messageFor(ev, "primary", chat10); m.Subject != "Job failed: api-health (HTTP 503)" || m.Body != "" {
+		t.Errorf("subject %q body %q", m.Subject, m.Body)
+	}
+}
