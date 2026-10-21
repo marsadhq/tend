@@ -37,26 +37,26 @@
   <h2 class="section-title">Recent pings</h2>
   {{if .Pings}}
   <div class="table-scroll">
-  <table class="grid-table pings-table">
-    <thead>
-      <tr>
-        <th>Kind</th>
-        <th>Exit</th>
-        <th>Took</th>
-        <th>Run</th>
-        <th>Logged</th>
-        <th class="col-status">When</th>
+  <table role="table" class="grid-table pings-table">
+    <thead role="rowgroup">
+      <tr role="row">
+        <th role="columnheader">Kind</th>
+        <th role="columnheader">Exit</th>
+        <th role="columnheader">Took</th>
+        <th role="columnheader">Run</th>
+        <th role="columnheader">Logged</th>
+        <th role="columnheader" class="col-status">When</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody role="rowgroup">
       {{range .Pings}}
-      <tr>
-        <td><span class="pill {{.Class}}">{{.Kind}}</span></td>
-        <td class="cell-mono">{{.Exit}}</td>
-        <td class="cell-mono cell-muted"{{if .Duration}} data-label="Took"{{end}}>{{.Duration}}</td>
-        <td class="cell-mono cell-muted"{{if .RID}} data-label="Run"{{end}}>{{.RID}}</td>
-        <td class="cell-mono cell-log">{{if .Body}}<details><summary>{{.BodySize}}</summary><pre class="output">{{.Body}}</pre></details>{{end}}</td>
-        <td class="col-status cell-mono cell-muted cell-when">{{.When}}</td>
+      <tr role="row">
+        <td role="cell"><span class="pill {{.Class}}">{{.Kind}}</span></td>
+        <td role="cell" class="cell-mono">{{.Exit}}</td>
+        <td role="cell" class="cell-mono cell-muted"{{if .Duration}} data-label="Took"{{end}}>{{.Duration}}</td>
+        <td role="cell" class="cell-mono cell-muted"{{if .RID}} data-label="Run"{{end}}>{{.RID}}</td>
+        <td role="cell" class="cell-mono cell-log">{{if .Body}}<details><summary>{{.BodySize}}</summary><pre class="output">{{.Body}}</pre></details>{{end}}</td>
+        <td role="cell" class="col-status cell-mono cell-muted cell-when">{{.When}}</td>
       </tr>
       {{end}}
     </tbody>
@@ -74,20 +74,20 @@
   <h2 class="section-title">Transitions</h2>
   {{if .Transitions}}
   <div class="table-scroll">
-  <table class="grid-table event-table">
-    <thead>
-      <tr>
-        <th>Type</th>
-        <th>Detail</th>
-        <th class="col-status">When</th>
+  <table role="table" class="grid-table event-table">
+    <thead role="rowgroup">
+      <tr role="row">
+        <th role="columnheader">Type</th>
+        <th role="columnheader">Detail</th>
+        <th role="columnheader" class="col-status">When</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody role="rowgroup">
       {{range .Transitions}}
-      <tr class="{{if .IsAlert}}is-alert{{end}}">
-        <td><span class="pill {{.Class}}">{{.Type}}</span></td>
-        <td class="cell-mono cell-payload">{{.Subject}}</td>
-        <td class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
+      <tr role="row" class="{{if .IsAlert}}is-alert{{end}}">
+        <td role="cell"><span class="pill {{.Class}}">{{.Type}}</span></td>
+        <td role="cell" class="cell-mono cell-payload">{{.Subject}}</td>
+        <td role="cell" class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
       </tr>
       {{end}}
     </tbody>

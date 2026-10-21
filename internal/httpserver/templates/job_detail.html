@@ -41,24 +41,24 @@
   <h2 class="section-title">Recent runs</h2>
   {{if .Runs}}
   <div class="table-scroll">
-  <table class="grid-table runs-table">
-    <thead>
-      <tr>
-        <th>Run</th>
-        <th>Status</th>
-        <th>Attempt</th>
-        <th>Exit</th>
-        <th class="col-status">Started</th>
+  <table role="table" class="grid-table runs-table">
+    <thead role="rowgroup">
+      <tr role="row">
+        <th role="columnheader">Run</th>
+        <th role="columnheader">Status</th>
+        <th role="columnheader">Attempt</th>
+        <th role="columnheader">Exit</th>
+        <th role="columnheader" class="col-status">Started</th>
       </tr>
     </thead>
-    <tbody>
+    <tbody role="rowgroup">
       {{range .Runs}}
-      <tr class="row-link" data-href="/runs/{{.ID}}">
-        <td class="cell-name"><a href="/runs/{{.ID}}">#{{.ID}}</a></td>
-        <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
-        <td class="cell-mono" data-label="Attempt">{{.Attempt}}</td>
-        <td class="cell-mono" data-label="Exit">{{.ExitCode}}</td>
-        <td class="col-status cell-mono cell-muted cell-when">{{.Started}}</td>
+      <tr role="row" class="row-link" data-href="/runs/{{.ID}}">
+        <td role="cell" class="cell-name"><a href="/runs/{{.ID}}">#{{.ID}}</a></td>
+        <td role="cell"><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
+        <td role="cell" class="cell-mono" data-label="Attempt">{{.Attempt}}</td>
+        <td role="cell" class="cell-mono" data-label="Exit">{{.ExitCode}}</td>
+        <td role="cell" class="col-status cell-mono cell-muted cell-when">{{.Started}}</td>
       </tr>
       {{end}}
     </tbody>

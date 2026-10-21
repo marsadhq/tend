@@ -12,24 +12,24 @@
      seen reach the page. */}}
 {{if .Heartbeats}}
 <div class="table-scroll">
-<table class="grid-table heartbeats-table">
-  <thead>
-    <tr>
-      <th>Monitor</th>
-      <th>Status</th>
-      <th>Period</th>
-      <th>Grace</th>
-      <th class="col-status">Last ping</th>
+<table role="table" class="grid-table heartbeats-table">
+  <thead role="rowgroup">
+    <tr role="row">
+      <th role="columnheader">Monitor</th>
+      <th role="columnheader">Status</th>
+      <th role="columnheader">Period</th>
+      <th role="columnheader">Grace</th>
+      <th role="columnheader" class="col-status">Last ping</th>
     </tr>
   </thead>
-  <tbody>
+  <tbody role="rowgroup">
     {{range .Heartbeats}}
-    <tr class="row-link" data-href="/heartbeats/{{.ID}}">
-      <td class="cell-name"><a href="/heartbeats/{{.ID}}">{{.Name}}</a></td>
-      <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
-      <td class="cell-mono cell-muted" data-label="Period">{{.Period}}</td>
-      <td class="cell-mono cell-muted" data-label="Grace">{{.Grace}}</td>
-      <td class="col-status cell-mono cell-muted cell-when" data-label="Last ping">{{.LastSeen}}</td>
+    <tr role="row" class="row-link" data-href="/heartbeats/{{.ID}}">
+      <td role="cell" class="cell-name"><a href="/heartbeats/{{.ID}}">{{.Name}}</a></td>
+      <td role="cell"><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
+      <td role="cell" class="cell-mono cell-muted" data-label="Period">{{.Period}}</td>
+      <td role="cell" class="cell-mono cell-muted" data-label="Grace">{{.Grace}}</td>
+      <td role="cell" class="col-status cell-mono cell-muted cell-when" data-label="Last ping">{{.LastSeen}}</td>
     </tr>
     {{end}}
   </tbody>
