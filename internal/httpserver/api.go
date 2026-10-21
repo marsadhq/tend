@@ -311,9 +311,12 @@ type eventDTO struct {
 	Source    string          `json:"source"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
-	// Detail says more about what happened, when the event has one (why a
-	// heartbeat went down: a failure ping's exit status and output tail, or
-	// a run that did not finish).
+	// Detail says more about what happened, when the event has one: for a
+	// run.failed its verdict (a probe's or drill's opening lines), the tail
+	// of its output (up to 50 lines and 1000 bytes, redacted), whether that
+	// tail is from before the 1 MiB cut, the timeout it hit and an http
+	// job's status (jobs.FailureDetail); for a heartbeat event the
+	// heartbeat's id and why it went down (heartbeat.MissDetail).
 	Detail json.RawMessage `json:"detail,omitempty"`
 }
 

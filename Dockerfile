@@ -17,7 +17,8 @@
 #                    without it: alerts, dashboard and secrets depend on it).
 #                    Generate: head -c 32 /dev/urandom | base64
 #   TEND_ADDR        Listen address (default: :8080)
-#   TEND_BASE_URL    Externally-reachable base URL (used in heartbeat ping URLs)
+#   TEND_BASE_URL    Externally-reachable base URL (used in heartbeat ping URLs,
+#                    and when set, for links to runs and heartbeats in alerts)
 #
 # Data volume:
 #   /data is the default SQLite data directory; mount a named volume or bind
