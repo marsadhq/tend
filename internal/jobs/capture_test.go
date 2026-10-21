@@ -143,14 +143,87 @@ func TestCapturesDropNULs(t *testing.T) {
 	}
 }
 
-// Secrets that overlap redact the same way whatever order they come in (the
-// job's env is a map): the longest first.
-func TestRedactLongestFirst(t *testing.T) {
-	const a, b = "SECRETAB", "TABLE_KEY_LONGER"
-	text := "key=SECRETABLE_KEY_LONGER"
-	for _, order := range [][]string{{a, b}, {b, a}} {
-		if got := redact(text, order); got != "key=SECRE***" {
-			t.Errorf("redact(%q, %q) = %q, want key=SECRE***", text, order, got)
+// Secrets that overlap in the text are redacted together, whatever order
+// they come in (the job's env is a map): every byte any of them covers goes,
+// and a run of covered bytes becomes one "***".
+func TestRedactOverlappingSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		text    string
+		secrets []string
+		want    string
+	}{
+		{"key=SECRETABLE_KEY_LONGER", []string{"SECRETAB", "TABLE_KEY_LONGER"}, "key=***"},
+		{"x ACDEFGHJKLNPQRST y", []string{"ACDEFGHJKL", "HJKLNPQRST"}, "x *** y"},
+		{"TOKENTOKEN and TOKEN", []string{"TOKEN"}, "*** and ***"},
+		{"aaaa", []string{"aa"}, "***"},
+		{"no secret here", []string{"TOKEN", ""}, "no secret here"},
+	} {
+		for _, order := range [][]string{tc.secrets, reversed(tc.secrets)} {
+			if got := redact(tc.text, order); got != tc.want {
+				t.Errorf("redact(%q, %q) = %q, want %q", tc.text, order, got, tc.want)
+			}
+		}
+	}
+}
+
+func reversed(s []string) []string {
+	out := make([]string, len(s))
+	for i, v := range s {
+		out[len(s)-1-i] = v
+	}
+	return out
+}
+
+// redactByMask is redact done the slow, obvious way: mark every byte any
+// secret covers, then turn each run of marked bytes into "***".
+func redactByMask(s string, secrets []string) string {
+	covered := make([]bool, len(s))
+	for _, v := range secrets {
+		if v == "" {
+			continue
+		}
+		for i := 0; i+len(v) <= len(s); i++ {
+			if s[i:i+len(v)] == v {
+				for j := i; j < i+len(v); j++ {
+					covered[j] = true
+				}
+			}
+		}
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if !covered[i] {
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteString("***")
+		for i+1 < len(s) && covered[i+1] {
+			i++
+		}
+	}
+	return b.String()
+}
+
+// TestRedactFuzz checks redact against redactByMask on random texts full of
+// random secrets that overlap, repeat and contain one another.
+func TestRedactFuzz(t *testing.T) {
+	for seed := int64(0); seed < 3000; seed++ {
+		r := rand.New(rand.NewSource(seed))
+		alphabet := "ABCD"[:2+r.Intn(3)]
+		word := func(n int) string {
+			b := make([]byte, n)
+			for i := range b {
+				b[i] = alphabet[r.Intn(len(alphabet))]
+			}
+			return string(b)
+		}
+		var secrets []string
+		for i := 0; i < 1+r.Intn(4); i++ {
+			secrets = append(secrets, word(1+r.Intn(6)))
+		}
+		text := word(r.Intn(80))
+		if got, want := redact(text, secrets), redactByMask(text, secrets); got != want {
+			t.Fatalf("seed %d: redact(%q, %q) = %q, want %q", seed, text, secrets, got, want)
 		}
 	}
 }
@@ -175,7 +248,7 @@ func TestHeadOfKeepsASecretEndingInPartOfACharacter(t *testing.T) {
 // than "***" makes the text longer, and then it is held to its size. That cut
 // is marked like any other.
 func TestCutRedactedMarksACutAfterRedacting(t *testing.T) {
-	b := []byte(strings.Repeat("ab", maxExpiryStderr/2)) // 16384 bytes, nothing lost
+	b := []byte(strings.Repeat("ab ", maxExpiryStderr/3)) // 16383 bytes, nothing lost
 	got := cutRedacted(b, false, maxExpiryStderr, []string{"ab"}, "\n... [stderr truncated]")
 	if !strings.HasSuffix(got, "\n... [stderr truncated]") || len(got) != maxExpiryStderr+len("\n... [stderr truncated]") {
 		t.Errorf("got %d bytes ending %q, want %d bytes and the marker", len(got), got[max(0, len(got)-30):], maxExpiryStderr)

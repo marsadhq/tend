@@ -843,24 +843,46 @@ func capOutput(s string) string {
 // literal substring replacement; it will NOT catch secret values the job
 // re-encodes (base64, URL-encode, JSON) before printing - accepted v1 limitation.
 //
-// The longest secrets are redacted first (and secrets of one length in
-// order), so that secrets which overlap in the text are redacted the same way
-// whatever order they come in: a job's env is a map.
+// Every byte any secret covers goes, and each run of covered bytes becomes one
+// "***": secrets that overlap in the text (neither containing the other) are
+// redacted together, whatever order they come in (a job's env is a map), and
+// a secret printed twice in a row is one "***".
 func redact(s string, secretValues []string) string {
-	vs := slices.Clone(secretValues)
-	slices.SortFunc(vs, func(a, b string) int {
-		if len(a) != len(b) {
-			return len(b) - len(a)
-		}
-		return strings.Compare(a, b)
-	})
-	for _, v := range vs {
+	var spans [][2]int // the bytes covered, as [start, end) runs
+	for _, v := range secretValues {
 		if v == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, v, "***")
+		for i := 0; ; {
+			j := strings.Index(s[i:], v)
+			if j < 0 {
+				break
+			}
+			start, end := i+j, i+j+len(v)
+			if n := len(spans); n > 0 && spans[n-1][1] >= start && spans[n-1][0] <= start {
+				spans[n-1][1] = max(spans[n-1][1], end) // overlaps the last match of this secret
+			} else {
+				spans = append(spans, [2]int{start, end})
+			}
+			i = start + 1
+		}
 	}
-	return s
+	if len(spans) == 0 {
+		return s
+	}
+	slices.SortFunc(spans, func(a, b [2]int) int { return a[0] - b[0] })
+	var b strings.Builder
+	last, cur := 0, spans[0]
+	for _, sp := range spans[1:] {
+		if sp[0] <= cur[1] {
+			cur[1] = max(cur[1], sp[1])
+			continue
+		}
+		b.WriteString(s[last:cur[0]] + "***")
+		last, cur = cur[1], sp
+	}
+	b.WriteString(s[last:cur[0]] + "***" + s[cur[1]:])
+	return b.String()
 }
 
 // buildEvent constructs a run.* lifecycle core.Event with the standard small
