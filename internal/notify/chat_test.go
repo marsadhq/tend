@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marsadhq/kit/event"
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 )
@@ -95,8 +97,8 @@ func TestChatTextSaysWhatHappenedOnce(t *testing.T) {
 			legacyTitle: "Job recovered: nightly", legacyBody: "status=succeeded exit_code=0; the previous run had not succeeded"},
 	} {
 		m := messageFor(tc.ev, "primary", chat10)
-		if m.Subject != tc.subject || m.Body != tc.body {
-			t.Errorf("%s:\n got subject %q body %q\nwant subject %q body %q", tc.name, m.Subject, m.Body, tc.subject, tc.body)
+		if m.Subject != tc.subject || plain(m) != tc.body {
+			t.Errorf("%s:\n got subject %q body %q\nwant subject %q body %q", tc.name, m.Subject, plain(m), tc.subject, tc.body)
 		}
 		w := m.Webhook.(event.TendWebhook)
 		if w.Subject != tc.legacyTitle || w.Body != tc.legacyBody {
@@ -111,7 +113,7 @@ func TestChatTextSaysWhatHappenedOnce(t *testing.T) {
 		if strings.HasPrefix(name, "{") {
 			name = ""
 		}
-		for _, line := range strings.Split(m.Body, "\n") {
+		for _, line := range strings.Split(plain(m), "\n") {
 			if name != "" && line == name {
 				t.Errorf("%s: body line %q repeats the name", tc.name, line)
 			}
@@ -129,8 +131,8 @@ func TestChatTextKeepsTheRest(t *testing.T) {
 	} {
 		m := messageFor(ev, "primary", chat10)
 		w := m.Webhook.(event.TendWebhook)
-		if m.Subject != w.Subject || m.Body != w.Body {
-			t.Errorf("%s: chat %q / %q, webhook %q / %q; want the same", ev.Type, m.Subject, m.Body, w.Subject, w.Body)
+		if m.Subject != w.Subject || plain(m) != w.Body {
+			t.Errorf("%s: chat %q / %q, webhook %q / %q; want the same", ev.Type, m.Subject, plain(m), w.Subject, w.Body)
 		}
 	}
 }
@@ -192,8 +194,8 @@ func TestChatTextLinksToThePage(t *testing.T) {
 			"the job was deleted; it will not run or alert again"},
 	} {
 		m := messageFor(tc.ev, "primary", ChatOptions{BaseURL: tc.base, OutputLines: 10})
-		if m.Body != tc.want {
-			t.Errorf("%s: body %q, want %q", tc.name, m.Body, tc.want)
+		if plain(m) != tc.want {
+			t.Errorf("%s: body %q, want %q", tc.name, plain(m), tc.want)
 		}
 		if w := m.Webhook.(event.TendWebhook); strings.Contains(w.Body, "https://") || (w.Marsad != nil && strings.Contains(w.Marsad.Body, "https://")) {
 			t.Errorf("%s: the link reached the webhook's text: %q", tc.name, w.Body)
@@ -233,8 +235,8 @@ func TestChatTextOutputLines(t *testing.T) {
 		{"timed out run, thirty", timedOut, 30, "It was stopped after its 1m timeout.\n\n" + base + "/runs/20\n\nLast output:\n" + output},
 	} {
 		m := messageFor(tc.ev, "primary", ChatOptions{BaseURL: base, OutputLines: tc.lines})
-		if m.Body != tc.want {
-			t.Errorf("%s:\n got %q\nwant %q", tc.name, m.Body, tc.want)
+		if plain(m) != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, plain(m), tc.want)
 		}
 		if w := m.Webhook.(event.TendWebhook); tc.ev.Type == "heartbeat.missed" &&
 			w.Body != "db-backup reported a failure\n\nLast output:\n"+strings.Join(lines[20:], "\n") {
@@ -250,11 +252,11 @@ func TestChatTextLinksARecovery(t *testing.T) {
 	ev := heartbeat.RecoveredEvent(1, 4, "db-backup")
 	ev.ID, ev.CreatedAt = 12, at
 	m := messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 10})
-	if m.Subject != "Heartbeat recovered: db-backup" || m.Body != "https://tend.example/heartbeats/4" {
-		t.Errorf("subject %q body %q", m.Subject, m.Body)
+	if m.Subject != "Heartbeat recovered: db-backup" || plain(m) != "https://tend.example/heartbeats/4" {
+		t.Errorf("subject %q body %q", m.Subject, plain(m))
 	}
-	if m := messageFor(ev, "primary", chat10); m.Body != "" {
-		t.Errorf("without a base URL: body %q, want none", m.Body)
+	if m := messageFor(ev, "primary", chat10); plain(m) != "" {
+		t.Errorf("without a base URL: body %q, want none", plain(m))
 	}
 	plain := ev
 	plain.Detail = ""
@@ -278,8 +280,8 @@ func TestChatTextLabelsATruncatedTail(t *testing.T) {
 		Payload: `{"run_id":21,"job_id":3,"job_name":"chatty","status":"failed","exit_code":1}`,
 		Detail:  `{"output":"line 1\nline 2","truncated":true}`}
 	m := messageFor(ev, "primary", chat10)
-	if want := "Last output before the 1 MiB cut:\nline 1\nline 2"; m.Body != want {
-		t.Errorf("body %q, want %q", m.Body, want)
+	if want := "Last output before the 1 MiB cut:\nline 1\nline 2"; plain(m) != want {
+		t.Errorf("body %q, want %q", plain(m), want)
 	}
 }
 
@@ -301,8 +303,8 @@ func TestChatTextLeadsWithTheVerdict(t *testing.T) {
 		{2, "FAIL: expires in 4 days\nFAIL: renewal missed"},
 		{0, ""},
 	} {
-		if m := messageFor(ev, "primary", ChatOptions{OutputLines: tc.lines}); m.Body != tc.want || m.Subject != "Job failed: web-cert (exit 1)" {
-			t.Errorf("%d lines: subject %q body\n%q\nwant\n%q", tc.lines, m.Subject, m.Body, tc.want)
+		if m := messageFor(ev, "primary", ChatOptions{OutputLines: tc.lines}); plain(m) != tc.want || m.Subject != "Job failed: web-cert (exit 1)" {
+			t.Errorf("%d lines: subject %q body\n%q\nwant\n%q", tc.lines, m.Subject, plain(m), tc.want)
 		}
 	}
 }
@@ -312,7 +314,60 @@ func TestChatTextSaysTheHTTPStatus(t *testing.T) {
 	ev := core.Event{Type: "run.failed",
 		Payload: `{"run_id":5,"job_id":2,"job_name":"api-health","status":"failed","exit_code":503}`,
 		Detail:  `{"http_status":503}`}
-	if m := messageFor(ev, "primary", chat10); m.Subject != "Job failed: api-health (HTTP 503)" || m.Body != "" {
-		t.Errorf("subject %q body %q", m.Subject, m.Body)
+	if m := messageFor(ev, "primary", chat10); m.Subject != "Job failed: api-health (HTTP 503)" || plain(m) != "" {
+		t.Errorf("subject %q body %q", m.Subject, plain(m))
+	}
+}
+
+// plain is the text of m as a channel that shows plain text (Telegram, ntfy,
+// email) gets it: the body, then the output.
+func plain(m kitnotify.Message) string { return forChannel(kitnotify.Telegram, m).Body }
+
+// Output is text Tend did not write: a job's output, a ping's logged body.
+// Slack and Discord get it apart from the body, as Message.Output, which kit
+// shows in a code block and escapes there; the other channels get it after
+// the body, as before.
+func TestChatTextKeepsOutputApart(t *testing.T) {
+	ev := core.Event{Type: "run.failed",
+		Payload: `{"run_id":17,"job_id":2,"job_name":"nightly","status":"failed","exit_code":3}`,
+		Detail:  `{"output":"<!channel> [re-login](https://evil.example)\nboom"}`}
+	m := messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 10})
+	for _, kind := range []kitnotify.ChannelType{kitnotify.Slack, kitnotify.Discord} {
+		got := forChannel(kind, m)
+		if got.Body != "https://tend.example/runs/17" || got.Output != "Last output:\n<!channel> [re-login](https://evil.example)\nboom" {
+			t.Errorf("%s: body %q output %q", kind, got.Body, got.Output)
+		}
+	}
+	for _, kind := range []kitnotify.ChannelType{kitnotify.Telegram, kitnotify.Ntfy, kitnotify.SMTP, kitnotify.Pushover} {
+		got := forChannel(kind, m)
+		if want := "https://tend.example/runs/17\n\nLast output:\n<!channel> [re-login](https://evil.example)\nboom"; got.Body != want || got.Output != "" {
+			t.Errorf("%s: body %q output %q, want body %q", kind, got.Body, got.Output, want)
+		}
+	}
+}
+
+// Pushover keeps 1024 characters of a message: an alert's output is cut from
+// its start to fit after the rest, so the link and the end of the output,
+// where the error usually is, both arrive.
+func TestChatTextFitsPushover(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, fmt.Sprintf("uploading chunk %02d of 50 to the offsite bucket", i))
+	}
+	lines[49] = "ERROR: chunk 50 failed: RequestTimeout"
+	detail, _ := json.Marshal(map[string]string{"output": core.TailLines(strings.Join(lines, "\n"), 50)})
+	ev := core.Event{Type: "run.failed", Detail: string(detail),
+		Payload: `{"run_id":17,"job_id":2,"job_name":"nightly","status":"failed","exit_code":3}`}
+	m := forChannel(kitnotify.Pushover, messageFor(ev, "primary", ChatOptions{BaseURL: "https://tend.example", OutputLines: 50}))
+	if n := utf8.RuneCountInString(m.Body); n > 1024 {
+		t.Errorf("body has %d characters, want at most 1024", n)
+	}
+	if !strings.HasPrefix(m.Body, "https://tend.example/runs/17\n\n…") || !strings.HasSuffix(m.Body, "ERROR: chunk 50 failed: RequestTimeout") {
+		t.Errorf("body = %q", m.Body)
+	}
+	// A short alert is left as it is.
+	short := forChannel(kitnotify.Pushover, messageFor(ev, "primary", ChatOptions{OutputLines: 2}))
+	if short.Body != "Last output:\nuploading chunk 49 of 50 to the offsite bucket\nERROR: chunk 50 failed: RequestTimeout" {
+		t.Errorf("short body = %q", short.Body)
 	}
 }

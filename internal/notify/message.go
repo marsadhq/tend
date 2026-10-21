@@ -93,10 +93,11 @@ func EventJobID(ev core.Event) int64 {
 func messageFor(ev core.Event, instance string, chat ChatOptions) kitnotify.Message {
 	subject, body := render(ev)
 	env := envelope(ev, subject, body, instance)
-	chatSubject, chatBody := chatText(ev, chat)
+	chatSubject, chatBody, output := chatText(ev, chat)
 	return kitnotify.Message{
 		Subject: chatSubject,
 		Body:    chatBody,
+		Output:  output,
 		Event:   env,
 		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev), Marsad: env},
 	}
