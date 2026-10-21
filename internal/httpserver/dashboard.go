@@ -168,6 +168,9 @@ type runView struct {
 	Started     string
 	Ended       string
 	Output      string
+	// LongOutput is set when the output runs past a screen or so; the page
+	// then links to its end, where a failed run's error usually is.
+	LongOutput bool
 }
 
 // heartbeatsPage backs the heartbeats list page.
@@ -365,6 +368,13 @@ func toRunRow(r jobs.Run) runRow {
 	}
 }
 
+// A run's output is long, and its page links to its end, from this many lines
+// or more than this many bytes (one line that wraps many times on a phone).
+const (
+	longOutputLines = 30
+	longOutputBytes = 4096
+)
+
 func toRunView(r jobs.Run) runView {
 	return runView{
 		ID:          r.ID,
@@ -376,6 +386,7 @@ func toRunView(r jobs.Run) runView {
 		Started:     fmtTime(r.StartedAt),
 		Ended:       fmtTime(r.EndedAt),
 		Output:      r.Output,
+		LongOutput:  strings.Count(r.Output, "\n") >= longOutputLines || len(r.Output) > longOutputBytes,
 	}
 }
 

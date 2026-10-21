@@ -271,6 +271,19 @@ a { color: inherit; text-decoration: none; }
   margin: 0 0 16px;
 }
 
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.output-jump {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+.output-jump:hover { text-decoration: underline; }
+
 .output {
   font-family: var(--mono);
   font-size: 13px;
@@ -451,7 +464,8 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
 @media (pointer: coarse) {
   .btn-action,
   .btn-ghost { min-height: 44px; }
-  .nav-link { display: inline-flex; align-items: center; min-height: 44px; }
+  .nav-link,
+  .output-jump { display: inline-flex; align-items: center; min-height: 44px; }
 }
 
 /* --- phones ---------------------------------------------------------------- */
@@ -545,7 +559,8 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .btn-action { min-height: 44px; padding: 0 14px; font-size: 13px; }
   .crumbs { display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; margin-bottom: 10px; }
   .crumbs a,
-  .jobs-poll-toggle a { display: inline-flex; align-items: center; min-height: 44px; }
+  .jobs-poll-toggle a,
+  .output-jump { display: inline-flex; align-items: center; min-height: 44px; }
   .pings-table summary { padding: 12px 0; cursor: pointer; }
 
   /* Output scrolls with the page, not in a box of its own: one scroll is
