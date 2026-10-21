@@ -121,6 +121,7 @@ type runFailure struct {
 	Output         string `json:"output"`
 	Truncated      bool   `json:"truncated"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
+	HTTPStatus     int    `json:"http_status"`
 }
 
 // chatRunFailed says which job failed and how: its exit code in the subject,
@@ -144,7 +145,11 @@ func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	if p.JobName != "" {
 		subject += ": " + p.JobName
 	}
-	if p.Status != "timed_out" && p.ExitCode > 0 {
+	switch {
+	case p.Status == "timed_out":
+	case d.HTTPStatus > 0:
+		subject += fmt.Sprintf(" (HTTP %d)", d.HTTPStatus)
+	case p.ExitCode > 0:
 		subject += fmt.Sprintf(" (exit %d)", p.ExitCode)
 	}
 	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {

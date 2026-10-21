@@ -30,12 +30,21 @@ type FailureDetail struct {
 	Truncated bool `json:"truncated,omitempty"`
 	// TimeoutSeconds is the per-attempt timeout a timed-out run reached.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// HTTPStatus is the status of the response an http job got, which is
+	// also its exit code. Its response body is not in Output: a server can
+	// echo the request, a token in the URL's path or query included. The
+	// error of a request that got no response is, naming only the host.
+	HTTPStatus int `json:"http_status,omitempty"`
 }
 
 // failureDetail is the Detail of the run.failed of a run of job that ended in
-// status with the stored output out, or "" when there is nothing to say.
-func failureDetail(job Job, status RunStatus, out string) string {
+// status with exitCode and the stored output out, or "" when there is nothing
+// to say.
+func failureDetail(job Job, status RunStatus, exitCode int, out string) string {
 	var d FailureDetail
+	if job.Type == HTTP && strings.HasPrefix(out, "HTTP ") {
+		d.HTTPStatus, out = exitCode, ""
+	}
 	if body, cut := strings.CutSuffix(out, truncationMarker); cut {
 		// The cut can fall inside anything, part of a secret printed in a
 		// form redaction does not recognise included: its line stays out.
