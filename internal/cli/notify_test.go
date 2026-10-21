@@ -274,12 +274,14 @@ func TestRunAlertLinksToTheRun(t *testing.T) {
 	for _, tc := range []struct {
 		name, base, wantLink, wantWarning string
 	}{
-		{"with a base URL", "https://tend.example/", "https://tend.example/runs/1\n\n", ""},
+		{"with a base URL", "https://tend.example/", "https://tend.example/runs/1", ""},
 		{"with a bad base URL", "tend.example", "", "TEND_BASE_URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			text, stderr := failedRunAlert(t, map[string]string{"TEND_BASE_URL": tc.base})
-			want := "Job failed: backup (exit 3)\n" + tc.wantLink + "Last output:\nuploading\nUploadError: chunk 41"
+			// Slack gets the output in a code block, apart from the text
+			// Tend wrote.
+			want := "Job failed: backup (exit 3)\n" + tc.wantLink + "\n```\nLast output:\nuploading\nUploadError: chunk 41\n```"
 			if text != want {
 				t.Errorf("alert text:\n got %q\nwant %q", text, want)
 			}
@@ -299,8 +301,8 @@ func TestRunAlertOutputLines(t *testing.T) {
 		lines, want, wantWarning string
 	}{
 		{"0", head, ""},
-		{"1", head + "\n\nLast output:\nUploadError: chunk 41", ""},
-		{"99", head + "\n\nLast output:\nuploading\nUploadError: chunk 41", "TEND_ALERT_OUTPUT_LINES"},
+		{"1", head + "\n```\nLast output:\nUploadError: chunk 41\n```", ""},
+		{"99", head + "\n```\nLast output:\nuploading\nUploadError: chunk 41\n```", "TEND_ALERT_OUTPUT_LINES"},
 	} {
 		t.Run(tc.lines, func(t *testing.T) {
 			text, stderr := failedRunAlert(t, map[string]string{"TEND_BASE_URL": "https://tend.example", "TEND_ALERT_OUTPUT_LINES": tc.lines})
@@ -311,5 +313,48 @@ func TestRunAlertOutputLines(t *testing.T) {
 				t.Errorf("stderr = %q, want a warning naming %q", stderr, tc.wantWarning)
 			}
 		})
+	}
+}
+
+// TestRunAlertNeutralisesOutputInSlack: what a job prints cannot ping a Slack
+// channel or put a link with a label of its own in the alert: it arrives in a
+// code block, escaped.
+func TestRunAlertNeutralisesOutputInSlack(t *testing.T) {
+	texts := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		texts <- m.Text
+	}))
+	defer srv.Close()
+	t.Setenv("TEND_BASE_URL", "https://tend.example")
+	cfg := keyedConfig(t)
+	ctx := context.Background()
+	for _, c := range []struct {
+		stdin string
+		args  []string
+	}{
+		{`{"webhook_url":"` + srv.URL + `/hook"}`, []string{"channel", "add", "-name", "ops", "-type", "slack"}},
+		{"", []string{"rule", "add", "-channel", "ops", "-event", "run.failed"}},
+		{"", []string{"job", "add", "-name", "spoof", "-command", `echo '<!channel> <https://evil.example|https://tend.example/runs/1>'; exit 1`}},
+		{"", []string{"run", "spoof"}},
+	} {
+		var in io.Reader
+		if c.stdin != "" {
+			in = strings.NewReader(c.stdin)
+		}
+		_ = cli.Run(ctx, cfg, c.args, in, io.Discard, io.Discard)
+	}
+	select {
+	case text := <-texts:
+		want := "Job failed: spoof (exit 1)\nhttps://tend.example/runs/1\n```\nLast output:\n" +
+			"&lt;!channel&gt; &lt;https://evil.example|https://tend.example/runs/1&gt;\n```"
+		if text != want {
+			t.Errorf("alert text:\n got %q\nwant %q", text, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no alert was posted")
 	}
 }

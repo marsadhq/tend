@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	kitnotify "github.com/marsadhq/kit/notify"
 
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
@@ -23,44 +26,86 @@ type ChatOptions struct {
 	OutputLines int
 }
 
-// chatText is the subject and body a person reads: the alert as Slack,
-// Discord, email, Telegram, ntfy and Pushover show it, often on a phone. The
-// subject names the job or heartbeat and the body never repeats it; the body
-// says what the subject does not: when a heartbeat last pinged and what it
-// expects, the run that did not finish, the last lines a failed run or a
-// failure ping left (as many lines as chat.OutputLines), the timeout a run
-// reached. When chat.BaseURL is set, a link to the run's or the heartbeat's
-// page follows what happened and comes before any output, so a channel that
-// cuts long messages (Pushover, at 1024 characters) cuts the output, not the
+// chatText is the subject, body and output a person reads: the alert as
+// Slack, Discord, email, Telegram, ntfy and Pushover show it, often on a
+// phone (forChannel puts it together for each). The subject names the job or
+// heartbeat and the body never repeats it; the body says what the subject
+// does not: when a heartbeat last pinged and what it expects, the run that
+// did not finish, the timeout a run reached, and, when chat.BaseURL is set, a
+// link to the run's or the heartbeat's page. The output is what a failed run
+// or a failure ping printed (a probe's or drill's verdict first, then as many
+// lines of the tail as chat.OutputLines allows): text Tend did not write,
+// kept apart so that Slack and Discord show it as code, and after the body
+// elsewhere, so a channel that cuts long messages cuts the output, not the
 // link. Events that already read well keep render's text. The webhook posts
 // render's text, byte for byte, whatever this says.
-func chatText(ev core.Event, chat ChatOptions) (subject, body string) {
+func chatText(ev core.Event, chat ChatOptions) (subject, body, output string) {
 	subject, body = render(ev)
 	var lead, page string
-	var output alertOutput
+	var out alertOutput
 	switch ev.Type {
 	case "run.failed":
-		subject, lead, output = chatRunFailed(ev)
+		subject, lead, out = chatRunFailed(ev)
 		page = runPage(ev)
 	case "run.recovered":
 		lead, page = "Its previous run had not succeeded.", runPage(ev)
 	case "heartbeat.missed", "heartbeat.recovered":
 		if ev.Type == "heartbeat.missed" {
-			lead, output = chatMissed(ev)
+			lead, out = chatMissed(ev)
 		}
 		if id := heartbeat.IDOf(ev.Detail); id > 0 {
 			page = fmt.Sprintf("/heartbeats/%d", id)
 		}
 	default:
-		return subject, body
+		return subject, body, ""
 	}
-	var parts []string
-	for _, part := range []string{lead, link(chat.BaseURL, page), output.text(chat.OutputLines)} {
-		if part != "" {
-			parts = append(parts, part)
+	return subject, joinParts(lead, link(chat.BaseURL, page)), out.text(chat.OutputLines)
+}
+
+// joinParts joins the parts that are not empty with a blank line.
+func joinParts(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
 		}
 	}
-	return subject, strings.Join(parts, "\n\n")
+	return strings.Join(kept, "\n\n")
+}
+
+// pushoverMaxMessage is the most characters of a message Pushover keeps; kit
+// cuts the rest off its end.
+const pushoverMaxMessage = 1024
+
+// forChannel is m as a channel of kind gets it. Slack and Discord show
+// m.Output themselves, apart from the text Tend wrote: in a code block, where
+// it can neither mention anyone nor make a link with a label of its own (kit).
+// The other channels show plain text, so the output follows the body after a
+// blank line; for Pushover it is cut from its start to fit what Pushover
+// keeps, so that the link before it and the end of the output, where the
+// error usually is, both arrive.
+func forChannel(kind kitnotify.ChannelType, m kitnotify.Message) kitnotify.Message {
+	switch kind {
+	case kitnotify.Slack, kitnotify.Discord, kitnotify.Webhook:
+		return m
+	case kitnotify.Pushover:
+		m.Output = fitEnd(m.Output, pushoverMaxMessage-utf8.RuneCountInString(m.Body)-2)
+	}
+	m.Body, m.Output = joinParts(m.Body, m.Output), ""
+	return m
+}
+
+// fitEnd is s within room characters: as it is when it fits, otherwise its
+// end after "…", or nothing when there is no room for that.
+func fitEnd(s string, room int) string {
+	if utf8.RuneCountInString(s) <= room {
+		return s
+	}
+	if room < 2 {
+		return ""
+	}
+	r := []rune(s)
+	return "…" + string(r[len(r)-(room-1):])
 }
 
 // link is the URL of the dashboard page at path under base, or "" without

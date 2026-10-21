@@ -160,6 +160,6 @@ func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, [
 		if err != nil {
 			return fmt.Errorf("build provider for channel %d: %w", d.ChannelID, err)
 		}
-		return p.Send(ctx, messageFor(d.Event, instance, chat))
+		return p.Send(ctx, forChannel(ch.Kind, messageFor(d.Event, instance, chat)))
 	}
 }
