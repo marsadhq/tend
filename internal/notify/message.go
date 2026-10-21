@@ -91,16 +91,23 @@ func EventJobID(ev core.Event) int64 {
 // bytes do not change with the chat text. instance names this installation
 // in the envelope's source; chat shapes the chat text.
 func messageFor(ev core.Event, instance string, chat ChatOptions) kitnotify.Message {
+	m, out := compose(ev, instance, chat)
+	m.Output = out.text(chat.OutputLines)
+	return m
+}
+
+// compose is messageFor without its Output, and the output that goes there,
+// for channelMessage to fit to a channel.
+func compose(ev core.Event, instance string, chat ChatOptions) (kitnotify.Message, alertOutput) {
 	subject, body := render(ev)
 	env := envelope(ev, subject, body, instance)
-	chatSubject, chatBody, output := chatText(ev, chat)
+	chatSubject, chatBody, out := chatText(ev, chat)
 	return kitnotify.Message{
 		Subject: chatSubject,
 		Body:    chatBody,
-		Output:  output,
 		Event:   env,
 		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev), Marsad: env},
-	}
+	}, out
 }
 
 // envelopeKind is how one event type maps onto the V1 envelope.
