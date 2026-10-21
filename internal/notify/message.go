@@ -82,17 +82,21 @@ func EventJobID(ev core.Event) int64 {
 	return p.JobID
 }
 
-// messageFor renders the Message for ev: a subject and body tailored per event
-// type, and the webhook body Tend has always posted (event.TendWebhook: the
-// subject, the body and the originating event under "event"), with the event's
-// marsad.event/v1 envelope added under "marsad" when it has one (see
-// envelope). instance names this installation in the envelope's source.
+// messageFor renders the Message for ev: the subject and body the chat
+// channels show (chatText), and the webhook body Tend has always posted
+// (event.TendWebhook: render's subject and body and the originating event
+// under "event"), with the event's marsad.event/v1 envelope, which carries
+// render's text too, added under "marsad" when it has one (see envelope).
+// The webhook provider posts Webhook and ignores Subject and Body, so its
+// bytes do not change with the chat text. instance names this installation
+// in the envelope's source.
 func messageFor(ev core.Event, instance string) kitnotify.Message {
 	subject, body := render(ev)
 	env := envelope(ev, subject, body, instance)
+	chatSubject, chatBody := chatText(ev)
 	return kitnotify.Message{
-		Subject: subject,
-		Body:    body,
+		Subject: chatSubject,
+		Body:    chatBody,
 		Event:   env,
 		Webhook: event.TendWebhook{Subject: subject, Body: body, Event: tendEvent(ev), Marsad: env},
 	}
@@ -194,9 +198,9 @@ func tendEvent(ev core.Event) *event.TendEvent {
 	}
 }
 
-// Render returns the subject and body a notification of ev carries, for
-// showing an event elsewhere (the CLI's heartbeat history) the way an alert
-// shows it.
+// Render returns the subject and body a webhook notification of ev carries,
+// for showing an event elsewhere (the CLI's heartbeat history, the
+// dashboard's transitions) the way an alert names it.
 func Render(ev core.Event) (subject, body string) { return render(ev) }
 
 // render returns the subject and body for ev, tailored per event type and

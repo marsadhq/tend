@@ -11,13 +11,13 @@ import (
 
 	"github.com/marsadhq/kit/clock"
 	kitnotify "github.com/marsadhq/kit/notify"
-	"github.com/marsadhq/tend/internal/core"
+	"github.com/marsadhq/tend/internal/heartbeat"
 )
 
 // TestNtfyChannelDelivers sends a heartbeat.missed to an ntfy channel through
-// Tend's worker and the real ntfy provider: the topic gets Tend's rendered
-// subject as the title and its body as the message, with the channel's
-// priority, tags and access token.
+// Tend's worker and the real ntfy provider: the topic gets the alert's subject
+// as the title and its body (when the heartbeat last pinged, what it expects)
+// as the message, with the channel's priority, tags and access token.
 func TestNtfyChannelDelivers(t *testing.T) {
 	type got struct {
 		auth string
@@ -42,9 +42,11 @@ func TestNtfyChannelDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	ev := heartbeat.OverdueEvent(heartbeat.Heartbeat{ID: 3, OrgID: 1, Name: "db-backup", Status: "up",
+		LastSeenAt: now.Add(-2 * time.Hour), PeriodSeconds: 3600, GraceSeconds: 600})
+	ev.ID, ev.CreatedAt = 9, now
 	fs := &fakeWorkerStore{
-		due: []Delivery{{ID: 1, OrgID: 1, EventID: 9, ChannelID: 7, State: DeliveryPending, CreatedAt: now,
-			Event: core.Event{ID: 9, OrgID: 1, Type: "heartbeat.missed", Source: "heartbeat", Payload: "db-backup", CreatedAt: now}}},
+		due:     []Delivery{{ID: 1, OrgID: 1, EventID: 9, ChannelID: 7, State: DeliveryPending, CreatedAt: now, Event: ev}},
 		channel: Channel{ID: 7, OrgID: 1, Name: "phone", Kind: kitnotify.Ntfy},
 		blob:    blob,
 	}
@@ -57,7 +59,9 @@ func TestNtfyChannelDelivers(t *testing.T) {
 	if g.auth != "Bearer tk_test" {
 		t.Errorf("Authorization = %q, want the channel's token", g.auth)
 	}
-	want := map[string]any{"topic": "tend-alerts", "title": "Heartbeat missed: db-backup", "message": "db-backup", "priority": float64(4), "tags": []any{"warning"}}
+	want := map[string]any{"topic": "tend-alerts", "title": "Heartbeat missed: db-backup",
+		"message":  "No ping for 2h, since 2026-10-20 10:00 UTC; one is expected every 1h, with 10m of grace.",
+		"priority": float64(4), "tags": []any{"warning"}}
 	for k, v := range want {
 		if gv, _ := json.Marshal(g.body[k]); string(gv) != mustJSON(t, v) {
 			t.Errorf("%s = %s, want %s", k, gv, mustJSON(t, v))

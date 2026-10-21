@@ -297,7 +297,7 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 
 `run.started` and `run.succeeded` are recorded (dashboard, `GET /api/events`) but never notify, so `tend rule add` and `tend sync` refuse a rule for them, or for any type not in the table, and list the valid ones. (`tend rule list` flags a rule stored by an older version that can never fire.) A `notification.failed` whose own delivery is given up is dropped rather than reported again, so route it to a different channel than the ones it reports on.
 
-Channels are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused). Every channel sends the event's subject (`Job failed: nightly-backup`) and body; the webhook channel posts JSON (see [below](#send-tend-events-to-ward-or-any-sink)). The types and their config:
+Channels are managed via the CLI (`tend channel add`, config JSON on stdin) or YAML sync. Because channel config is encrypted at rest, `TEND_MASTER_KEY` must be set to create channels (syncing a config with channels while the key is unset is refused). Slack, Discord, email, Telegram, ntfy and Pushover send an alert written to be read on a phone (see **What an alert says** below); the webhook channel posts JSON (see [below](#send-tend-events-to-ward-or-any-sink)). The types and their config:
 
 | Type | Config | Notes |
 |---|---|---|
@@ -310,6 +310,22 @@ Channels are managed via the CLI (`tend channel add`, config JSON on stdin) or Y
 | `pushover` | `{"token": "...", "user": "...", "priority": 0, "retry": 60, "expire": 3600, "device": "...", "sound": "..."}` | `token` (your [Pushover](https://pushover.net) application's API token) and `user` (a user or group key) are required. `priority` is -2 (no alert) to 2; at 2 (emergency) the notification repeats every `retry` seconds (at least 30, default 60) until acknowledged, for up to `expire` seconds (at most 10800, default 3600). `device` limits it to some of the user's devices, `sound` picks the sound. Subject and body are cut to Pushover's limits (250 and 1024 characters). |
 
 Secrets in a channel's config (tokens, keys, webhook URLs) can come from `{{ secret.NAME }}` references in YAML; the config is checked when a notification is sent, not when the channel is saved, so a channel whose config is incomplete fails its deliveries: they are retried, then given up and reported like any other failure.
+
+**What an alert says.** The subject names the job or heartbeat and what happened; the body says what the subject does not, and never repeats the name. A heartbeat that stopped pinging says how long it has been quiet and what it expects, one that never pinged says so, a run started with `/start` that did not finish says when it started and how long it was allowed, and a failure ping, like a failed run, ends with the last lines of its output. A failed run's subject has its exit code, or says it timed out, and its body the timeout it hit:
+
+```text
+Heartbeat missed: db-backup
+No ping for 1d 1h, since 2026-10-20 13:09 UTC; one is expected every 1d, with 1h of grace.
+```
+
+```text
+Job failed: nightly-backup (exit 3)
+Last output:
+uploading chunk 40/40 to s3://backups/primary/chunk-40.bin
+UploadError: chunk 41 failed after 5 attempts: RequestTimeout
+```
+
+The output in an alert is the tail of what the run stored (its last 10 lines, at most 1000 bytes), with the job's secret values already redacted as they are in the stored output, and it goes to every channel a rule routes `run.failed` to; keep other secrets out of what a job prints. `job.removed`, `heartbeat.removed` and `notification.failed` read as their subject and a line saying what it means. The webhook channel posts the subject and body Tend has always sent (`Job failed: nightly-backup`, `status=failed exit_code=3`), byte for byte, not this text.
 
 **Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. Each send is bounded (10 seconds for webhook, Slack, Discord, Telegram, ntfy and Pushover, 30 seconds for SMTP), so a destination that hangs fails that attempt instead of holding up the others. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. A destination that refuses the notification for good (an HTTP 4xx other than 408 and 429 from a webhook, Slack, Discord, Telegram or ntfy, any 4xx from Pushover, or an SMTP 5xx reply) is not retried: the delivery is given up at once, the same way. Pushover asks to be retried no sooner than 5 seconds after any other failure, so its retries wait at least that long. Each channel receives its notifications in order, one at a time: a notification waits until the ones queued before it on the same channel have been delivered or given up, so after an outage a receiver gets `heartbeat.missed` before the `heartbeat.recovered` that followed it (other channels are not held up). The wait is bounded: once a notification that keeps failing was first attempted more than 15 minutes ago (`TEND_DELIVERY_HOLD_MINUTES`), the ones behind it go out while it keeps retrying, so one notification a destination keeps failing cannot silence the channel; past that point their order is no longer guaranteed, and a receiver should order by the event's `CreatedAt`. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
 
@@ -354,7 +370,7 @@ notifications:
                job.removed, heartbeat.removed, notification.failed]
 ```
 
-The webhook payload is JSON with `subject`, `body`, and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. Rules are org-wide; per-heartbeat routing is not yet supported.
+The webhook payload is JSON with `subject`, `body` (the text Tend has always sent, not the chat alert's), and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. Rules are org-wide; per-heartbeat routing is not yet supported.
 
 The same body also carries the event as a [`marsad.event/v1`](https://github.com/marsadhq/kit#the-event-format) envelope under `marsad`, the format the Marsad tools exchange events in. The legacy keys above are unchanged, so a receiver that ignores keys it does not know keeps working as before (one that refuses unknown keys with a 4xx would now refuse every notification, and Tend would give each one up at once):
 

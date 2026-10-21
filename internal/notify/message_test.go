@@ -9,7 +9,7 @@ import (
 )
 
 // TestMessageForRunFailed asserts the run.failed message carries the job name in
-// the subject and status/exit_code in the body.
+// the subject, and the webhook's body the status and exit_code.
 func TestMessageForRunFailed(t *testing.T) {
 	ev := core.Event{
 		OrgID:   1,
@@ -23,8 +23,8 @@ func TestMessageForRunFailed(t *testing.T) {
 	if !strings.Contains(m.Subject, "nightly") {
 		t.Fatalf("subject should mention job name: %q", m.Subject)
 	}
-	if !strings.Contains(m.Body, "failed") || !strings.Contains(m.Body, "9") {
-		t.Fatalf("body should mention status and exit_code: %q", m.Body)
+	if w := m.Webhook.(event.TendWebhook); w.Body != "status=failed exit_code=9" {
+		t.Fatalf("webhook body should give status and exit_code: %q", w.Body)
 	}
 
 	// A run.failed with an unparseable payload must not panic and must still
