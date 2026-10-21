@@ -481,6 +481,7 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .crumbs a,
   .jobs-poll-toggle a,
   .output-jump { display: inline-flex; align-items: center; min-height: 44px; }
+  .crumbs a { min-width: 44px; }
   .pings-table summary { padding: 12px 0; cursor: pointer; }
 }
 
