@@ -262,8 +262,9 @@ func TestRunnerKeepsStoredOutputWithinTheCap(t *testing.T) {
 		// not land inside either character.
 		{outputJob: outputJob{name: "multi-byte-around-the-cut", raw: "x" + strings.Repeat("€\xff", 300*kib)}, truncated: true},
 		{outputJob: outputJob{name: "two-byte-around-the-cut", raw: strings.Repeat("é\xff", 400*kib)}, truncated: true},
-		// A 2 byte secret becomes the 3 bytes of "***".
-		{outputJob: outputJob{name: "redaction-grows-it", raw: strings.Repeat("ab", 400*kib), secret: "ab"}, truncated: true},
+		// A 2 byte secret becomes the 3 bytes of "***" (one "***" for a run
+		// of them, so they are kept apart here).
+		{outputJob: outputJob{name: "redaction-grows-it", raw: strings.Repeat("ab\n", 300*kib), secret: "ab"}, truncated: true},
 		// Exactly at the cap, and just under it after growing: untouched.
 		{outputJob: outputJob{name: "exactly-the-cap", raw: strings.Repeat("x", outputCap)}, wantLen: outputCap},
 		{outputJob: outputJob{name: "grows-to-exactly-the-cap", raw: strings.Repeat("a\xff", outputCap/4)}, wantLen: outputCap},
