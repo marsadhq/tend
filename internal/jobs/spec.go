@@ -114,6 +114,16 @@ const (
 	DefaultRenewAfterFraction = 2.0 / 3
 )
 
+// RollbackGuardCommand is what the store keeps in the command column of every
+// job that has settings (tls, domain, expiry, drill), whatever the job says.
+// This version never runs it: those jobs are dispatched by type, and the
+// store reads the column back as empty. It is there for an older Tend after a
+// rollback, which does not know these types and runs such a job as a shell
+// job: without it, an empty command would succeed (and report a recovery),
+// and a command left in the row would run without the settings. With it, the
+// run fails and says why. It is fixed text, never anything a user supplied.
+const RollbackGuardCommand = `echo "tend: this job needs tend v0.5 or later; it was not run" >&2; exit 2`
+
 // MaxWarnDays is the largest warn_days a probe takes: ten years. A larger one
 // would overflow the time.Duration it is compared as, and an expiry that is
 // days away would then pass.

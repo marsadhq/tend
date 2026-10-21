@@ -113,7 +113,7 @@ func (s *PostgresStore) CreateJob(ctx context.Context, j jobs.Job) (int64, error
 		next_run, created_at, updated_at, spec
 	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 	RETURNING id`,
-		j.OrgID, j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
+		j.OrgID, j.Name, string(j.Type), storedCommand(j), j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
 		j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries, boolToInt(j.Enabled), env,
 		nullTime(j.NextRunAt), now, now, spec,
 	).Scan(&id)
@@ -190,7 +190,7 @@ func (s *PostgresStore) UpdateJob(ctx context.Context, j jobs.Job) error {
 		cron = $7, interval_seconds = $8, run_at = $9, timeout_seconds = $10, max_retries = $11,
 		enabled = $12, env = $13, next_run = $14, updated_at = $15, spec = $16
 		WHERE org_id = $17 AND id = $18`,
-		j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody,
+		j.Name, string(j.Type), storedCommand(j), j.HTTPURL, j.HTTPMethod, j.HTTPBody,
 		j.Cron, j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries,
 		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(), spec,
 		j.OrgID, j.ID,

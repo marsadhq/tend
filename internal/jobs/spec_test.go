@@ -85,3 +85,18 @@ func TestHugeWarnDaysDoesNotPass(t *testing.T) {
 		t.Fatalf("status %s, output:\n%s", res.Status, res.Output)
 	}
 }
+
+// TestRollbackGuardFailsAnOldBinary: run as the shell job an older Tend
+// takes a probe for, the guard fails with a message saying why; this version
+// runs the probe and never the guard.
+func TestRollbackGuardFailsAnOldBinary(t *testing.T) {
+	old := NewExecutor().Run(context.Background(), Job{Name: "cert", Type: Shell, Command: RollbackGuardCommand}, nil)
+	if old.Status != StatusFailed || old.ExitCode != 2 || !strings.Contains(old.Output, "needs tend v0.5 or later") {
+		t.Fatalf("guard as a shell job: status %s exit %d, output %q", old.Status, old.ExitCode, old.Output)
+	}
+	j := expiryJob(Spec{ExpiresAt: t0.Add(100 * day), WarnDays: 14})
+	j.Command = RollbackGuardCommand
+	if res := fixedNow(t0).Run(context.Background(), j, nil); res.Status != StatusSucceeded || strings.Contains(res.Output, "v0.5") {
+		t.Fatalf("an expiry job ran its command: status %s, output:\n%s", res.Status, res.Output)
+	}
+}
