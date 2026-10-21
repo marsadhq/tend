@@ -263,6 +263,37 @@ func TestDashboardRunDetailRendersOutput(t *testing.T) {
 	}
 }
 
+// A failed run's error is usually at the end of its output; when the output is
+// long the page links straight to its end, which matters most on a phone. A
+// short output gets no link.
+func TestDashboardRunDetailJumpsToEndOfLongOutput(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	jobID := seedJob(t, ts, ts.orgID, "alpha")
+	long := strings.Repeat("uploading chunk\n", 200) + "ERROR: upload failed"
+	manyLines := seedRun(t, ts, ts.orgID, jobID, "failed", long)
+	oneLongLine := seedRun(t, ts, ts.orgID, jobID, "failed", strings.Repeat("x", 5000))
+	short := seedRun(t, ts, ts.orgID, jobID, "failed", "ERROR: upload failed")
+	codec := testCodec()
+	h := newAuthServer(t, ts.store, &httpserver.AuthConfig{Codec: codec}).Handler()
+	cookie, _ := validSessionCookie(t, as, codec)
+
+	for _, id := range []int64{manyLines, oneLongLine} {
+		body := dashGet(t, h, cookie, "/runs/"+itoa(id)).Body.String()
+		if !strings.Contains(body, `href="#output-end"`) {
+			t.Errorf("run %d: a long output has no link to its end", id)
+		}
+		// The anchor closes the output block, so the jump also scrolls an
+		// output that scrolls in a box of its own to its last line.
+		if !strings.Contains(body, `<span id="output-end"></span></pre>`) {
+			t.Errorf("run %d: the output does not end with its anchor", id)
+		}
+	}
+	if body := dashGet(t, h, cookie, "/runs/"+itoa(short)).Body.String(); strings.Contains(body, `href="#output-end"`) {
+		t.Errorf("a short output should not offer a jump to its end")
+	}
+}
+
 // SECURITY: run output must be HTML-escaped, never injected as live markup.
 func TestDashboardRunDetailEscapesOutput(t *testing.T) {
 	ts := newStore(t)

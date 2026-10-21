@@ -33,9 +33,14 @@
 </dl>
 
 <section class="section">
-  <h2 class="section-title">Output</h2>
+  <div class="section-head">
+    <h2 class="section-title">Output</h2>
+    {{if .Run.LongOutput}}<a class="output-jump" href="#output-end">Jump to the end</a>{{end}}
+  </div>
   {{/* {{.Run.Output}} is auto-escaped by html/template, so any markup in the
-       captured output is rendered inert text, never live HTML. */}}
-  <pre class="output">{{.Run.Output}}</pre>
+       captured output is rendered inert text, never live HTML. The anchor
+       closes the block, so jumping to it also scrolls the block itself to its
+       last line where the block scrolls on its own. */}}
+  <pre class="output">{{.Run.Output}}<span id="output-end"></span></pre>
 </section>
 {{end}}
