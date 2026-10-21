@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
@@ -95,6 +96,16 @@ func TestReapOnceFailsStaleRunningRun(t *testing.T) {
 	}
 	if !hasType(evts, "run.failed") {
 		t.Error("no run.failed event emitted for reaped run")
+	}
+	// Its alert says why: the detail carries the reaped run's output.
+	for _, e := range evts {
+		if e.Type != "run.failed" {
+			continue
+		}
+		var d jobs.FailureDetail
+		if err := json.Unmarshal([]byte(e.Detail), &d); err != nil || !strings.HasPrefix(d.Output, "reaped: ") {
+			t.Errorf("reaped run.failed detail = %q (%v), want the reaped output", e.Detail, err)
+		}
 	}
 	mu.Lock()
 	if len(fired) != 1 || fired[0].Type != "run.failed" {
