@@ -366,6 +366,15 @@ func TestRDAPBootstrapCached(t *testing.T) {
 	if !strings.Contains(res.Output, "bootstrap:") || !strings.Contains(res.Output, "503") {
 		t.Fatalf("output does not say the cached bootstrap file was used:\n%s", res.Output)
 	}
+	// The note comes last, after the answer; the lines it follows are in
+	// their usual order.
+	lines := strings.Split(res.Output, "\n")
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "bootstrap:") {
+		t.Fatalf("last line is %q, want the bootstrap note:\n%s", last, res.Output)
+	}
+	if !strings.HasPrefix(lines[2], "domain:") || !strings.HasPrefix(lines[3], "rdap:") || !strings.HasPrefix(lines[4], "expiration:") {
+		t.Fatalf("lines out of order:\n%s", res.Output)
+	}
 }
 
 func TestRDAPBootstrapUnreachable(t *testing.T) {
