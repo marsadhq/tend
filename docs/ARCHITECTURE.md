@@ -142,6 +142,12 @@ dialects force it:
   (`jobs.Spec`) are stored as JSON in `jobs.spec` (migration 0012), written and
   read by the same `encodeSpec` / `decodeSpec` on both backends, like `env`.
   Shell and http jobs keep it NULL, so their rows are exactly what they were.
+  For the jobs that have settings, the store writes a fixed failing command
+  (`jobs.RollbackGuardCommand`) into `command` on every insert and update
+  (migration 0013 fills it in for older rows) and reads it back as empty. This
+  version never runs it; it is for a Tend older than v0.5 after a rollback,
+  which runs a job of a type it does not know as a shell job and would
+  otherwise run an empty command and report success.
 - **`ErrNotFound`.** `Get*` methods return the sentinel `store.ErrNotFound` when
   no row matches; callers use `errors.Is`.
 - **Explicit transactional deletes.** Cascading deletes are done in an explicit

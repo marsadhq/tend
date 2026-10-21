@@ -189,6 +189,16 @@ func encodeSpec(spec *jobs.Spec) (sql.NullString, error) {
 	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
+// storedCommand is what goes into a job's command column: its command, or
+// for a job that has settings the rollback guard (jobs.RollbackGuardCommand),
+// which scanJob reads back as empty.
+func storedCommand(j jobs.Job) string {
+	if jobs.HasSpec(j.Type) {
+		return jobs.RollbackGuardCommand
+	}
+	return j.Command
+}
+
 // decodeSpec parses a stored spec back; NULL/empty yields nil.
 func decodeSpec(ns sql.NullString) (*jobs.Spec, error) {
 	if !ns.Valid || ns.String == "" {
@@ -246,7 +256,7 @@ func (s *SQLiteStore) CreateJob(ctx context.Context, j jobs.Job) (int64, error) 
 		interval_seconds, run_at, timeout_seconds, max_retries, enabled, env,
 		next_run, created_at, updated_at, spec
 	) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		j.OrgID, j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
+		j.OrgID, j.Name, string(j.Type), storedCommand(j), j.HTTPURL, j.HTTPMethod, j.HTTPBody, j.Cron,
 		j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries, boolToInt(j.Enabled), env,
 		nullTime(j.NextRunAt), now, now, spec,
 	)
@@ -296,6 +306,9 @@ func scanJob(sc interface{ Scan(...any) error }) (jobs.Job, error) {
 	}
 	j.Type = jobs.JobType(typ)
 	j.Command = command.String
+	if jobs.HasSpec(j.Type) {
+		j.Command = "" // the rollback guard; see storedCommand
+	}
 	j.HTTPURL = httpURL.String
 	j.HTTPMethod = httpMeth.String
 	j.HTTPBody = httpBody.String
@@ -391,7 +404,7 @@ func (s *SQLiteStore) UpdateJob(ctx context.Context, j jobs.Job) error {
 		cron = ?, interval_seconds = ?, run_at = ?, timeout_seconds = ?, max_retries = ?,
 		enabled = ?, env = ?, next_run = ?, updated_at = ?, spec = ?
 		WHERE org_id = ? AND id = ?`,
-		j.Name, string(j.Type), j.Command, j.HTTPURL, j.HTTPMethod, j.HTTPBody,
+		j.Name, string(j.Type), storedCommand(j), j.HTTPURL, j.HTTPMethod, j.HTTPBody,
 		j.Cron, j.IntervalSeconds, nullTime(j.RunAt), j.TimeoutSeconds, j.MaxRetries,
 		boolToInt(j.Enabled), env, nullTime(j.NextRunAt), nowStr(), spec,
 		j.OrgID, j.ID,
