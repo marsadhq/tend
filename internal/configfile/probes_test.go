@@ -175,6 +175,12 @@ func TestParseProbeValidation(t *testing.T) {
 		{"drill relative scratch", "type: drill\n    restore: \"true\"\n    scratch_dir: tmp", "scratch_dir"},
 		{"drill negative max", "type: drill\n    restore: \"true\"\n    max_duration_seconds: -5", "max_duration_seconds"},
 		{"unknown type", "type: ftp", "must be shell, http, tls, domain, expiry or drill"},
+		// A command on a probe or drill is never run by this version; an
+		// older one that does not know the type would run it.
+		{"tls command", "type: tls\n    host: example.com\n    command: echo hi", "command is not used by tls jobs"},
+		{"domain http_url", "type: domain\n    domain: example.com\n    http_url: https://example.com", "http_url is not used by domain jobs"},
+		{"expiry command", "type: expiry\n    expires_at: 2027-01-31\n    command: date", "use expiry_command"},
+		{"drill command", "type: drill\n    restore: \"true\"\n    command: 'cp x \"$TEND_SCRATCH\"'", "use restore, checks and cleanup"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

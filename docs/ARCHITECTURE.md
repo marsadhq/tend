@@ -510,8 +510,10 @@ declared config and runtime state, and to keep secret-write paths off the networ
   only. Both fields are accepted on any job type but are simply ignored on the
   type they don't apply to. A probe's or drill's settings (`jobs.Spec`) are
   narrower still: `tend job add` and `tend sync` keep only the fields of the
-  job's own type, apply its defaults, and refuse settings `ValidateSpec`
-  rejects before anything is written; the executor validates them again
+  job's own type, apply its defaults, refuse a `command` or `http_url` on
+  them (an older Tend that does not know the type would run the command as
+  a shell job), and refuse settings `ValidateSpec` rejects before anything
+  is written; the executor validates them again
   before each run, so a row written by other means fails its run with the
   same message instead of misbehaving.
 

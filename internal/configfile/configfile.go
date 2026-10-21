@@ -259,6 +259,15 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 		}
 	case "tls", "domain", "expiry", "drill":
 		jt = jobs.JobType(spec.Type)
+		// Refused rather than ignored: this version never runs a probe's or a
+		// drill's command, but an older one that does not know the type runs
+		// the job as a shell job, command and all.
+		if spec.Command != "" {
+			return jobs.Job{}, fmt.Errorf("configfile: %s: command is not used by %s jobs%s", ref, jt, commandHint(jt, "expiry_command", "restore, checks and cleanup"))
+		}
+		if spec.HTTPURL != "" {
+			return jobs.Job{}, fmt.Errorf("configfile: %s: http_url is not used by %s jobs", ref, jt)
+		}
 	case "":
 		return jobs.Job{}, fmt.Errorf("configfile: %s: type is required (%s)", ref, jobTypeList)
 	default:
@@ -327,6 +336,19 @@ func mapSpec(idx int, spec jobSpec) (jobs.Job, error) {
 		Spec:            settings,
 	}
 	return j, nil
+}
+
+// commandHint points a probe or drill that was given a command at the
+// setting it meant: expiry for an expiry job, drill for a drill, nothing for
+// the others.
+func commandHint(t jobs.JobType, expiry, drill string) string {
+	switch t {
+	case jobs.Expiry:
+		return "; use " + expiry
+	case jobs.Drill:
+		return "; use " + drill
+	}
+	return ""
 }
 
 // specFor builds the settings of a job of type t from its YAML entry, with
