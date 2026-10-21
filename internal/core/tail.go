@@ -43,3 +43,26 @@ func TailLines(s string, lines int) string {
 	}
 	return tail
 }
+
+// HeadLines is the start of s for an alert: its first lines lines (none when
+// lines is not positive), surrounding blank space dropped, at most
+// OutputTailBytes long and cut on a character boundary.
+func HeadLines(s string, lines int) string {
+	s = strings.Trim(s, " \t\r\n")
+	if s == "" || lines <= 0 {
+		return ""
+	}
+	parts := strings.SplitN(s, "\n", lines+1)
+	if len(parts) > lines {
+		parts = parts[:lines]
+	}
+	head := strings.Join(parts, "\n")
+	if len(head) > OutputTailBytes {
+		cut := OutputTailBytes
+		for cut > 0 && !utf8.RuneStart(head[cut]) {
+			cut--
+		}
+		head = head[:cut]
+	}
+	return head
+}

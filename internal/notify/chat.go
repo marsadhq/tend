@@ -84,31 +84,40 @@ func runPage(ev core.Event) string {
 	return fmt.Sprintf("/runs/%d", p.RunID)
 }
 
-// alertOutput is what an alert shows of a failure's output: the tail of it
-// the event kept, from its end, under a label.
+// alertOutput is what an alert shows of a failure's output: a probe's or a
+// drill's verdict, from its start, and the tail the event kept, from its
+// end, under a label.
 type alertOutput struct {
-	tail string
+	verdict string
+	tail    string
 	// truncated says the tail comes from before a 1 MiB cut.
 	truncated bool
 }
 
-// text is the output section of an alert showing at most lines lines, or ""
-// when there is nothing to show.
+// text is the output section of an alert showing at most lines lines, the
+// verdict's first and the tail's with what is left, or "" when there is
+// nothing to show.
 func (o alertOutput) text(lines int) string {
-	tail := core.TailLines(o.tail, lines)
-	if tail == "" {
-		return ""
+	var parts []string
+	verdict := core.HeadLines(o.verdict, lines)
+	if verdict != "" {
+		parts = append(parts, verdict)
+		lines -= strings.Count(verdict, "\n") + 1
 	}
-	label := "Last output:"
-	if o.truncated {
-		label = "Last output before the 1 MiB cut:"
+	if tail := core.TailLines(o.tail, lines); tail != "" {
+		label := "Last output:"
+		if o.truncated {
+			label = "Last output before the 1 MiB cut:"
+		}
+		parts = append(parts, label+"\n"+tail)
 	}
-	return label + "\n" + tail
+	return strings.Join(parts, "\n\n")
 }
 
 // runFailure is the part of a run.failed's detail an alert uses (the
 // runner's jobs.FailureDetail; notify does not import jobs).
 type runFailure struct {
+	Verdict        string `json:"verdict"`
 	Output         string `json:"output"`
 	Truncated      bool   `json:"truncated"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
@@ -141,7 +150,7 @@ func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
 		lead = "It was stopped after its " + span(seconds(d.TimeoutSeconds)) + " timeout."
 	}
-	return subject, lead, alertOutput{tail: d.Output, truncated: d.Truncated}
+	return subject, lead, alertOutput{verdict: d.Verdict, tail: d.Output, truncated: d.Truncated}
 }
 
 // chatMissed is what a heartbeat.missed says beyond its subject: for a

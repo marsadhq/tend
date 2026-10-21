@@ -12,6 +12,13 @@ import (
 // payload's status and exit code. It is for the notification text only; the
 // webhook's event and the marsad envelope never carry it.
 type FailureDetail struct {
+	// Verdict is the paragraph a probe's or a drill's output opens with: a
+	// FAIL: line per problem, or why it could not check. It is kept apart,
+	// from its start (at most core.MaxOutputTailLines lines and
+	// core.OutputTailBytes), because the tail of such an output shows only
+	// what was checked, cleaned up and printed; Output is then the tail of
+	// what follows it. Shell and http jobs have none.
+	Verdict string `json:"verdict,omitempty"`
 	// Output is the tail of the output the run stored, so already cleaned and
 	// with the job's secret values redacted: its last core.MaxOutputTailLines
 	// lines, at most core.OutputTailBytes, of which an alert shows as many
@@ -33,6 +40,10 @@ func failureDetail(job Job, status RunStatus, out string) string {
 		// The cut can fall inside anything, part of a secret printed in a
 		// form redaction does not recognise included: its line stays out.
 		out, d.Truncated = dropLastLine(body), true
+	}
+	if givesVerdict(job.Type) {
+		verdict, rest, _ := strings.Cut(strings.TrimLeft(out, "\n"), "\n\n")
+		d.Verdict, out = core.HeadLines(verdict, core.MaxOutputTailLines), rest
 	}
 	d.Output = core.TailLines(out, core.MaxOutputTailLines)
 	if status == StatusTimedOut {
@@ -59,4 +70,14 @@ func dropLastLine(s string) string {
 		return ""
 	}
 	return s[:i]
+}
+
+// givesVerdict reports whether a job of type t opens its output with its
+// verdict (probeReport.result, probeErrorResult, the drill's report).
+func givesVerdict(t JobType) bool {
+	switch t {
+	case TLS, Domain, Expiry, Drill:
+		return true
+	}
+	return false
 }

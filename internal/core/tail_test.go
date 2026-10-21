@@ -50,3 +50,16 @@ func TestDefaultTailOfTheKeptTail(t *testing.T) {
 		}
 	}
 }
+
+func TestHeadLines(t *testing.T) {
+	if got := HeadLines("FAIL: a\nFAIL: b\nFAIL: c\n", 2); got != "FAIL: a\nFAIL: b" {
+		t.Errorf("HeadLines(_, 2) = %q", got)
+	}
+	if got := HeadLines("x", 0); got != "" {
+		t.Errorf("HeadLines(_, 0) = %q", got)
+	}
+	long := strings.Repeat("é", OutputTailBytes)
+	if got := HeadLines(long, 5); len(got) > OutputTailBytes || !utf8.ValidString(got) || !strings.HasPrefix(long, got) {
+		t.Errorf("one long line: %d bytes, valid=%v; want at most %d valid bytes from the start", len(got), utf8.ValidString(got), OutputTailBytes)
+	}
+}
