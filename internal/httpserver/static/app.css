@@ -442,6 +442,16 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   margin: 10px 0 0;
 }
 
+/* --- touch ----------------------------------------------------------------- */
+/* A touch screen gets 44px targets at any width: a tablet shows the desktop
+   layout but is tapped like a phone. */
+
+@media (pointer: coarse) {
+  .btn-action,
+  .btn-ghost { min-height: 44px; }
+  .nav-link { display: inline-flex; align-items: center; min-height: 44px; }
+}
+
 /* --- phones ---------------------------------------------------------------- */
 /* Below 640px the dashboard is laid out for a phone held in one hand. These
    rules come last so they win over the ones above. */
@@ -528,6 +538,13 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .jobs-table .col-actions { order: 6; flex-basis: 100%; width: auto; }
   .jobs-table .row-actions { display: flex; gap: 8px; }
   .jobs-table .btn-action { flex: 1 1 0; }
+
+  /* Everything a thumb taps is at least 44px tall. */
+  .btn-action { min-height: 44px; padding: 0 14px; font-size: 13px; }
+  .crumbs { display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; margin-bottom: 10px; }
+  .crumbs a,
+  .jobs-poll-toggle a { display: inline-flex; align-items: center; min-height: 44px; }
+  .pings-table summary { padding: 12px 0; cursor: pointer; }
 
   /* Room below the content for the tab bar. */
   .shell { padding: 24px 16px calc(104px + env(safe-area-inset-bottom, 0px)); }
