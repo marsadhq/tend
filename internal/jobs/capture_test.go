@@ -154,3 +154,19 @@ func TestRedactLongestFirst(t *testing.T) {
 		}
 	}
 }
+
+// A secret that ends in part of a character (a Latin-1 or binary token) and
+// is printed across the cut keeps all its bytes: the cut is backed off to a
+// character boundary only where it falls in plain text, never at the end of a
+// secret it was moved to, which would leave the secret no longer matching.
+func TestHeadOfKeepsASecretEndingInPartOfACharacter(t *testing.T) {
+	secret := "tok_0123456789\xe2\x82" // the first two bytes of a euro sign
+	b := []byte(strings.Repeat("x", 20) + secret + strings.Repeat("y", 30))
+	head, cut := headOf(b, 25, []string{secret}, true)
+	if !cut || string(head) != strings.Repeat("x", 20)+secret {
+		t.Fatalf("headOf kept %q, want the secret whole", head)
+	}
+	if got := redact(string(head), []string{secret}); got != strings.Repeat("x", 20)+"***" {
+		t.Errorf("redacted %q", got)
+	}
+}
