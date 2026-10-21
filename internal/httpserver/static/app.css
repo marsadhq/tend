@@ -3,7 +3,10 @@
    healthy state; amber/red for degraded. No external fonts (offline-friendly):
    the display family is a monospace stack, body is a system grotesque. */
 
+/* The page is dark: native controls and scrollbars are drawn dark too, and a
+   phone's automatic dark mode leaves it alone. */
 :root {
+  color-scheme: dark;
   --bg: #0a0c0f;
   --bg-elev: #11151a;
   --bg-row: #0e1217;
