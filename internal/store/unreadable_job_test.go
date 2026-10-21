@@ -113,7 +113,7 @@ func TestFailUnreadableJob(t *testing.T) {
 			}
 			corrupt(t, b, id, "env", "{not json")
 
-			ev, err := s.FailUnreadableJob(ctx, org.ID, id, "broken", "the job cannot be read")
+			ev, err := s.FailUnreadableJob(ctx, org.ID, id, "broken", "FAIL: the job cannot be read\n\nFix it with tend sync.")
 			if err != nil {
 				t.Fatalf("FailUnreadableJob: %v", err)
 			}
@@ -139,6 +139,13 @@ func TestFailUnreadableJob(t *testing.T) {
 			ds, err := s.ClaimDueDeliveries(ctx, time.Now().Add(time.Second), time.Minute, 0, 10)
 			if err != nil || len(ds) != 1 || ds[0].Event.Type != "run.failed" {
 				t.Fatalf("deliveries = %+v (%v), want one run.failed", ds, err)
+			}
+			// Its alert says why: the detail gives the FAIL line as the
+			// verdict, the advice after it as the output.
+			var d jobs.FailureDetail
+			if err := json.Unmarshal([]byte(ds[0].Event.Detail), &d); err != nil ||
+				d.Verdict != "FAIL: the job cannot be read" || d.Output != "Fix it with tend sync." || ev.Detail != ds[0].Event.Detail {
+				t.Fatalf("detail %q (%v), returned %q", ds[0].Event.Detail, err, ev.Detail)
 			}
 			// Off the schedule: no longer due, so no error either.
 			if due, err := s.DueJobs(ctx, time.Now()); err != nil || len(due) != 0 {

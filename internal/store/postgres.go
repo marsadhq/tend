@@ -283,6 +283,7 @@ func (s *PostgresStore) FailUnreadableJob(ctx context.Context, orgID, jobID int6
 	if err != nil {
 		return core.Event{}, err
 	}
+	ev.Detail = jobs.UnreadableFailureDetail(output)
 	if ev.ID, err = pgEmitEventTx(ctx, tx, ev); err != nil {
 		return core.Event{}, err
 	}
