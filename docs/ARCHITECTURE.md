@@ -264,8 +264,9 @@ accepts neither NUL nor invalid UTF-8 and a rejected value would leave the run
 `core.Event` is the generic record carried by the event pipeline: `{ID, OrgID,
 Type, Source, Payload (JSON), DedupKey, CreatedAt, Detail}`. Events are the spine that ties
 the runner, watcher, and notifier together. `Detail` is optional JSON for the
-notification text only (why a heartbeat went down); it is stored with the event
-but left out of the webhook's legacy `event` object, whose bytes never change.
+notification text only (why and when a heartbeat went down); it is stored with
+the event but left out of the webhook's legacy `event` object, whose bytes never
+change.
 
 Event types currently emitted:
 
@@ -283,10 +284,11 @@ Event types currently emitted:
   arrives. It also covers a failure ping (`/fail`, an exit status of 1 to
   255), which takes the heartbeat down at once, and a run started with
   `/start` that does not finish within the grace (`Heartbeat.RunGrace`: the
-  period when the grace is 0); its `Detail` says which
-  (`heartbeat.FailedEvent`, `heartbeat.OverranEvent`), and the subject reads
-  `Heartbeat failed: <name> (exit 3)` or `Heartbeat missed: <name> (run did
-  not finish)`. Every heartbeat event carries the plain heartbeat name as its
+  period when the grace is 0); its `Detail` says which, with the heartbeat's
+  id (`heartbeat.OverdueEvent` for a heartbeat that stopped pinging, with its
+  last ping, period and grace; `heartbeat.FailedEvent`;
+  `heartbeat.OverranEvent`), and the subject reads `Heartbeat failed: <name>
+  (exit 3)` or `Heartbeat missed: <name> (run did not finish)`. Every heartbeat event carries the plain heartbeat name as its
   payload; there are no other heartbeat event types.
 - **Removals:** `job.removed` (payload `{"job_id":…,"job_name":…}`, dedup key
   `job:<id>:removed`) and `heartbeat.removed` are recorded by the store's

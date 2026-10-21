@@ -163,7 +163,7 @@ func TestPingAPIFailureAndRecovery(t *testing.T) {
 			t.Fatalf("dispatched %+v, want one heartbeat.missed for nightly", p.events)
 		}
 		d, ok := heartbeat.ParseMissDetail(p.events[0].Detail)
-		if !ok || d.ExitStatus == nil || *d.ExitStatus != 3 || d.Output != "pg_dump: connection refused" {
+		if !ok || d.ExitStatus == nil || *d.ExitStatus != 3 || d.Output != "pg_dump: connection refused" || d.HeartbeatID != p.hb(t).ID {
 			t.Fatalf("dispatched detail = %+v", d)
 		}
 		wantOK(t, p.do(http.MethodGet, p.token+"/fail", ""), "fail while down")
