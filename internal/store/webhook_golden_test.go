@@ -103,9 +103,11 @@ func TestWebhookBodiesFromRealEventsMatchTheFixtures(t *testing.T) {
 		}
 
 		// run.failed, then run.recovered: the job "backup" fails (exit 1)
-		// until its flag file exists.
+		// until its flag file exists. It prints, so its run.failed carries a
+		// detail (the tail of its output), which must not reach the body.
 		flag := filepath.Join(t.TempDir(), "ok")
-		jobID, err := s.CreateJob(ctx, jobs.Job{OrgID: org.ID, Name: "backup", Type: jobs.Shell, Command: "test -f " + flag, Enabled: true})
+		jobID, err := s.CreateJob(ctx, jobs.Job{OrgID: org.ID, Name: "backup", Type: jobs.Shell,
+			Command: "echo 'uploading to <b>s3://backups</b>'; echo 'UploadError: chunk 41' >&2; test -f " + flag, Enabled: true})
 		if err != nil {
 			t.Fatalf("CreateJob: %v", err)
 		}
@@ -152,6 +154,24 @@ func TestWebhookBodiesFromRealEventsMatchTheFixtures(t *testing.T) {
 			t.Fatalf("DeleteJob: %v", err)
 		}
 		drain()
+
+		// The events whose bodies are checked carry the details Tend now
+		// records with them, so the check covers those bytes staying out.
+		evs, err := s.ListEvents(ctx, org.ID, 50)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		withDetail := map[string]bool{}
+		for _, e := range evs {
+			if e.Detail != "" {
+				withDetail[e.Type] = true
+			}
+		}
+		for _, typ := range []string{"run.failed", "heartbeat.missed", "heartbeat.recovered"} {
+			if !withDetail[typ] {
+				t.Errorf("the %s this test records carries no detail", typ)
+			}
+		}
 
 		mu.Lock()
 		defer mu.Unlock()
