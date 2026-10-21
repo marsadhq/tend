@@ -535,6 +535,7 @@ func (s *SQLiteStore) FailUnreadableJob(ctx context.Context, orgID, jobID int64,
 	if err != nil {
 		return core.Event{}, err
 	}
+	ev.Detail = jobs.UnreadableFailureDetail(output)
 	if ev.ID, err = emitEventTx(ctx, tx, ev); err != nil {
 		return core.Event{}, err
 	}

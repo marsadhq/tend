@@ -41,6 +41,12 @@ type FailureDetail struct {
 // status with exitCode and the stored output out, or "" when there is nothing
 // to say.
 func failureDetail(job Job, status RunStatus, exitCode int, out string) string {
+	return encodeFailure(job, status, exitCode, out, givesVerdict(job.Type))
+}
+
+// encodeFailure is failureDetail, with verdictFirst saying whether the output
+// opens with its verdict.
+func encodeFailure(job Job, status RunStatus, exitCode int, out string, verdictFirst bool) string {
 	var d FailureDetail
 	if job.Type == HTTP && strings.HasPrefix(out, "HTTP ") {
 		d.HTTPStatus, out = exitCode, ""
@@ -50,7 +56,7 @@ func failureDetail(job Job, status RunStatus, exitCode int, out string) string {
 		// form redaction does not recognise included: its line stays out.
 		out, d.Truncated = dropLastLine(body), true
 	}
-	if givesVerdict(job.Type) {
+	if verdictFirst {
 		verdict, rest, _ := strings.Cut(strings.TrimLeft(out, "\n"), "\n\n")
 		d.Verdict, out = core.HeadLines(verdict, core.MaxOutputTailLines), rest
 	}
@@ -79,6 +85,14 @@ func dropLastLine(s string) string {
 		return ""
 	}
 	return s[:i]
+}
+
+// UnreadableFailureDetail is the Detail of the run.failed recorded for a job
+// whose definition cannot be read (FailUnreadableJob), given that run's
+// output (UnreadableRunOutput): its FAIL: line as the verdict, the advice
+// after it as the output.
+func UnreadableFailureDetail(output string) string {
+	return encodeFailure(Job{}, StatusFailed, -1, output, true)
 }
 
 // givesVerdict reports whether a job of type t opens its output with its
