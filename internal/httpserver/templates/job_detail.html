@@ -40,7 +40,8 @@
 <section class="section">
   <h2 class="section-title">Recent runs</h2>
   {{if .Runs}}
-  <table class="grid-table">
+  <div class="table-scroll">
+  <table class="grid-table runs-table">
     <thead>
       <tr>
         <th>Run</th>
@@ -55,13 +56,14 @@
       <tr class="row-link" data-href="/runs/{{.ID}}">
         <td class="cell-name"><a href="/runs/{{.ID}}">#{{.ID}}</a></td>
         <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
-        <td class="cell-mono">{{.Attempt}}</td>
-        <td class="cell-mono">{{.ExitCode}}</td>
-        <td class="col-status cell-mono cell-muted">{{.Started}}</td>
+        <td class="cell-mono" data-label="Attempt">{{.Attempt}}</td>
+        <td class="cell-mono" data-label="Exit">{{.ExitCode}}</td>
+        <td class="col-status cell-mono cell-muted cell-when">{{.Started}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <div class="empty">
     <p class="empty-title">No runs recorded</p>

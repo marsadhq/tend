@@ -11,7 +11,8 @@
      struct, so it cannot be rendered here - only name/status/period/grace/last
      seen reach the page. */}}
 {{if .Heartbeats}}
-<table class="grid-table">
+<div class="table-scroll">
+<table class="grid-table heartbeats-table">
   <thead>
     <tr>
       <th>Monitor</th>
@@ -26,13 +27,14 @@
     <tr class="row-link" data-href="/heartbeats/{{.ID}}">
       <td class="cell-name"><a href="/heartbeats/{{.ID}}">{{.Name}}</a></td>
       <td><span class="pill {{.StatusClass}}">{{.Status}}</span></td>
-      <td class="cell-mono cell-muted">{{.Period}}</td>
-      <td class="cell-mono cell-muted">{{.Grace}}</td>
-      <td class="col-status cell-mono cell-muted">{{.LastSeen}}</td>
+      <td class="cell-mono cell-muted" data-label="Period">{{.Period}}</td>
+      <td class="cell-mono cell-muted" data-label="Grace">{{.Grace}}</td>
+      <td class="col-status cell-mono cell-muted cell-when" data-label="Last ping">{{.LastSeen}}</td>
     </tr>
     {{end}}
   </tbody>
 </table>
+</div>
 {{else}}
 <div class="empty">
   <p class="empty-title">No heartbeats yet</p>
