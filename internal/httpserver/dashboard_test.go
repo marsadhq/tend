@@ -2,6 +2,8 @@ package httpserver_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,8 +13,10 @@ import (
 	"time"
 
 	kitauth "github.com/marsadhq/kit/auth"
+	"github.com/marsadhq/kit/clock"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/httpserver"
+	"github.com/marsadhq/tend/internal/jobs"
 )
 
 // --- dashboard test helpers --------------------------------------------------
@@ -75,6 +79,55 @@ func TestDashboardJobListRendersJobs(t *testing.T) {
 	}
 	if strings.Contains(body, "cdn") || strings.Contains(body, "unpkg") {
 		t.Fatalf("page references a CDN; htmx must be served locally; body=%q", body)
+	}
+}
+
+// The job list says when each job last ran and when it runs next, measured
+// from the server's clock, with the exact time kept in the element.
+func TestDashboardJobListShowsLastAndNextRun(t *testing.T) {
+	ts := newStore(t)
+	as := seedAuth(t, ts)
+	now := time.Date(2026, 10, 21, 14, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	jobID, err := ts.store.CreateJob(ctx, jobs.Job{
+		OrgID: ts.orgID, Name: "nightly-backup", Type: jobs.Shell, Command: "true",
+		Cron: "0 0 * * *", Enabled: true, NextRunAt: now.Add(9*time.Hour + 49*time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	if _, err := ts.store.CreateJob(ctx, jobs.Job{
+		OrgID: ts.orgID, Name: "on-demand", Type: jobs.Shell, Command: "true", Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+	ts3 := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000000000Z07:00") }
+	if _, err := ts.raw.ExecContext(ctx,
+		`INSERT INTO job_runs (org_id, job_id, status, attempt, exit_code, output, started_at, ended_at, created_at)
+		 VALUES (?, ?, 'failed', 1, 3, '', ?, ?, ?)`,
+		ts.orgID, jobID, ts3(now.Add(-4*time.Minute)), ts3(now.Add(-3*time.Minute)), ts3(now.Add(-4*time.Minute))); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	codec := testCodec()
+	h := httpserver.New(ts.store, clock.NewFake(now), nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&httpserver.AuthConfig{Codec: codec}).Handler()
+	cookie, _ := validSessionCookie(t, as, codec)
+
+	body := dashGet(t, h, cookie, "/").Body.String()
+	for _, want := range []string{
+		`<time datetime="2026-10-21T13:56:00Z" title="2026-10-21 13:56:00 UTC">4m ago</time>`,
+		`next <time datetime="2026-10-21T23:49:00Z" title="2026-10-21 23:49:00 UTC">in 9h 49m</time>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("job list missing %q; body=%q", want, body)
+		}
+	}
+	// A job with no schedule has no next run, and one that never ran no time.
+	if n := strings.Count(body, "next <time"); n != 1 {
+		t.Errorf("want one next-run time (the manual job has none), got %d", n)
+	}
+	if n := strings.Count(body, "<time"); n != 2 {
+		t.Errorf("want two times on the page, got %d", n)
 	}
 }
 

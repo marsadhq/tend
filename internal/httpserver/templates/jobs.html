@@ -73,13 +73,15 @@
 <tr id="job-row-{{.ID}}" class="row-link" data-href="/jobs/{{.ID}}">
   <td class="cell-name"><a href="/jobs/{{.ID}}">{{.Name}}</a></td>
   <td class="cell-mono cell-type">{{.Type}}</td>
-  <td class="cell-mono cell-muted cell-schedule">{{.Schedule}}</td>
+  <td class="cell-mono cell-muted cell-schedule">{{.Schedule}}
+    {{- with .NextRun}}<span class="cell-sub">next <time datetime="{{.ISO}}" title="{{.Abs}}">{{.Rel}}</time></span>{{end}}</td>
   <td class="cell-state">
     {{if .Enabled}}<span class="tag tag-on">enabled</span>
     {{else}}<span class="tag tag-off">paused</span>{{end}}
   </td>
   <td class="col-status">
     {{if .LastStatus}}<span class="pill {{.StatusClass}}">{{.LastStatus}}</span>
+    {{- with .LastRun}}<span class="cell-sub"><time datetime="{{.ISO}}" title="{{.Abs}}">{{.Rel}}</time></span>{{end}}
     {{else}}<span class="pill pill-none">no runs</span>{{end}}
   </td>
   <td class="col-actions">
