@@ -114,6 +114,11 @@ const (
 	DefaultRenewAfterFraction = 2.0 / 3
 )
 
+// MaxWarnDays is the largest warn_days a probe takes: ten years. A larger one
+// would overflow the time.Duration it is compared as, and an expiry that is
+// days away would then pass.
+const MaxWarnDays = 3650
+
 // DefaultWarnDays is the warn_days of a probe of type t that sets none.
 func DefaultWarnDays(t JobType) int {
 	switch t {
@@ -148,8 +153,8 @@ func ValidateSpec(t JobType, s *Spec) error {
 	if s == nil {
 		s = &Spec{}
 	}
-	if s.WarnDays < 0 && t != Drill {
-		return fmt.Errorf("warn_days must be 0 or more, got %d", s.WarnDays)
+	if (s.WarnDays < 0 || s.WarnDays > MaxWarnDays) && t != Drill {
+		return fmt.Errorf("warn_days must be from 0 to %d, got %d", MaxWarnDays, s.WarnDays)
 	}
 	switch t {
 	case TLS:

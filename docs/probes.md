@@ -49,8 +49,8 @@ server). A probe that runs into its timeout is `timed_out`, like any job.
 
 `warn_days` is how close to the date a probe starts failing: the run fails
 once the date is `warn_days` days away or less, and `0` fails only once the
-date has passed. When it is left out it is 14 for `tls` and `expiry` jobs and
-30 for `domain` jobs.
+date has passed. It can be at most 3650 (ten years). When it is left out it
+is 14 for `tls` and `expiry` jobs and 30 for `domain` jobs.
 
 ## `tls`: certificates
 

@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,42 @@ func TestValidateSpecTLS(t *testing.T) {
 	// Shell and http jobs have no settings to check.
 	if err := ValidateSpec(Shell, nil); err != nil {
 		t.Errorf("ValidateSpec(shell, nil) = %v", err)
+	}
+}
+
+// TestValidateSpecWarnDaysCap: warn_days is at most ten years. A larger one
+// overflows the time.Duration it becomes and would make a failing probe pass.
+func TestValidateSpecWarnDaysCap(t *testing.T) {
+	specs := map[JobType]Spec{
+		TLS:    {Host: "example.com"},
+		Domain: {Domain: "example.com"},
+		Expiry: {ExpiresAt: t0},
+	}
+	for typ, s := range specs {
+		for _, ok := range []int{0, 1, MaxWarnDays} {
+			s.WarnDays = ok
+			if err := ValidateSpec(typ, &s); err != nil {
+				t.Errorf("%s warn_days %d: %v", typ, ok, err)
+			}
+		}
+		for _, bad := range []int{MaxWarnDays + 1, 106752, 1 << 40} {
+			s.WarnDays = bad
+			if err := ValidateSpec(typ, &s); err == nil || !strings.Contains(err.Error(), "warn_days") {
+				t.Errorf("%s warn_days %d: err = %v, want a refusal", typ, bad, err)
+			}
+		}
+	}
+	if MaxWarnDays != 3650 {
+		t.Errorf("MaxWarnDays = %d, want 3650", MaxWarnDays)
+	}
+}
+
+// TestHugeWarnDaysDoesNotPass shows what the cap prevents: a probe whose
+// warn_days overflowed passed a date that is about to expire. A row stored by
+// other means is refused at run time.
+func TestHugeWarnDaysDoesNotPass(t *testing.T) {
+	res := fixedNow(t0).Run(context.Background(), expiryJob(Spec{ExpiresAt: t0.Add(day), WarnDays: 106752}), nil)
+	if res.Status != StatusFailed || !strings.Contains(res.Output, "warn_days") {
+		t.Fatalf("status %s, output:\n%s", res.Status, res.Output)
 	}
 }
