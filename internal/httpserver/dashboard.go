@@ -117,7 +117,7 @@ type jobRow struct {
 	Enabled     bool
 	LastStatus  string // "" when the job has no runs
 	StatusClass string
-	LastRun     *when // when the last run started; nil when the job has no runs
+	LastRun     *when // when the last run ended (see lastRunAt); nil when the job has no runs
 	NextRun     *when // when the job runs next; nil when it does not
 	CSRFToken   string
 }
@@ -340,6 +340,30 @@ func whenOf(now, t time.Time) *when {
 	return &when{Rel: relTime(now, t), Abs: fmtTime(t), ISO: t.UTC().Format(time.RFC3339)}
 }
 
+// pastWhen is whenOf for a moment that has happened: one the server's clock
+// has not reached yet (skew between the hosts that wrote it) is "just now",
+// never "in 2m".
+func pastWhen(now, t time.Time) *when {
+	w := whenOf(now, t)
+	if w != nil && t.After(now) {
+		w.Rel = "just now"
+	}
+	return w
+}
+
+// lastRunAt dates a job's last run for the job list: when it ended, so a long
+// run that just failed reads "1m ago" rather than the hours since it began;
+// when it started, while it is still going; when it was queued, before that.
+func lastRunAt(r jobs.Run) time.Time {
+	switch {
+	case !r.EndedAt.IsZero():
+		return r.EndedAt
+	case !r.StartedAt.IsZero():
+		return r.StartedAt
+	}
+	return r.CreatedAt
+}
+
 // nextRunOf describes when a job runs next: nil for a paused job or one with
 // no next run (manual, or a one-off that has run), "due" once that time has
 // come.
@@ -414,11 +438,7 @@ func toJobRow(now time.Time, j jobs.Job, last *jobs.Run) jobRow {
 	if last != nil {
 		row.LastStatus = string(last.Status)
 		row.StatusClass = statusClass(last.Status)
-		started := last.StartedAt
-		if started.IsZero() { // still queued
-			started = last.CreatedAt
-		}
-		row.LastRun = whenOf(now, started)
+		row.LastRun = pastWhen(now, lastRunAt(*last))
 	}
 	return row
 }

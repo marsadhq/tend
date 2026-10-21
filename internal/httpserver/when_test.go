@@ -3,6 +3,8 @@ package httpserver
 import (
 	"testing"
 	"time"
+
+	"github.com/marsadhq/tend/internal/jobs"
 )
 
 func TestRelTime(t *testing.T) {
@@ -67,5 +69,36 @@ func TestNextRunOf(t *testing.T) {
 		case tc.want != "" && (got == nil || got.Rel != tc.want):
 			t.Errorf("%s: got %+v, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A job's last run is dated by when it ended: a three-hour backup that failed
+// a minute ago failed "1m ago", not "3h ago". A run still going is dated by
+// its start, a queued one by when it was queued, and a time ahead of the
+// server's clock (skew between hosts) reads "just now", never "in 2m".
+func TestToJobRowLastRun(t *testing.T) {
+	now := time.Date(2026, 10, 21, 14, 0, 0, 0, time.UTC)
+	job := jobs.Job{ID: 1, Name: "backup", Enabled: true}
+	for _, tc := range []struct {
+		name    string
+		run     jobs.Run
+		wantRel string
+		wantISO string
+	}{
+		{"ended", jobs.Run{Status: jobs.StatusFailed, CreatedAt: now.Add(-3 * time.Hour),
+			StartedAt: now.Add(-3 * time.Hour), EndedAt: now.Add(-time.Minute)}, "1m ago", "2026-10-21T13:59:00Z"},
+		{"running", jobs.Run{Status: jobs.StatusRunning, CreatedAt: now.Add(-21 * time.Minute),
+			StartedAt: now.Add(-20 * time.Minute)}, "20m ago", "2026-10-21T13:40:00Z"},
+		{"queued", jobs.Run{Status: jobs.StatusPending, CreatedAt: now.Add(-5 * time.Minute)}, "5m ago", "2026-10-21T13:55:00Z"},
+		{"clock skew", jobs.Run{Status: jobs.StatusSucceeded, CreatedAt: now.Add(time.Minute),
+			StartedAt: now.Add(time.Minute), EndedAt: now.Add(2 * time.Minute)}, "just now", "2026-10-21T14:02:00Z"},
+	} {
+		row := toJobRow(now, job, &tc.run)
+		if row.LastRun == nil || row.LastRun.Rel != tc.wantRel || row.LastRun.ISO != tc.wantISO {
+			t.Errorf("%s: last run = %+v, want %q at %s", tc.name, row.LastRun, tc.wantRel, tc.wantISO)
+		}
+	}
+	if row := toJobRow(now, job, nil); row.LastRun != nil {
+		t.Errorf("a job with no runs: last run = %+v, want none", row.LastRun)
 	}
 }
