@@ -560,6 +560,9 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 // it was in flight, and there is nothing left to record the result on. That is
 // logged, and finish returns nil.
 func (r *Runner) finish(ctx context.Context, run Run, job Job, status RunStatus, exitCode, attempt int, output string, termEv core.Event) error {
+	if termEv.Type == EventRunFailed {
+		termEv.Detail = failureDetail(job, status, output)
+	}
 	// shutdown logs that the attempts were ended by a cancelled context. It is
 	// not an error, but the job is going to run a second time.
 	shutdown := func(try int, err error) {
@@ -690,6 +693,7 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 		}
 		reason := fmt.Sprintf("run still 'running' %s past its %s time limit (%s)",
 			reapSlack, limit, cause)
+		termEv.Detail = failureDetail(job, StatusFailed, "reaped: "+reason)
 		reaped, err := r.store.ReapStaleRun(ctx, run.ID, "reaped: "+reason, termEv)
 		if err != nil {
 			record(run, "fail stale run", err)

@@ -264,9 +264,10 @@ accepts neither NUL nor invalid UTF-8 and a rejected value would leave the run
 `core.Event` is the generic record carried by the event pipeline: `{ID, OrgID,
 Type, Source, Payload (JSON), DedupKey, CreatedAt, Detail}`. Events are the spine that ties
 the runner, watcher, and notifier together. `Detail` is optional JSON for the
-notification text only (why and when a heartbeat went down); it is stored with
-the event but left out of the webhook's legacy `event` object, whose bytes never
-change.
+notification text only (why and when a heartbeat went down; the tail of a
+failed run's output, already redacted, and the timeout a timed-out run hit:
+`jobs.FailureDetail`); it is stored with the event but left out of the
+webhook's legacy `event` object, whose bytes never change.
 
 Event types currently emitted:
 
