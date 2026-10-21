@@ -172,16 +172,15 @@ func secretMargin(secrets []string) int {
 	return m
 }
 
-// cutRedacted redacts secrets in b and then holds the result to max bytes,
-// cut on a character boundary and followed by marker when anything was cut
-// (or truncated says the capture already lost bytes).
+// cutRedacted holds a capture b, kept margin bytes longer than max, to its
+// first max bytes with the secrets redacted, followed by marker when anything
+// was cut (or truncated says the capture already lost bytes). The cut is made
+// in b first (headOf), then the rest is redacted.
 func cutRedacted(b []byte, truncated bool, max int, secrets []string, marker string) string {
-	s := redact(string(b), secrets)
-	if len(s) <= max && !truncated {
-		return s
+	head, cut := headOf(b, max, secrets, truncated)
+	s := firstBytes(redact(string(head), secrets), max)
+	if cut || truncated {
+		s += marker
 	}
-	if len(s) > max {
-		s = string(trimPartialRune([]byte(s[:max])))
-	}
-	return s + marker
+	return s
 }

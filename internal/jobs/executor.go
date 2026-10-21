@@ -307,33 +307,14 @@ func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]stri
 // shellOutput is what a shell job's capture c hands the runner, which redacts
 // the job's secrets and then cuts the text to maxOutputBytes (storedOutput).
 // When the job printed no more than c keeps, that is all of it: every secret
-// in it is whole. When it printed more, it is the first maxOutputBytes,
-// extended to the end of any secret that straddles that point (the bytes c
-// keeps past it are there for that), followed by the truncation marker. A
-// secret the capture itself cut starts after that point, and is left out
-// with the rest: once the secrets before it are redacted the text is shorter,
-// and would otherwise have room under the cap for the part that was caught.
+// in it is whole. When it printed more, it is the part headOf keeps of the
+// first maxOutputBytes, followed by the truncation marker.
 func shellOutput(c *cappedBuffer, secrets []string) string {
-	b := c.buf.Bytes()
 	if !c.truncated {
-		return string(b)
+		return c.buf.String()
 	}
-	end := min(maxOutputBytes, len(b))
-	for _, v := range secrets {
-		if len(v) < 2 {
-			continue // one byte cannot straddle a point
-		}
-		lo, hi := max(0, maxOutputBytes-len(v)+1), min(len(b), maxOutputBytes+len(v)-1)
-		for i := lo; i < hi; {
-			at := bytes.Index(b[i:hi], []byte(v))
-			if at < 0 || i+at >= maxOutputBytes {
-				break
-			}
-			end = max(end, i+at+len(v))
-			i += at + 1
-		}
-	}
-	return string(trimPartialRune(b[:end])) + truncationMarker
+	head, _ := headOf(c.buf.Bytes(), maxOutputBytes, secrets, true)
+	return string(head) + truncationMarker
 }
 
 // shellCommand builds the command every shell-backed step runs: a shell job's
