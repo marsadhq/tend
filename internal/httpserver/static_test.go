@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,55 @@ func TestInkFaintClearsWCAGContrast(t *testing.T) {
 	}
 	if r := contrastRatio(t, inkFaint, bgElev); r < minRatio {
 		t.Errorf("--ink-faint (%s) vs --bg-elev (%s): contrast %.3f:1, want >= %.1f:1", inkFaint, bgElev, r, minRatio)
+	}
+}
+
+// mediaBlock returns the body of the first "@media <query> {" block in css.
+func mediaBlock(t *testing.T, css, query string) string {
+	t.Helper()
+	open := "@media " + query + " {"
+	start := strings.Index(css, open)
+	if start < 0 {
+		t.Fatalf("app.css has no %q block", open)
+	}
+	depth := 0
+	for i := start + len(open) - 1; i < len(css); i++ {
+		switch css[i] {
+		case '{':
+			depth++
+		case '}':
+			if depth--; depth == 0 {
+				return css[start+len(open) : i]
+			}
+		}
+	}
+	t.Fatalf("app.css: %q block is not closed", open)
+	return ""
+}
+
+// On a phone the tabs are a bar fixed to the bottom of the screen. The page
+// keeps that much room at its bottom when it scrolls something into view (a
+// focused link, the end of a run's output), so the bar never covers it. And
+// the safe-area insets are only filled in under viewport-fit=cover, which the
+// pages do not ask for, so the stylesheet must not lean on them.
+func TestPhoneTabBarLeavesRoomForFocus(t *testing.T) {
+	raw, err := os.ReadFile("static/app.css")
+	if err != nil {
+		t.Fatalf("read app.css: %v", err)
+	}
+	css := string(raw)
+	phone := mediaBlock(t, css, "(max-width: 640px)")
+	if !regexp.MustCompile(`\.nav \{[^}]*position: fixed`).MatchString(phone) {
+		t.Skip("the phone tabs are no longer a fixed bar")
+	}
+	if !regexp.MustCompile(`(?m)^\s*html \{[^}]*scroll-padding-bottom:`).MatchString(phone) {
+		t.Errorf("the phone block fixes the tabs to the bottom but sets no scroll-padding-bottom on html")
+	}
+	base, err := os.ReadFile("templates/base.html")
+	if err != nil {
+		t.Fatalf("read base.html: %v", err)
+	}
+	if strings.Contains(css, "safe-area-inset") && !strings.Contains(string(base), "viewport-fit=cover") {
+		t.Errorf("app.css uses env(safe-area-inset-*), which is 0 without viewport-fit=cover in the viewport meta")
 	}
 }
