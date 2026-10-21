@@ -117,7 +117,18 @@ type jobRow struct {
 	Enabled     bool
 	LastStatus  string // "" when the job has no runs
 	StatusClass string
+	LastRun     *when // when the last run started; nil when the job has no runs
+	NextRun     *when // when the job runs next; nil when it does not
 	CSRFToken   string
+}
+
+// when is a moment as the dashboard shows it: relative to now for reading
+// at a glance ("4m ago", "in 9h 49m"), with the exact time kept in the
+// element (ISO for its datetime, Abs for its tooltip).
+type when struct {
+	Rel string
+	Abs string
+	ISO string
 }
 
 // jobDetailPage backs the job detail page.
@@ -321,6 +332,68 @@ func timeoutOf(j jobs.Job) string {
 	return (time.Duration(j.TimeoutSeconds) * time.Second).String()
 }
 
+// whenOf describes t as seen at now, or returns nil when t is zero.
+func whenOf(now, t time.Time) *when {
+	if t.IsZero() {
+		return nil
+	}
+	return &when{Rel: relTime(now, t), Abs: fmtTime(t), ISO: t.UTC().Format(time.RFC3339)}
+}
+
+// nextRunOf describes when a job runs next: nil for a paused job or one with
+// no next run (manual, or a one-off that has run), "due" once that time has
+// come.
+func nextRunOf(now time.Time, enabled bool, next time.Time) *when {
+	if !enabled || next.IsZero() {
+		return nil
+	}
+	w := whenOf(now, next)
+	if !next.After(now) {
+		w.Rel = "due"
+	}
+	return w
+}
+
+// relTime says how long before or after now t is, in its largest one or two
+// units: "just now", "4m ago", "3h 5m ago", "in 9h 49m", "in 2d". Beyond 60
+// days it gives the date, which reads better than a count of days.
+func relTime(now, t time.Time) string {
+	d := t.Sub(now)
+	future := d > 0
+	if !future {
+		d = -d
+	}
+	const day = 24 * time.Hour
+	var s string
+	switch {
+	case d < time.Minute:
+		if future {
+			return "in under a minute"
+		}
+		return "just now"
+	case d < time.Hour:
+		s = fmt.Sprintf("%dm", d/time.Minute)
+	case d < day:
+		h, m := d/time.Hour, d%time.Hour/time.Minute
+		s = fmt.Sprintf("%dh", h)
+		if m > 0 && h < 10 {
+			s += fmt.Sprintf(" %dm", m)
+		}
+	case d <= 60*day:
+		days, h := d/day, d%day/time.Hour
+		s = fmt.Sprintf("%dd", days)
+		if h > 0 && days < 3 {
+			s += fmt.Sprintf(" %dh", h)
+		}
+	default:
+		return t.UTC().Format("2006-01-02")
+	}
+	if future {
+		return "in " + s
+	}
+	return s + " ago"
+}
+
 // fmtTime renders a timestamp for display, or a dash when zero.
 func fmtTime(t time.Time) string {
 	if t.IsZero() {
@@ -329,17 +402,23 @@ func fmtTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05 MST")
 }
 
-func toJobRow(j jobs.Job, last *jobs.Run) jobRow {
+func toJobRow(now time.Time, j jobs.Job, last *jobs.Run) jobRow {
 	row := jobRow{
 		ID:       j.ID,
 		Name:     j.Name,
 		Type:     string(j.Type),
 		Schedule: scheduleOf(j),
 		Enabled:  j.Enabled,
+		NextRun:  nextRunOf(now, j.Enabled, j.NextRunAt),
 	}
 	if last != nil {
 		row.LastStatus = string(last.Status)
 		row.StatusClass = statusClass(last.Status)
+		started := last.StartedAt
+		if started.IsZero() { // still queued
+			started = last.CreatedAt
+		}
+		row.LastRun = whenOf(now, started)
 	}
 	return row
 }
@@ -603,7 +682,7 @@ func (s *Server) latestRunOf(r *http.Request, orgID, jobID int64) *jobs.Run {
 // buttons can post. Used by both the jobs table and the standalone action
 // fragment, so a swapped-in row is byte-identical in shape to a table row.
 func (s *Server) jobRowFor(r *http.Request, orgID int64, j jobs.Job) jobRow {
-	row := toJobRow(j, s.latestRunOf(r, orgID, j.ID))
+	row := toJobRow(s.clk.Now(), j, s.latestRunOf(r, orgID, j.ID))
 	row.CSRFToken = CSRFTokenFrom(r.Context())
 	return row
 }
