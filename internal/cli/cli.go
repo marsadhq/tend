@@ -2114,8 +2114,10 @@ Commands:
   heartbeat add ...   create/update a heartbeat (prints the ping URL)
   heartbeat list      list heartbeats
   heartbeat show <n>  show a heartbeat: status, run, last result and output
+  heartbeat ping-url <n>  print a heartbeat's ping URL
   heartbeat ping-key [-new|-set|-clear]  the org's ping key for slug URLs
   heartbeat history <n> [-body]  its pings and transitions, newest first
+  heartbeat rm <n>    delete a heartbeat (its past events are kept)
   import healthchecks --api-key-file <f>  import a Healthchecks project's checks
                       as heartbeats, keeping their UUIDs as tokens (--dry-run)
   doctor              diagnose config/DB/connectivity
