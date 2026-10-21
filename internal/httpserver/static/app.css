@@ -511,7 +511,7 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
     margin: 0;
-    padding: 6px 10px calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 10px;
     background: var(--bg-elev);
     border-top: 1px solid var(--line);
   }
@@ -599,7 +599,10 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .meta-item dd { font-size: 13px; }
   .section { margin-top: 32px; }
 
-  /* Room below the content for the tab bar. */
-  .shell { padding: 24px 16px calc(104px + env(safe-area-inset-bottom, 0px)); }
+  /* Room below the content for the tab bar (61px tall), and whatever the page
+     scrolls into view (a focused link, the end of a run's output) stops above
+     the bar instead of under it. */
+  .shell { padding: 24px 16px 104px; }
+  html { scroll-padding-bottom: 72px; }
   .auth-card { padding: 32px 22px; }
 }
