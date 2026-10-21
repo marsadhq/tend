@@ -282,6 +282,7 @@ type headTail struct {
 
 func (h *headTail) Write(p []byte) (int, error) {
 	n := len(p)
+	p = withoutNULs(p)
 	keep := h.max + h.margin
 	if room := keep - len(h.head); room > 0 {
 		k := min(room, len(p))

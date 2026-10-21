@@ -125,3 +125,20 @@ func TestCapturesKeepNoPieceOfACutSecret(t *testing.T) {
 		}
 	}
 }
+
+// NUL bytes never reach the stored output, so a capture does not count them
+// against its size: a job printing UTF-16 (a NUL after every ASCII byte)
+// keeps as much text as any other, and a secret printed that way across the
+// cut is recognised there like one printed plainly.
+func TestCapturesDropNULs(t *testing.T) {
+	c := &cappedBuffer{max: 5}
+	c.Write([]byte(strings.Repeat("\x00", 100) + "a\x00b\x00c"))
+	if c.buf.String() != "abc" || c.truncated {
+		t.Errorf("cappedBuffer kept %q (truncated %v), want abc", c.buf.String(), c.truncated)
+	}
+	h := &headTail{max: 4}
+	h.Write([]byte("\x00\x00ab\x00cd\x00"))
+	if got := h.String(); got != "abcd" {
+		t.Errorf("headTail kept %q, want abcd", got)
+	}
+}

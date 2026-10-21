@@ -267,9 +267,10 @@ func TestRunnerKeepsStoredOutputWithinTheCap(t *testing.T) {
 		// Exactly at the cap, and just under it after growing: untouched.
 		{outputJob: outputJob{name: "exactly-the-cap", raw: strings.Repeat("x", outputCap)}, wantLen: outputCap},
 		{outputJob: outputJob{name: "grows-to-exactly-the-cap", raw: strings.Repeat("a\xff", outputCap/4)}, wantLen: outputCap},
-		// NULs only shrink it.
+		// NULs only shrink it, and the capture does not count them: a whole
+		// MiB of text printed with a NUL after each byte is kept, uncut.
 		{outputJob: outputJob{name: "nuls-shrink-it", raw: strings.Repeat("x\x00", outputCap/2)}, wantLen: outputCap / 2},
-		{outputJob: outputJob{name: "nuls-shrink-a-cut-capture", raw: strings.Repeat("x\x00", outputCap)}, markedShort: true, wantLen: outputCap / 2},
+		{outputJob: outputJob{name: "nuls-do-not-count-against-the-cap", raw: strings.Repeat("x\x00", outputCap)}, wantLen: outputCap},
 		// The capture is cut two bytes short of the cap, because the next euro
 		// sign would straddle it. With the marker that is more than the cap, and
 		// it must be stored as captured: nothing cut again, the marker once.
