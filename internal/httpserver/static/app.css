@@ -174,6 +174,8 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   background: var(--bg-elev);
 }
+/* A table wider than the page scrolls inside this box, never the page. */
+.table-scroll { overflow-x: auto; }
 .grid-table thead th {
   font-family: var(--mono);
   font-size: 11px;
@@ -478,6 +480,54 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
     font-size: 14px;
   }
   .btn-ghost { min-height: 44px; padding: 0 16px; font-size: 13px; }
+
+  /* Tables become a list of cards: a row wraps its cells onto as many lines
+     as it needs, and a cell with a data-label shows its column's name in
+     front of it, in place of the header row. */
+  .grid-table,
+  .grid-table tbody,
+  .grid-table td { display: block; }
+  .grid-table thead { display: none; }
+  .grid-table tbody tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: 14px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .grid-table tbody tr:last-child { border-bottom: none; }
+  .grid-table tbody td { padding: 0; margin: 4px 0; border-bottom: none; min-width: 0; }
+  .grid-table td[data-label]::before {
+    content: attr(data-label);
+    margin-right: 7px;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink-faint);
+  }
+  .grid-table .col-status { text-align: left; }
+  .cell-name { flex-basis: 100%; font-size: 15px; }
+  .runs-table .cell-name { flex-basis: auto; }
+  .cell-when { flex-basis: 100%; font-size: 12px; }
+  .cell-log { flex-basis: 100%; order: 1; }
+  .cell-log:empty { display: none; }
+  .event-table .cell-payload { flex-basis: 100%; }
+  .event-table tbody tr.is-alert td:first-child { box-shadow: none; }
+  .event-table tbody tr.is-alert { box-shadow: inset 2px 0 0 0 var(--red); }
+
+  /* A job's card: its name; how its last run went and whether it is on;
+     what it is and when it runs; its actions across the card. The empty
+     ::after item breaks the line between the second and the third. */
+  .jobs-table tbody tr::after { content: ""; flex-basis: 100%; order: 3; }
+  .jobs-table .col-status { order: 1; }
+  .jobs-table .cell-state { order: 2; }
+  .jobs-table .cell-type { order: 4; }
+  .jobs-table .cell-schedule { order: 5; }
+  .jobs-table .col-actions { order: 6; flex-basis: 100%; width: auto; }
+  .jobs-table .row-actions { display: flex; gap: 8px; }
+  .jobs-table .btn-action { flex: 1 1 0; }
 
   /* Room below the content for the tab bar. */
   .shell { padding: 24px 16px calc(104px + env(safe-area-inset-bottom, 0px)); }

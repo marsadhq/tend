@@ -13,6 +13,7 @@
      auto-escaping - never wrapped in template.HTML - so it can never become live
      markup. */}}
 {{if .Events}}
+<div class="table-scroll">
 <table class="grid-table event-table">
   <thead>
     <tr>
@@ -28,11 +29,12 @@
       <td><span class="pill {{.Class}}">{{.Type}}</span></td>
       <td class="cell-mono cell-muted">{{.Source}}</td>
       <td class="cell-mono cell-payload">{{.Payload}}</td>
-      <td class="col-status cell-mono cell-muted">{{.Created}}</td>
+      <td class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
     </tr>
     {{end}}
   </tbody>
 </table>
+</div>
 {{else}}
 <div class="empty">
   <p class="empty-title">No events yet</p>

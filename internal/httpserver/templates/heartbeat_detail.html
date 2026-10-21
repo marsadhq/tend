@@ -36,7 +36,8 @@
 <section class="section">
   <h2 class="section-title">Recent pings</h2>
   {{if .Pings}}
-  <table class="grid-table">
+  <div class="table-scroll">
+  <table class="grid-table pings-table">
     <thead>
       <tr>
         <th>Kind</th>
@@ -52,14 +53,15 @@
       <tr>
         <td><span class="pill {{.Class}}">{{.Kind}}</span></td>
         <td class="cell-mono">{{.Exit}}</td>
-        <td class="cell-mono cell-muted">{{.Duration}}</td>
-        <td class="cell-mono cell-muted">{{.RID}}</td>
-        <td class="cell-mono">{{if .Body}}<details><summary>{{.BodySize}}</summary><pre class="output">{{.Body}}</pre></details>{{end}}</td>
-        <td class="col-status cell-mono cell-muted">{{.When}}</td>
+        <td class="cell-mono cell-muted"{{if .Duration}} data-label="Took"{{end}}>{{.Duration}}</td>
+        <td class="cell-mono cell-muted"{{if .RID}} data-label="Run"{{end}}>{{.RID}}</td>
+        <td class="cell-mono cell-log">{{if .Body}}<details><summary>{{.BodySize}}</summary><pre class="output">{{.Body}}</pre></details>{{end}}</td>
+        <td class="col-status cell-mono cell-muted cell-when">{{.When}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <div class="empty">
     <p class="empty-title">No pings yet</p>
@@ -71,6 +73,7 @@
 <section class="section">
   <h2 class="section-title">Transitions</h2>
   {{if .Transitions}}
+  <div class="table-scroll">
   <table class="grid-table event-table">
     <thead>
       <tr>
@@ -84,11 +87,12 @@
       <tr class="{{if .IsAlert}}is-alert{{end}}">
         <td><span class="pill {{.Class}}">{{.Type}}</span></td>
         <td class="cell-mono cell-payload">{{.Subject}}</td>
-        <td class="col-status cell-mono cell-muted">{{.Created}}</td>
+        <td class="col-status cell-mono cell-muted cell-when">{{.Created}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <div class="empty">
     <p class="empty-title">No transitions yet</p>
