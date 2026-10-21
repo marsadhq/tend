@@ -499,11 +499,11 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 			r.logError(ctx, "runner: build terminal event", evErr, "run", run.ID, "job", job.Name)
 			return true, evErr
 		}
-		return true, r.finish(ctx, run, job, StatusFailed, -1, run.Attempt, out, termEv)
+		return true, r.finish(ctx, run, job, StatusFailed, -1, run.Attempt, out, false, termEv)
 	}
 
 	res := r.exec.run(ctx, job, env, secretValues)
-	out := storedOutput(res.Output, secretValues)
+	out := storedOutput(res.Output, secretValues, res.Truncated)
 
 	// I1: Map terminal event type to the documented vocabulary:
 	//   run.succeeded  - when execution succeeded
@@ -522,7 +522,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		r.logError(ctx, "runner: build terminal event", err, "run", run.ID, "job", job.Name)
 		return true, err
 	}
-	return true, r.finish(ctx, run, job, res.Status, res.ExitCode, res.Attempt, out, termEv)
+	return true, r.finish(ctx, run, job, res.Status, res.ExitCode, res.Attempt, out, res.Truncated, termEv)
 }
 
 // finish records the terminal state of a claimed run together with its
@@ -560,9 +560,9 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 // A run that no longer exists is not retried either: its job was deleted while
 // it was in flight, and there is nothing left to record the result on. That is
 // logged, and finish returns nil.
-func (r *Runner) finish(ctx context.Context, run Run, job Job, status RunStatus, exitCode, attempt int, output string, termEv core.Event) error {
+func (r *Runner) finish(ctx context.Context, run Run, job Job, status RunStatus, exitCode, attempt int, output string, truncated bool, termEv core.Event) error {
 	if termEv.Type == EventRunFailed {
-		termEv.Detail = failureDetail(job, status, exitCode, output)
+		termEv.Detail = failureDetail(job, status, exitCode, output, truncated)
 	}
 	// shutdown logs that the attempts were ended by a cancelled context. It is
 	// not an error, but the job is going to run a second time.
@@ -694,7 +694,7 @@ func (r *Runner) ReapOnce(ctx context.Context) error {
 		}
 		reason := fmt.Sprintf("run still 'running' %s past its %s time limit (%s)",
 			reapSlack, limit, cause)
-		termEv.Detail = failureDetail(job, StatusFailed, -1, "reaped: "+reason)
+		termEv.Detail = failureDetail(job, StatusFailed, -1, "reaped: "+reason, false)
 		reaped, err := r.store.ReapStaleRun(ctx, run.ID, "reaped: "+reason, termEv)
 		if err != nil {
 			record(run, "fail stale run", err)
@@ -777,7 +777,7 @@ func (r *Runner) resolveEnv(ctx context.Context, job Job) (map[string]string, []
 // function whole. One printed with NUL bytes between its characters across
 // that point is not recognised there and can still be stored in part; the
 // alert of a failed run leaves the cut line out of its tail (failureDetail).
-func storedOutput(raw string, secretValues []string) string {
+func storedOutput(raw string, secretValues []string, truncated bool) string {
 	var bytewise, cleaned []string
 	for _, v := range secretValues {
 		b := dropNULs(v)
@@ -791,13 +791,13 @@ func storedOutput(raw string, secretValues []string) string {
 	}
 	// The truncation marker is Tend's, not the job's: it is taken off before
 	// the output is redacted and put back after, so that no secret can match
-	// part of it.
-	body, cut := strings.CutSuffix(raw, truncationMarker)
-	out := redact(cleanOutput(redact(dropNULs(body), bytewise)), cleaned)
-	if cut {
-		out += truncationMarker
+	// part of it. truncated, not the text, says it is there: a job can print
+	// the same text.
+	if truncated {
+		raw = strings.TrimSuffix(raw, truncationMarker)
 	}
-	return capOutput(out)
+	out := redact(cleanOutput(redact(dropNULs(raw), bytewise)), cleaned)
+	return capOutput(out, truncated)
 }
 
 // cleanOutput makes captured output plain text: NUL bytes are dropped, then
@@ -821,22 +821,23 @@ func dropNULs(s string) string {
 	return strings.ReplaceAll(s, "\x00", "")
 }
 
-// capOutput holds the stored text to maxOutputBytes, not counting the
-// truncation marker. The executor already caps what it captures, but that is a
-// cap on the raw bytes; see storedOutput for what can grow them afterwards.
-// Text over the cap is cut on a character boundary (s is valid UTF-8 by now)
-// and ends with the marker exactly once, whether or not the executor had
-// already added it. Text within the cap is returned unchanged.
-func capOutput(s string) string {
-	body := strings.TrimSuffix(s, truncationMarker)
-	if len(body) <= maxOutputBytes {
-		return s
+// capOutput holds the redacted text s to maxOutputBytes, cut on a character
+// boundary (s is valid UTF-8 by now) and followed by the truncation marker,
+// which also follows s when truncated says the capture was already cut. The
+// executor already caps what it captures, but that is a cap on the raw bytes;
+// see storedOutput for what can grow them afterwards.
+func capOutput(s string, truncated bool) string {
+	if len(s) > maxOutputBytes {
+		cut := maxOutputBytes
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + truncationMarker
 	}
-	cut := maxOutputBytes
-	for cut > 0 && !utf8.RuneStart(body[cut]) {
-		cut--
+	if truncated {
+		return s + truncationMarker
 	}
-	return body[:cut] + truncationMarker
+	return s
 }
 
 // redact replaces every non-empty secret value in s with "***". This is a

@@ -377,7 +377,7 @@ func TestExecutor_ShellOutputCapped(t *testing.T) {
 	}
 
 	small := e.Run(context.Background(), Job{Type: Shell, Command: "echo small"}, nil)
-	if strings.Contains(small.Output, truncationMarker) {
+	if strings.Contains(small.Output, truncationMarker) || small.Truncated {
 		t.Errorf("small output unexpectedly carries the truncation marker: %q", small.Output)
 	}
 }
@@ -684,8 +684,8 @@ func TestRun_TruncationKeepsOutputValidUTF8(t *testing.T) {
 			if res.Status != StatusSucceeded {
 				t.Fatalf("%s pad=%d: status %s, want succeeded", name, pad, res.Status)
 			}
-			if !strings.HasSuffix(res.Output, truncationMarker) {
-				t.Fatalf("%s pad=%d: output was not truncated", name, pad)
+			if !strings.HasSuffix(res.Output, truncationMarker) || !res.Truncated {
+				t.Fatalf("%s pad=%d: output was not truncated (Truncated %v)", name, pad, res.Truncated)
 			}
 			if !utf8.ValidString(res.Output) {
 				t.Errorf("%s pad=%d: truncated output is not valid UTF-8 (the cut split a character)", name, pad)

@@ -12,7 +12,7 @@ import (
 func decodeFailure(t *testing.T, j Job, res RunResult) FailureDetail {
 	t.Helper()
 	var d FailureDetail
-	if raw := failureDetail(j, res.Status, res.ExitCode, res.Output); raw != "" {
+	if raw := failureDetail(j, res.Status, res.ExitCode, res.Output, res.Truncated); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &d); err != nil {
 			t.Fatal(err)
 		}
