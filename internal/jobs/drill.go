@@ -268,9 +268,9 @@ func removeScratch(dir string) error {
 // stopped by a full pipe, and costs the same however small the writes are.
 //
 // Each end is captured margin bytes longer than it is shown (margin is the
-// length of the longest secret), so text redacts the secrets before it makes
-// the cuts: a secret that straddled one is then redacted whole instead of
-// being kept in part.
+// length of the longest secret), so that a secret across a cut is captured
+// whole: text makes the cuts in the captured bytes (headOf, tailOf), around
+// such a secret, and redacts what it keeps.
 type headTail struct {
 	max    int
 	margin int
@@ -309,8 +309,8 @@ func (h *headTail) Write(p []byte) (int, error) {
 // String is text with no secrets to redact.
 func (h *headTail) String() string { return h.text(nil) }
 
-// text returns what was kept with secrets redacted, then cut to its first and
-// last max bytes with a marker where bytes were skipped. Cuts fall on
+// text returns what was kept, cut to its first and last max bytes with a
+// marker where bytes were skipped, and with the secrets redacted. Cuts fall on
 // character boundaries.
 func (h *headTail) text(secrets []string) string {
 	keep := int64(h.max + h.margin)
@@ -328,12 +328,12 @@ func (h *headTail) text(secrets []string) string {
 		}
 		return cutMiddle(whole[:h.max], whole[len(whole)-h.max:], int64(len(whole)-2*h.max))
 	}
-	head := redact(string(h.head), secrets)
-	end := redact(string(tail), secrets)
-	head = head[:min(len(head), h.max)]
-	end = end[max(0, len(end)-h.max):]
-	skipped := h.rest + int64(len(h.head)) - int64(len(head)) - int64(len(end))
-	return cutMiddle(head, end, skipped)
+	// Bytes were lost between the two ends: each is cut in the captured
+	// bytes first (headOf, tailOf), then redacted.
+	rawHead, _ := headOf(h.head, h.max, secrets, true)
+	rawTail, _ := tailOf(tail, h.max, secrets, true)
+	skipped := h.rest + int64(len(h.head)) - int64(len(rawHead)) - int64(len(rawTail))
+	return cutMiddle(firstBytes(redact(string(rawHead), secrets), h.max), lastBytes(redact(string(rawTail), secrets), h.max), skipped)
 }
 
 // cutMiddle joins the kept start and end of an output around the marker for
