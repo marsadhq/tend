@@ -18,6 +18,9 @@ func TestLoadBaseURL(t *testing.T) {
 		{"https://", "", true},
 		{"https://tend.example/?x=1", "", true},
 		{"https://tend.example/#top", "", true},
+		// Credentials in it would be in every alert.
+		{"https://admin:hunter2@tend.example", "", true},
+		{"https://admin@tend.example", "", true},
 	} {
 		t.Setenv(EnvBaseURL, tc.env)
 		got, err := LoadBaseURL()

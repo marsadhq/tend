@@ -253,3 +253,27 @@ func TestServeRefusesInvalidAlertOutputLines(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorReportsAlertLinks: doctor says whether chat alerts carry links,
+// and refuses to call a TEND_BASE_URL serve would leave out valid.
+func TestDoctorReportsAlertLinks(t *testing.T) {
+	cfg := keyedConfig(t)
+	for v, want := range map[string]string{
+		"":                           "alert links: none (TEND_BASE_URL is not set)",
+		"https://tend.example/":      "alert links: https://tend.example/runs/<id>",
+		"tend.example":               "alert links: none, TEND_BASE_URL is invalid:",
+		"https://a:b@tend.example/x": "alert links: none, TEND_BASE_URL is invalid:",
+	} {
+		t.Setenv("TEND_BASE_URL", v)
+		var stdout, stderr bytes.Buffer
+		if err := cli.Run(context.Background(), cfg, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("TEND_BASE_URL=%q: doctor does not say %q:\n%s", v, want, stdout.String())
+		}
+		if strings.Contains(stdout.String(), "a:b@") {
+			t.Errorf("doctor printed the base URL's password:\n%s", stdout.String())
+		}
+	}
+}

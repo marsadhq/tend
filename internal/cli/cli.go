@@ -1427,6 +1427,15 @@ func alertLinkBase(warn func(error)) string {
 	return base
 }
 
+// redactUserinfo is u with the password of any user name in it masked, for
+// printing; a value that does not parse is printed as it is.
+func redactUserinfo(u string) string {
+	if p, err := url.Parse(u); err == nil && p.User != nil {
+		return p.Redacted()
+	}
+	return u
+}
+
 // baseURL returns the externally-reachable base for ping URLs, from
 // TEND_BASE_URL or the localhost default.
 func baseURL() string {
@@ -1486,7 +1495,7 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 	fmt.Fprintf(stdout, "driver:     %s\n", cfg.Driver)
 	fmt.Fprintf(stdout, "db:         %s\n", redactDSN(cfg.Driver, cfg.DSN))
 	fmt.Fprintf(stdout, "org:        %d %q\n", org.ID, org.Name)
-	fmt.Fprintf(stdout, "base url:   %s\n", baseURL())
+	fmt.Fprintf(stdout, "base url:   %s\n", redactUserinfo(baseURL()))
 	fmt.Fprintf(stdout, "master key: %s\n", masterKey)
 	if ret, err := config.LoadRetention(); err != nil {
 		fmt.Fprintf(stdout, "retention:  invalid, serve will refuse to start: %v\n", err)
@@ -1502,6 +1511,14 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 		fmt.Fprintf(stdout, "ping bodies:  invalid, serve will refuse to start: %v\n", err)
 	} else {
 		fmt.Fprintf(stdout, "ping bodies:  first %d kB of each kept\n", limit/1000)
+	}
+	switch base, err := config.LoadBaseURL(); {
+	case err != nil:
+		fmt.Fprintf(stdout, "alert links: none, %v\n", strings.Replace(err.Error(), " is not ", " is invalid: not ", 1))
+	case base == "":
+		fmt.Fprintln(stdout, "alert links: none (TEND_BASE_URL is not set)")
+	default:
+		fmt.Fprintf(stdout, "alert links: %s/runs/<id>, %s/heartbeats/<id>\n", base, base)
 	}
 	switch lines, err := config.LoadAlertOutputLines(); {
 	case err != nil:
