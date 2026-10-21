@@ -21,7 +21,7 @@ func TestFailureDetailOfATruncatedRun(t *testing.T) {
 		{"cut in its only line", strings.Repeat("x", 100) + truncationMarker, "", true},
 	} {
 		var d FailureDetail
-		if raw := failureDetail(job, StatusFailed, 1, tc.out); raw != "" {
+		if raw := failureDetail(job, StatusFailed, 1, tc.out, tc.wantTruncated); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &d); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
@@ -39,7 +39,7 @@ func TestFailureDetailOfATruncatedRun(t *testing.T) {
 func TestFailureDetailOfAnHTTPJob(t *testing.T) {
 	job := Job{Type: HTTP}
 	var d FailureDetail
-	raw := failureDetail(job, StatusFailed, 503, "HTTP 503\n{\"error\":\"bad token tok_0123456789\"}")
+	raw := failureDetail(job, StatusFailed, 503, "HTTP 503\n{\"error\":\"bad token tok_0123456789\"}", false)
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestFailureDetailOfAnHTTPJob(t *testing.T) {
 		t.Errorf("detail = %+v, want HTTP status 503 and no body", d)
 	}
 	d = FailureDetail{}
-	raw = failureDetail(job, StatusFailed, -1, `Get "https://api.example": dial tcp: connection refused`)
+	raw = failureDetail(job, StatusFailed, -1, `Get "https://api.example": dial tcp: connection refused`, false)
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		t.Fatal(err)
 	}

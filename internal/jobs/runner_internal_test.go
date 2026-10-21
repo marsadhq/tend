@@ -127,7 +127,7 @@ func TestStoredOutputRedactsWhatWillBeStored(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := storedOutput(c.raw, c.secrets)
+			got := storedOutput(c.raw, c.secrets, false)
 			if got != c.want {
 				t.Errorf("storedOutput(%q) = %q, want %q", c.raw, got, c.want)
 			}
@@ -157,26 +157,32 @@ func TestCapOutput(t *testing.T) {
 
 	t.Run("within the cap is unchanged", func(t *testing.T) {
 		for _, s := range []string{
-			"", "short", fill(maxOutputBytes), fill(maxOutputBytes) + truncationMarker, "short" + truncationMarker,
-			// A capture the executor cut a few bytes short of the cap, to keep a
-			// character whole: with its marker it is longer than the cap.
-			fill(maxOutputBytes-1) + truncationMarker, fill(maxOutputBytes-3) + truncationMarker,
+			"", "short", fill(maxOutputBytes),
+			// Text that ends like the marker but was not cut is the job's own.
+			"short" + truncationMarker,
 		} {
-			if got := capOutput(s); got != s {
+			if got := capOutput(s, false); got != s {
 				t.Errorf("capOutput changed %d bytes of fitting text into %d bytes", len(s), len(got))
 			}
 		}
 	})
 
+	t.Run("a cut capture is marked", func(t *testing.T) {
+		// A capture the executor cut a few bytes short of the cap, to keep a
+		// character whole: with its marker it is longer than the cap.
+		for _, s := range []string{"short", fill(maxOutputBytes), fill(maxOutputBytes - 3)} {
+			if got := capOutput(s, true); got != s+truncationMarker {
+				t.Errorf("capOutput of a cut capture of %d bytes gave %d bytes, want it marked once", len(s), len(got))
+			}
+		}
+	})
+
 	t.Run("over the cap is cut and marked once", func(t *testing.T) {
-		for name, s := range map[string]string{
-			"unmarked":       fill(maxOutputBytes + 1),
-			"already marked": fill(2*maxOutputBytes) + truncationMarker,
-		} {
-			got := capOutput(s)
+		for _, truncated := range []bool{false, true} {
+			got := capOutput(fill(2*maxOutputBytes), truncated)
 			if want := fill(maxOutputBytes) + truncationMarker; got != want {
-				t.Errorf("%s: capOutput gave %d bytes ending %q, want %d bytes ending with one marker",
-					name, len(got), got[max(0, len(got)-40):], len(want))
+				t.Errorf("truncated=%v: capOutput gave %d bytes ending %q, want %d bytes ending with one marker",
+					truncated, len(got), got[max(0, len(got)-40):], len(want))
 			}
 		}
 	})
@@ -185,7 +191,7 @@ func TestCapOutput(t *testing.T) {
 		for _, ch := range []string{"é", "€", "\U0001F600", "�"} {
 			for pad := 0; pad < len(ch); pad++ {
 				s := fill(pad) + strings.Repeat(ch, maxOutputBytes/len(ch)+8)
-				got := capOutput(s)
+				got := capOutput(s, false)
 				kept := strings.TrimSuffix(got, truncationMarker)
 				if kept == got {
 					t.Fatalf("%q pad=%d: output was not marked as truncated", ch, pad)

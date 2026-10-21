@@ -117,9 +117,13 @@ type RunResult struct {
 	Status   RunStatus
 	ExitCode int
 	Output   string
-	Attempt  int
-	Started  time.Time
-	Ended    time.Time
+	// Truncated says the output was cut at maxOutputBytes; Output then ends
+	// with truncationMarker. A job can print that text itself, so this, not
+	// the text, is what says the output was cut.
+	Truncated bool
+	Attempt   int
+	Started   time.Time
+	Ended     time.Time
 }
 
 // Executor runs jobs. Zero value is usable via NewExecutor.
@@ -316,10 +320,11 @@ func (e *Executor) runOnceShell(cctx context.Context, j Job, env map[string]stri
 	err := cmd.Run()
 
 	res := RunResult{
-		Output:  shellOutput(buf, secrets),
-		Attempt: attempt,
-		Started: started,
-		Ended:   time.Now(),
+		Output:    shellOutput(buf, secrets),
+		Truncated: buf.truncated,
+		Attempt:   attempt,
+		Started:   started,
+		Ended:     time.Now(),
 	}
 	res.Status, res.ExitCode = shellOutcome(cctx, err)
 	return res
@@ -437,6 +442,7 @@ func (e *Executor) runOnceHTTP(cctx context.Context, j Job, attempt int, started
 	res.Output = fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, string(body))
 	if truncated {
 		res.Output += truncationMarker
+		res.Truncated = true
 	}
 	res.Ended = time.Now()
 

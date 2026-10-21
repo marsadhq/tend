@@ -103,3 +103,42 @@ func TestRunFailedCarriesTheOutputTail(t *testing.T) {
 		}
 	}
 }
+
+// TestRunFailedTrustsOnlyItsOwnTruncation: a job that prints the text of the
+// truncation marker at the end of a short output was not cut. Its output is
+// stored as printed, and its alert's tail is its true end, last line and all.
+func TestRunFailedTrustsOnlyItsOwnTruncation(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, ctx)
+	org, err := s.BootstrapDefaultOrg(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const printed = "uploading\nERROR: disk full\n... [output truncated at 1MiB]"
+	id, err := s.CreateJob(ctx, jobs.Job{OrgID: org.ID, Name: "mimic", Type: jobs.Shell, Enabled: true,
+		Command: "printf '%s' '" + printed + "'; exit 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueRun(ctx, org.ID, id); err != nil {
+		t.Fatal(err)
+	}
+	r := jobs.NewRunner(s, jobs.NewExecutor(), nil, clock.NewFake(time.Now()))
+	if err := r.DrainOnce(ctx); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	runs, err := s.ListRuns(ctx, org.ID, id, 1)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("ListRuns: %v", err)
+	}
+	if run, _ := s.GetRun(ctx, org.ID, runs[0].ID); run.Output != printed {
+		t.Errorf("stored output %q, want it as printed", run.Output)
+	}
+	evts, err := s.ListEvents(ctx, org.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := failureDetailOf(t, evts, "mimic"); !ok || d.Truncated || d.Output != printed {
+		t.Errorf("detail = %+v (ok=%v), want the whole output and no truncation", d, ok)
+	}
+}

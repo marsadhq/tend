@@ -40,21 +40,22 @@ type FailureDetail struct {
 // failureDetail is the Detail of the run.failed of a run of job that ended in
 // status with exitCode and the stored output out, or "" when there is nothing
 // to say.
-func failureDetail(job Job, status RunStatus, exitCode int, out string) string {
-	return encodeFailure(job, status, exitCode, out, givesVerdict(job.Type))
+func failureDetail(job Job, status RunStatus, exitCode int, out string, truncated bool) string {
+	return encodeFailure(job, status, exitCode, out, truncated, givesVerdict(job.Type))
 }
 
 // encodeFailure is failureDetail, with verdictFirst saying whether the output
-// opens with its verdict.
-func encodeFailure(job Job, status RunStatus, exitCode int, out string, verdictFirst bool) string {
+// opens with its verdict. truncated says the output was cut at 1 MiB (it then
+// ends with the truncation marker); the text alone is not trusted to say so.
+func encodeFailure(job Job, status RunStatus, exitCode int, out string, truncated, verdictFirst bool) string {
 	var d FailureDetail
 	if job.Type == HTTP && strings.HasPrefix(out, "HTTP ") {
 		d.HTTPStatus, out = exitCode, ""
 	}
-	if body, cut := strings.CutSuffix(out, truncationMarker); cut {
+	if truncated {
 		// The cut can fall inside anything, part of a secret printed in a
 		// form redaction does not recognise included: its line stays out.
-		out, d.Truncated = dropLastLine(body), true
+		out, d.Truncated = dropLastLine(strings.TrimSuffix(out, truncationMarker)), true
 	}
 	if verdictFirst {
 		verdict, rest, _ := strings.Cut(strings.TrimLeft(out, "\n"), "\n\n")
@@ -92,7 +93,7 @@ func dropLastLine(s string) string {
 // output (UnreadableRunOutput): its FAIL: line as the verdict, the advice
 // after it as the output.
 func UnreadableFailureDetail(output string) string {
-	return encodeFailure(Job{}, StatusFailed, -1, output, true)
+	return encodeFailure(Job{}, StatusFailed, -1, output, false, true)
 }
 
 // givesVerdict reports whether a job of type t opens its output with its
