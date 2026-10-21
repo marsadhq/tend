@@ -99,8 +99,8 @@ var rdapBootstraps = struct {
 // rdapBase returns the base URL of the RDAP server for domain, from the
 // bootstrap file at e.RDAPBootstrapURL (IANA's when empty). The file is
 // fetched once a day; when fetching it again fails, the copy held is used and
-// a note about it is added to r.
-func (e *Executor) rdapBase(ctx context.Context, domain string, r *probeReport) (string, error) {
+// note says so (it is "" otherwise).
+func (e *Executor) rdapBase(ctx context.Context, domain string) (base, note string, err error) {
 	src := e.RDAPBootstrapURL
 	if src == "" {
 		src = IANABootstrapURL
@@ -120,9 +120,9 @@ func (e *Executor) rdapBase(ctx context.Context, domain string, r *probeReport) 
 			rdapBootstraps.Unlock()
 			b = fresh
 		case held:
-			r.add("bootstrap", "the copy fetched %s was used; fetching it again failed: %v", dateText(b.fetched), err)
+			note = fmt.Sprintf("the copy fetched %s was used; fetching it again failed: %v", dateText(b.fetched), err)
 		default:
-			return "", fmt.Errorf("RDAP bootstrap file: %w", err)
+			return "", "", fmt.Errorf("RDAP bootstrap file: %w", err)
 		}
 	}
 
@@ -130,11 +130,11 @@ func (e *Executor) rdapBase(ctx context.Context, domain string, r *probeReport) 
 	if !ok {
 		tld := "." + domain[strings.LastIndex(domain, ".")+1:]
 		if b.listsPlainHTTP(domain) {
-			return "", fmt.Errorf("the IANA bootstrap file lists only plain http RDAP servers for %q, which are not used unless asked for: set rdap_url to one to use it anyway", tld)
+			return "", "", fmt.Errorf("the IANA bootstrap file lists only plain http RDAP servers for %q, which are not used unless asked for: set rdap_url to one to use it anyway", tld)
 		}
-		return "", fmt.Errorf("no RDAP server for %q in the IANA bootstrap file; some TLDs have none: set rdap_url if the registry runs one, or watch the date with an expiry job", tld)
+		return "", "", fmt.Errorf("no RDAP server for %q in the IANA bootstrap file; some TLDs have none: set rdap_url if the registry runs one, or watch the date with an expiry job", tld)
 	}
-	return base, nil
+	return base, note, nil
 }
 
 // maxRDAPRedirects bounds how many redirects one RDAP request follows.
@@ -311,10 +311,10 @@ func (e *Executor) runOnceDomain(ctx context.Context, j Job, attempt int, starte
 	var r probeReport
 	r.add("domain", "%s", domain)
 
-	base := s.RDAPURL
+	base, note := s.RDAPURL, ""
 	if base == "" {
 		var err error
-		if base, err = e.rdapBase(ctx, domain, &r); err != nil {
+		if base, note, err = e.rdapBase(ctx, domain); err != nil {
 			return probeErrorResult(ctx, attempt, started, err)
 		}
 	}
@@ -324,6 +324,9 @@ func (e *Executor) runOnceDomain(ctx context.Context, j Job, attempt int, starte
 	status, body, err := getRDAP(ctx, e.rdapClient(), url, maxRDAPAnswerBytes)
 	if status == http.StatusNotFound {
 		r.fail("the registry has no record of %s (HTTP 404): it is not registered, or was deleted after it lapsed", domain)
+		if note != "" {
+			r.add("bootstrap", "%s", note)
+		}
 		return r.result(attempt, started, "")
 	}
 	if err != nil {
@@ -341,9 +344,10 @@ func (e *Executor) runOnceDomain(ctx context.Context, j Job, attempt int, starte
 	now := e.now()
 	checked, exp := checkDomain(answer, now, s.WarnDays)
 	r.problems = checked.problems
-	// The bootstrap note, when there is one, goes last.
-	head, note := r.info[:2], r.info[2:]
-	r.info = append(append(append([]string(nil), head...), checked.info...), note...)
+	r.info = append(r.info, checked.info...) // after the domain and rdap lines
+	if note != "" {
+		r.add("bootstrap", "%s", note) // last: it is about how the server was found
+	}
 	return r.result(attempt, started, fmt.Sprintf("%s expires in %s (%s; %s)",
 		domain, humanDays(exp.Sub(now)), dateText(exp), warnText(s.WarnDays)))
 }
