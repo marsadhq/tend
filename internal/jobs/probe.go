@@ -160,3 +160,28 @@ func durationText(d time.Duration) string {
 	}
 	return out
 }
+
+// secretMargin is how many bytes past a cut a capture keeps: the length of the
+// longest secret, so that a secret straddling the cut is captured whole and
+// redacted before the cut is made.
+func secretMargin(secrets []string) int {
+	m := 0
+	for _, v := range secrets {
+		m = max(m, len(v))
+	}
+	return m
+}
+
+// cutRedacted redacts secrets in b and then holds the result to max bytes,
+// cut on a character boundary and followed by marker when anything was cut
+// (or truncated says the capture already lost bytes).
+func cutRedacted(b []byte, truncated bool, max int, secrets []string, marker string) string {
+	s := redact(string(b), secrets)
+	if len(s) <= max && !truncated {
+		return s
+	}
+	if len(s) > max {
+		s = string(trimPartialRune([]byte(s[:max])))
+	}
+	return s + marker
+}

@@ -501,7 +501,7 @@ func (r *Runner) claimAndRun(ctx context.Context) (bool, error) {
 		return true, r.finish(ctx, run, job, StatusFailed, -1, run.Attempt, out, termEv)
 	}
 
-	res := r.exec.Run(ctx, job, env)
+	res := r.exec.run(ctx, job, env, secretValues)
 	out := storedOutput(res.Output, secretValues)
 
 	// I1: Map terminal event type to the documented vocabulary:

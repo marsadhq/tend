@@ -601,8 +601,13 @@ These limits are constants in the code, not configuration.
   reached. It takes only the https servers of the bootstrap file (a plain-http
   one only as an explicit `rdap_url`), and its client (`rdapClient`) refuses a
   redirect to another host or from https to http, so no one but the registry
-  that was asked can answer for it. A drill keeps the first and last 32 KiB of each step's output
-  (`headTail`); its cleanup runs however the restore ended, detached from the
+  that was asked can answer for it. A drill keeps the first and last 32 KiB
+  of each step's output (`headTail`). Unlike the 1 MiB capture of a shell
+  job, these cuts (and the 16 KiB of an expiry command's stderr) are made
+  after the job's secrets are redacted: the runner hands the executor the
+  secret values, each capture keeps the longest secret's length past its
+  cut, and a secret straddling a cut is redacted whole before the cut is
+  made. A drill's cleanup runs however the restore ended, detached from the
   attempt's context and bounded by `drillCleanupTimeout` (one minute), and its
   scratch directory is removed after it, made writable first when a restore
   left read-only directories. Because that cleanup can run past the attempt's
