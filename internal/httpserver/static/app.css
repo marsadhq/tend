@@ -283,7 +283,7 @@ a { color: inherit; text-decoration: none; }
   padding: 18px 20px;
   margin: 0;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   max-height: 60vh;
   overflow: auto;
 }
@@ -547,6 +547,11 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .crumbs a,
   .jobs-poll-toggle a { display: inline-flex; align-items: center; min-height: 44px; }
   .pings-table summary { padding: 12px 0; cursor: pointer; }
+
+  /* Output scrolls with the page, not in a box of its own: one scroll is
+     easier on a touch screen. It is set smaller so more of a line fits, and
+     wraps, so it never widens the page. */
+  .output { max-height: none; font-size: 12px; line-height: 1.55; padding: 14px; }
 
   /* Long names, URLs and tokens wrap anywhere rather than widen the page. */
   .cell-name,
