@@ -72,7 +72,7 @@ func poisonedChannel(t *testing.T, ctx context.Context, s store.Store, p kitnoti
 		}
 	}
 	w = notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil },
-		"primary", slog.New(slog.NewTextHandler(io.Discard, nil)))
+		"primary", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	return org.ID, w
 }
 

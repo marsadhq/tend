@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -217,5 +220,63 @@ func TestServeSmoke(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("serve did not return within 3s of ctx cancel")
+	}
+}
+
+// TestRunAlertLinksToTheRun: end to end through `tend run`, a failed run's
+// chat alert (here Slack's text) names the job with its exit code, links to
+// the run when TEND_BASE_URL is set and ends with the last lines of its
+// output. A TEND_BASE_URL that is not an http(s) URL is reported and the alert
+// goes out without a link.
+func TestRunAlertLinksToTheRun(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, wantLink, wantWarning string
+	}{
+		{"with a base URL", "https://tend.example/", "https://tend.example/runs/1\n\n", ""},
+		{"with a bad base URL", "tend.example", "", "TEND_BASE_URL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			texts := make(chan string, 4)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var m struct {
+					Text string `json:"text"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&m)
+				texts <- m.Text
+			}))
+			defer srv.Close()
+			t.Setenv("TEND_BASE_URL", tc.base)
+
+			cfg := keyedConfig(t)
+			ctx := context.Background()
+			run := func(stdin string, args ...string) string {
+				var stdout, stderr bytes.Buffer
+				var in io.Reader
+				if stdin != "" {
+					in = strings.NewReader(stdin)
+				}
+				if err := cli.Run(ctx, cfg, args, in, &stdout, &stderr); err != nil && args[0] != "run" {
+					t.Fatalf("tend %v: %v\nstderr: %s", args, err, stderr.String())
+				}
+				return stderr.String()
+			}
+			run(`{"webhook_url":"`+srv.URL+`/hook"}`, "channel", "add", "-name", "ops", "-type", "slack")
+			run("", "rule", "add", "-channel", "ops", "-event", "run.failed")
+			run("", "job", "add", "-name", "backup", "-command", "echo uploading; echo 'UploadError: chunk 41' >&2; exit 3")
+			stderr := run("", "run", "backup")
+
+			select {
+			case text := <-texts:
+				want := "Job failed: backup (exit 3)\n" + tc.wantLink + "Last output:\nuploading\nUploadError: chunk 41"
+				if text != want {
+					t.Errorf("alert text:\n got %q\nwant %q", text, want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("no alert was posted")
+			}
+			if !strings.Contains(stderr, tc.wantWarning) || (tc.wantWarning == "" && strings.Contains(stderr, "TEND_BASE_URL")) {
+				t.Errorf("stderr = %q, want a warning naming %q", stderr, tc.wantWarning)
+			}
+		})
 	}
 }

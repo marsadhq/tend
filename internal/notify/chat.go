@@ -15,22 +15,58 @@ import (
 // subject names the job or heartbeat and the body never repeats it; the body
 // says what the subject does not: when a heartbeat last pinged and what it
 // expects, the run that did not finish, the last lines a failed run or a
-// failure ping left, the timeout a run reached. Events that already read
-// well keep render's text. The webhook posts render's text, byte for byte,
-// whatever this says.
-func chatText(ev core.Event) (subject, body string) {
+// failure ping left, the timeout a run reached. When base (Tend's external
+// URL, TEND_BASE_URL) is set, a link to the run's or the heartbeat's page
+// follows what happened and comes before any output, so a channel that cuts
+// long messages (Pushover, at 1024 characters) cuts the output, not the
+// link. Events that already read well keep render's text. The webhook posts
+// render's text, byte for byte, whatever this says.
+func chatText(ev core.Event, base string) (subject, body string) {
 	subject, body = render(ev)
+	var lead, output, page string
 	switch ev.Type {
 	case "run.failed":
-		return chatRunFailed(ev)
+		subject, lead, output = chatRunFailed(ev)
+		page = runPage(ev)
 	case "run.recovered":
-		return subject, "Its previous run had not succeeded."
+		lead, page = "Its previous run had not succeeded.", runPage(ev)
 	case "heartbeat.missed":
-		return subject, chatMissed(ev)
+		lead, output = chatMissed(ev)
+		if d, ok := heartbeat.ParseMissDetail(ev.Detail); ok && d.HeartbeatID > 0 {
+			page = fmt.Sprintf("/heartbeats/%d", d.HeartbeatID)
+		}
 	case "heartbeat.recovered":
-		return subject, ""
+	default:
+		return subject, body
 	}
-	return subject, body
+	var parts []string
+	for _, part := range []string{lead, link(base, page), output} {
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	return subject, strings.Join(parts, "\n\n")
+}
+
+// link is the URL of the dashboard page at path under base, or "" without
+// either.
+func link(base, path string) string {
+	if base == "" || path == "" {
+		return ""
+	}
+	return base + path
+}
+
+// runPage is the dashboard path of a run event's run, or "" when its payload
+// names none.
+func runPage(ev core.Event) string {
+	var p struct {
+		RunID int64 `json:"run_id"`
+	}
+	if json.Unmarshal([]byte(ev.Payload), &p) != nil || p.RunID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("/runs/%d", p.RunID)
 }
 
 // runFailure is the part of a run.failed's detail an alert uses (the
@@ -41,8 +77,9 @@ type runFailure struct {
 }
 
 // chatRunFailed says which job failed and how: its exit code in the subject,
-// or that it timed out, and the last lines of its output.
-func chatRunFailed(ev core.Event) (string, string) {
+// or that it timed out in the subject and the timeout in lead, and the last
+// lines of its output.
+func chatRunFailed(ev core.Event) (subject, lead, output string) {
 	var p struct {
 		JobName  string `json:"job_name"`
 		Status   string `json:"status"`
@@ -56,42 +93,44 @@ func chatRunFailed(ev core.Event) (string, string) {
 	if p.Status == "timed_out" {
 		what = "Job timed out"
 	}
-	subject := what
+	subject = what
 	if p.JobName != "" {
 		subject += ": " + p.JobName
 	}
 	if p.Status != "timed_out" && p.ExitCode > 0 {
 		subject += fmt.Sprintf(" (exit %d)", p.ExitCode)
 	}
-	var parts []string
 	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
-		parts = append(parts, "It was stopped after its "+span(seconds(d.TimeoutSeconds))+" timeout.")
+		lead = "It was stopped after its " + span(seconds(d.TimeoutSeconds)) + " timeout."
 	}
-	if d.Output != "" {
-		parts = append(parts, "Last output:\n"+d.Output)
-	}
-	return subject, strings.Join(parts, "\n\n")
+	return subject, lead, lastOutput(d.Output)
 }
 
-// chatMissed is the body of a heartbeat.missed: for a heartbeat that stopped
-// pinging, how long it has been quiet and what it expects; for a run that did
-// not finish, when it started and how long it was allowed; for a failure,
-// the last lines the ping logged (the subject has the exit status). A miss
-// recorded before misses carried a detail has nothing more to say.
-func chatMissed(ev core.Event) string {
+// lastOutput introduces the tail of some output, or is "" without one.
+func lastOutput(tail string) string {
+	if tail == "" {
+		return ""
+	}
+	return "Last output:\n" + tail
+}
+
+// chatMissed is what a heartbeat.missed says beyond its subject: for a
+// heartbeat that stopped pinging, how long it has been quiet and what it
+// expects; for a run that did not finish, when it started and how long it was
+// allowed; for a failure, the last lines the ping logged as output (the
+// subject has the exit status). A miss recorded before misses carried a
+// detail has nothing more to say.
+func chatMissed(ev core.Event) (lead, output string) {
 	d, ok := heartbeat.ParseMissDetail(ev.Detail)
 	if !ok {
-		return ""
+		return "", ""
 	}
 	switch d.Reason {
 	case heartbeat.ReasonFailed:
-		if d.Output == "" {
-			return ""
-		}
-		return "Last output:\n" + d.Output
+		return "", lastOutput(d.Output)
 	case heartbeat.ReasonOverran:
 		return fmt.Sprintf("A run started at %s and did not finish within %s.",
-			chatTime(d.StartedAt), span(seconds(d.GraceSeconds)))
+			chatTime(d.StartedAt), span(seconds(d.GraceSeconds))), ""
 	case heartbeat.ReasonMissed:
 		expected := ""
 		if d.PeriodSeconds > 0 {
@@ -103,14 +142,14 @@ func chatMissed(ev core.Event) string {
 		}
 		switch {
 		case d.LastSeenAt.IsZero():
-			return "It has never pinged" + expected + "."
+			return "It has never pinged" + expected + ".", ""
 		case ev.CreatedAt.After(d.LastSeenAt):
-			return fmt.Sprintf("No ping for %s, since %s%s.", span(ev.CreatedAt.Sub(d.LastSeenAt)), chatTime(d.LastSeenAt), expected)
+			return fmt.Sprintf("No ping for %s, since %s%s.", span(ev.CreatedAt.Sub(d.LastSeenAt)), chatTime(d.LastSeenAt), expected), ""
 		default:
-			return "No ping since " + chatTime(d.LastSeenAt) + expected + "."
+			return "No ping since " + chatTime(d.LastSeenAt) + expected + ".", ""
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func seconds(n int) time.Duration { return time.Duration(n) * time.Second }
