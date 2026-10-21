@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -1582,5 +1585,35 @@ func TestSyncPruneFalseSkipsDisable(t *testing.T) {
 	}
 	if !jobB.Enabled {
 		t.Error("noprune-job-b should remain enabled after -prune=false sync")
+	}
+}
+
+// TestTopLevelHelp_ListsEverySubcommand: every subcommand a command group
+// names in its own usage error (tend heartbeat with no subcommand, say) is in
+// the top-level help, so `tend help` never hides one.
+func TestTopLevelHelp_ListsEverySubcommand(t *testing.T) {
+	cfg := tempConfig(t)
+	var help bytes.Buffer
+	if err := cli.Run(context.Background(), cfg, []string{"help"}, nil, &help, io.Discard); err != nil {
+		t.Fatalf("tend help: %v", err)
+	}
+	usage := regexp.MustCompile(`usage: tend (\w+) <([a-z|-]+)>`)
+	checked := 0
+	for _, group := range []string{"job", "channel", "rule", "heartbeat", "token"} {
+		err := cli.Run(context.Background(), cfg, []string{group}, nil, io.Discard, io.Discard)
+		m := usage.FindStringSubmatch(fmt.Sprint(err))
+		if m == nil {
+			t.Errorf("tend %s: want a usage error naming its subcommands, got %v", group, err)
+			continue
+		}
+		for _, sub := range strings.Split(m[2], "|") {
+			checked++
+			if !strings.Contains(help.String(), "  "+group+" "+sub) {
+				t.Errorf("tend help does not list %q (named by tend %s's usage)", group+" "+sub, group)
+			}
+		}
+	}
+	if checked < 10 {
+		t.Fatalf("checked only %d subcommands; the usage errors changed shape", checked)
 	}
 }
