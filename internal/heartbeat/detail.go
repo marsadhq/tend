@@ -2,9 +2,7 @@ package heartbeat
 
 import (
 	"encoding/json"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/marsadhq/tend/internal/core"
 )
@@ -37,11 +35,11 @@ type MissDetail struct {
 }
 
 // The tail of a failure ping's body that its alert carries: its last
-// OutputTailLines lines, and at most OutputTailBytes of them. The whole body
-// stays in the heartbeat's ping log.
+// OutputTailLines lines, and at most OutputTailBytes of them (core.OutputTail).
+// The whole body stays in the heartbeat's ping log.
 const (
-	OutputTailLines = 10
-	OutputTailBytes = 1000
+	OutputTailLines = core.OutputTailLines
+	OutputTailBytes = core.OutputTailBytes
 )
 
 // FailedEvent is the heartbeat.missed recorded when a failure ping takes the
@@ -84,24 +82,8 @@ func ParseMissDetail(detail string) (MissDetail, bool) {
 	return d, true
 }
 
-// OutputTail returns the end of a logged body for an alert: its last
-// OutputTailLines lines, trailing blank space dropped, at most OutputTailBytes
-// long and cut on a character boundary. Blank output has an empty tail.
-func OutputTail(s string) string {
-	s = strings.TrimRight(s, " \t\r\n")
-	if s == "" {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) > OutputTailLines {
-		lines = lines[len(lines)-OutputTailLines:]
-	}
-	tail := strings.Join(lines, "\n")
-	if len(tail) > OutputTailBytes {
-		tail = tail[len(tail)-OutputTailBytes:]
-		for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
-			tail = tail[1:]
-		}
-	}
-	return tail
-}
+// OutputTail returns the end of a logged body for an alert (core.OutputTail):
+// its last OutputTailLines lines, trailing blank space dropped, at most
+// OutputTailBytes long and cut on a character boundary. Blank output has an
+// empty tail.
+func OutputTail(s string) string { return core.OutputTail(s) }
