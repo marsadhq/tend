@@ -89,12 +89,11 @@ func EventJobID(ev core.Event) int64 {
 // render's text too, added under "marsad" when it has one (see envelope).
 // The webhook provider posts Webhook and ignores Subject and Body, so its
 // bytes do not change with the chat text. instance names this installation
-// in the envelope's source; base is Tend's external URL for the chat text's
-// link ("" for none).
-func messageFor(ev core.Event, instance, base string) kitnotify.Message {
+// in the envelope's source; chat shapes the chat text.
+func messageFor(ev core.Event, instance string, chat ChatOptions) kitnotify.Message {
 	subject, body := render(ev)
 	env := envelope(ev, subject, body, instance)
-	chatSubject, chatBody := chatText(ev, base)
+	chatSubject, chatBody := chatText(ev, chat)
 	return kitnotify.Message{
 		Subject: chatSubject,
 		Body:    chatBody,
@@ -290,8 +289,10 @@ func renderMissed(ev core.Event) (string, string) {
 			subject += fmt.Sprintf(" (exit %d)", *d.ExitStatus)
 			body += fmt.Sprintf(" (exit status %d)", *d.ExitStatus)
 		}
-		if d.Output != "" {
-			body += "\n\nLast output:\n" + d.Output
+		// The detail keeps more lines than the ten this text has always
+		// carried; cutting them to ten again gives the same ten.
+		if tail := core.OutputTail(d.Output); tail != "" {
+			body += "\n\nLast output:\n" + tail
 		}
 		return subject, body
 	case ok && d.Reason == heartbeat.ReasonOverran:

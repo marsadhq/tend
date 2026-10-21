@@ -30,7 +30,9 @@ type MissDetail struct {
 	HeartbeatID int64 `json:"heartbeat_id,omitempty"`
 	// ExitStatus is the exit status a failure ping reported, nil for /fail.
 	ExitStatus *int `json:"exit_status,omitempty"`
-	// Output is the tail of the failure ping's logged body (OutputTail).
+	// Output is the tail of the failure ping's logged body: its last
+	// core.MaxOutputTailLines lines, at most core.OutputTailBytes, of which
+	// an alert shows as many lines as it is set to.
 	Output string `json:"output,omitempty"`
 	// LastSeenAt is a plain miss's last ping, zero when it never pinged.
 	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
@@ -56,7 +58,8 @@ const (
 // (nil for /fail) and body what it logged.
 func FailedEvent(orgID, id int64, name string, exitStatus *int, body string) core.Event {
 	ev := MissedEvent(orgID, name)
-	ev.Detail = encodeDetail(MissDetail{Reason: ReasonFailed, HeartbeatID: id, ExitStatus: exitStatus, Output: OutputTail(body)})
+	ev.Detail = encodeDetail(MissDetail{Reason: ReasonFailed, HeartbeatID: id, ExitStatus: exitStatus,
+		Output: core.TailLines(body, core.MaxOutputTailLines)})
 	return ev
 }
 

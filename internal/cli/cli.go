@@ -114,6 +114,9 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdin io.Reader,
 		if opts.pingBodyLimit, err = config.LoadPingBodyLimit(); err != nil {
 			return fmt.Errorf("serve: %w", err)
 		}
+		if opts.alertOutputLines, err = config.LoadAlertOutputLines(); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
 		serveOpts = opts
 	}
 
@@ -214,6 +217,9 @@ type serveOptions struct {
 	// pingBodyLimit is how many bytes of a ping's body are kept
 	// (TEND_PING_BODY_KB).
 	pingBodyLimit int
+	// alertOutputLines is how many lines of output a chat alert shows
+	// (TEND_ALERT_OUTPUT_LINES).
+	alertOutputLines int
 }
 
 // parseServeFlags parses serve's flags.
@@ -414,9 +420,13 @@ func cmdServe(ctx context.Context, st store.Store, box *secrets.Box, cfg config.
 	var dispatch func(context.Context, core.Event)
 	var worker *notify.Worker
 	if box != nil {
-		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), alertLinkBase(func(err error) {
-			logger.Warn("serve: alerts carry no links", "err", err)
-		}), logger)
+		chat := notify.ChatOptions{
+			BaseURL: alertLinkBase(func(err error) {
+				logger.Warn("serve: alerts carry no links", "err", err)
+			}),
+			OutputLines: opts.alertOutputLines,
+		}
+		worker = notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), chat, logger)
 		worker.Hold = opts.deliveryHold
 		dispatch = func(context.Context, core.Event) { worker.Nudge() }
 	}
@@ -1031,9 +1041,15 @@ func cmdRun(ctx context.Context, st store.Store, box *secrets.Box, orgID int64, 
 	// makes the overlap safe. Without a master key the channel configs cannot
 	// be decrypted, so warn rather than silently dropping the alert.
 	if box != nil {
-		w := notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), alertLinkBase(func(err error) {
+		chat := notify.ChatOptions{BaseURL: alertLinkBase(func(err error) {
 			fmt.Fprintf(stderr, "run: warning: %v; alerts carry no links\n", err)
-		}), logger)
+		})}
+		var err error
+		if chat.OutputLines, err = config.LoadAlertOutputLines(); err != nil {
+			chat.OutputLines = core.OutputTailLines
+			fmt.Fprintf(stderr, "run: warning: %v; using the default, %d\n", err, chat.OutputLines)
+		}
+		w := notify.NewWorker(st, box, kitnotify.BuildProvider, config.LoadInstance(), chat, logger)
 		if hold, err := config.LoadDeliveryHold(); err != nil {
 			fmt.Fprintf(stderr, "run: warning: %v; using the default\n", err)
 		} else {
@@ -1486,6 +1502,14 @@ func cmdDoctor(ctx context.Context, st store.Store, cfg config.Config, org core.
 		fmt.Fprintf(stdout, "ping bodies:  invalid, serve will refuse to start: %v\n", err)
 	} else {
 		fmt.Fprintf(stdout, "ping bodies:  first %d kB of each kept\n", limit/1000)
+	}
+	switch lines, err := config.LoadAlertOutputLines(); {
+	case err != nil:
+		fmt.Fprintf(stdout, "alert output: invalid, serve will refuse to start: %v\n", err)
+	case lines == 0:
+		fmt.Fprintln(stdout, "alert output: none (chat alerts carry no output)")
+	default:
+		fmt.Fprintf(stdout, "alert output: last %d lines of a failure's output in chat alerts\n", lines)
 	}
 	fmt.Fprintf(stdout, "counts:     jobs=%d channels=%d rules=%d heartbeats=%d\n", len(jl), len(cl), len(rl), len(hl))
 	if len(jl) > 0 {
@@ -2206,6 +2230,8 @@ Environment:
                        (default: the host name)
   TEND_BASE_URL        Tend's external URL, e.g. https://tend.example: chat
                        alerts link to the run or heartbeat page (unset: no links)
+  TEND_ALERT_OUTPUT_LINES  lines of a failure's output a chat alert shows
+                       (default 10; 0 = none; at most 50, and 1000 bytes)
 
 Related commands:
   tend doctor          diagnose config/DB/connectivity

@@ -1,6 +1,8 @@
 package notify
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -92,7 +94,7 @@ func TestChatTextSaysWhatHappenedOnce(t *testing.T) {
 			body:        "Its previous run had not succeeded.",
 			legacyTitle: "Job recovered: nightly", legacyBody: "status=succeeded exit_code=0; the previous run had not succeeded"},
 	} {
-		m := messageFor(tc.ev, "primary", "")
+		m := messageFor(tc.ev, "primary", chat10)
 		if m.Subject != tc.subject || m.Body != tc.body {
 			t.Errorf("%s:\n got subject %q body %q\nwant subject %q body %q", tc.name, m.Subject, m.Body, tc.subject, tc.body)
 		}
@@ -125,7 +127,7 @@ func TestChatTextKeepsTheRest(t *testing.T) {
 		{Type: "notification.failed", Payload: "run.failed"},
 		{Type: "weird.event", Payload: "x"},
 	} {
-		m := messageFor(ev, "primary", "")
+		m := messageFor(ev, "primary", chat10)
 		w := m.Webhook.(event.TendWebhook)
 		if m.Subject != w.Subject || m.Body != w.Body {
 			t.Errorf("%s: chat %q / %q, webhook %q / %q; want the same", ev.Type, m.Subject, m.Body, w.Subject, w.Body)
@@ -189,12 +191,54 @@ func TestChatTextLinksToThePage(t *testing.T) {
 		{"removed job", core.Event{Type: "job.removed", Payload: `{"job_id":7,"job_name":"nightly"}`}, base,
 			"the job was deleted; it will not run or alert again"},
 	} {
-		m := messageFor(tc.ev, "primary", tc.base)
+		m := messageFor(tc.ev, "primary", ChatOptions{BaseURL: tc.base, OutputLines: 10})
 		if m.Body != tc.want {
 			t.Errorf("%s: body %q, want %q", tc.name, m.Body, tc.want)
 		}
 		if w := m.Webhook.(event.TendWebhook); strings.Contains(w.Body, "https://") || (w.Marsad != nil && strings.Contains(w.Marsad.Body, "https://")) {
 			t.Errorf("%s: the link reached the webhook's text: %q", tc.name, w.Body)
+		}
+	}
+}
+
+// chat10 is the default chat text: ten lines of output, no links.
+var chat10 = ChatOptions{OutputLines: 10}
+
+// TEND_ALERT_OUTPUT_LINES sets how many lines of output a chat alert shows:
+// fewer or more than the default ten (an event keeps up to fifty, within
+// 1000 bytes), or none at all, while the rest of the alert, its link
+// included, stays. The webhook's text keeps its ten lines whatever it is.
+func TestChatTextOutputLines(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 30; i++ {
+		lines = append(lines, fmt.Sprintf("line %d", i))
+	}
+	output := strings.Join(lines, "\n")
+	failedPing := heartbeat.FailedEvent(1, 4, "db-backup", nil, output)
+	timedOut := core.Event{Type: "run.failed",
+		Payload: `{"run_id":20,"job_id":3,"job_name":"report","status":"timed_out","exit_code":-1}`}
+	detail, _ := json.Marshal(map[string]any{"output": core.TailLines(output, core.MaxOutputTailLines), "timeout_seconds": 60})
+	timedOut.Detail = string(detail)
+	const base = "https://tend.example"
+
+	for _, tc := range []struct {
+		name  string
+		ev    core.Event
+		lines int
+		want  string
+	}{
+		{"failure ping, none", failedPing, 0, base + "/heartbeats/4"},
+		{"failure ping, three", failedPing, 3, base + "/heartbeats/4\n\nLast output:\nline 28\nline 29\nline 30"},
+		{"timed out run, none", timedOut, 0, "It was stopped after its 1m timeout.\n\n" + base + "/runs/20"},
+		{"timed out run, thirty", timedOut, 30, "It was stopped after its 1m timeout.\n\n" + base + "/runs/20\n\nLast output:\n" + output},
+	} {
+		m := messageFor(tc.ev, "primary", ChatOptions{BaseURL: base, OutputLines: tc.lines})
+		if m.Body != tc.want {
+			t.Errorf("%s:\n got %q\nwant %q", tc.name, m.Body, tc.want)
+		}
+		if w := m.Webhook.(event.TendWebhook); tc.ev.Type == "heartbeat.missed" &&
+			w.Body != "db-backup reported a failure\n\nLast output:\n"+strings.Join(lines[20:], "\n") {
+			t.Errorf("%s: the webhook's text changed: %q", tc.name, w.Body)
 		}
 	}
 }

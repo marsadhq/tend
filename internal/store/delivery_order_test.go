@@ -166,7 +166,7 @@ func TestWorkerDeliversAMissBeforeItsRecovery(t *testing.T) {
 
 		p := &orderedProvider{fails: 1}
 		w := notify.NewWorker(s, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil },
-			"primary", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			"primary", notify.ChatOptions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if _, err := w.DrainOnce(ctx); err != nil {
 			t.Fatalf("DrainOnce: %v", err)
 		}

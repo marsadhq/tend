@@ -87,8 +87,8 @@ func TestRunFailedCarriesTheOutputTail(t *testing.T) {
 
 	for _, evts := range [][]core.Event{stored, sink.snapshot()} {
 		chatty, ok := failureDetailOf(t, evts, "chatty")
-		if !ok || !strings.HasPrefix(chatty.Output, "line 8\n") || !strings.HasSuffix(chatty.Output, "line 15\nkey=***\nboom") || chatty.TimeoutSeconds != 0 {
-			t.Errorf("chatty: detail = %+v (ok=%v), want its last 10 lines, the secret redacted, no timeout", chatty, ok)
+		if !ok || !strings.HasPrefix(chatty.Output, "line 1\n") || !strings.HasSuffix(chatty.Output, "line 15\nkey=***\nboom") || chatty.TimeoutSeconds != 0 {
+			t.Errorf("chatty: detail = %+v (ok=%v), want all 17 lines (an event keeps up to 50), the secret redacted, no timeout", chatty, ok)
 		}
 		if strings.Contains(chatty.Output, secret) {
 			t.Errorf("chatty: the secret reached the detail: %q", chatty.Output)

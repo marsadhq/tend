@@ -50,7 +50,7 @@ func TestNtfyChannelDelivers(t *testing.T) {
 		channel: Channel{ID: 7, OrgID: 1, Name: "phone", Kind: kitnotify.Ntfy},
 		blob:    blob,
 	}
-	w := NewWorker(fs, box, kitnotify.BuildProvider, "primary", "", discardLogger())
+	w := NewWorker(fs, box, kitnotify.BuildProvider, "primary", ChatOptions{}, discardLogger())
 	w.Clock = clock.NewFake(now)
 	if n, err := w.DrainOnce(context.Background()); err != nil || n != 1 {
 		t.Fatalf("DrainOnce = %d, %v; want the delivery sent", n, err)

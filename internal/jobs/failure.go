@@ -11,8 +11,10 @@ import (
 // payload's status and exit code. It is for the notification text only; the
 // webhook's event and the marsad envelope never carry it.
 type FailureDetail struct {
-	// Output is the tail of the output the run stored (core.OutputTail), so
-	// already cleaned and with the job's secret values redacted.
+	// Output is the tail of the output the run stored, so already cleaned and
+	// with the job's secret values redacted: its last core.MaxOutputTailLines
+	// lines, at most core.OutputTailBytes, of which an alert shows as many
+	// lines as it is set to.
 	Output string `json:"output,omitempty"`
 	// TimeoutSeconds is the per-attempt timeout a timed-out run reached.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
@@ -21,7 +23,7 @@ type FailureDetail struct {
 // failureDetail is the Detail of the run.failed of a run of job that ended in
 // status with the stored output out, or "" when there is nothing to say.
 func failureDetail(job Job, status RunStatus, out string) string {
-	d := FailureDetail{Output: core.OutputTail(out)}
+	d := FailureDetail{Output: core.TailLines(out, core.MaxOutputTailLines)}
 	if status == StatusTimedOut {
 		timeout := seconds(job.TimeoutSeconds)
 		if timeout <= 0 {

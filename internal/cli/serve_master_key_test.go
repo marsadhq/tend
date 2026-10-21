@@ -225,3 +225,31 @@ func TestServeRefusesAnInvalidPingBodyLimit(t *testing.T) {
 		t.Errorf("doctor does not report the ping body limit:\n%s", stdout.String())
 	}
 }
+
+// TestServeRefusesInvalidAlertOutputLines: TEND_ALERT_OUTPUT_LINES is checked
+// like the other settings, before the database is opened, and doctor
+// reports it.
+func TestServeRefusesInvalidAlertOutputLines(t *testing.T) {
+	t.Setenv("TEND_ADDR", "127.0.0.1:0")
+	t.Setenv("TEND_ALERT_OUTPUT_LINES", "51")
+	cfg := keyedConfig(t)
+	var stdout, stderr bytes.Buffer
+	err := cli.Run(context.Background(), cfg, []string{"serve"}, nil, &stdout, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "TEND_ALERT_OUTPUT_LINES") {
+		t.Fatalf("serve with TEND_ALERT_OUTPUT_LINES=51: err = %v, want an error naming the variable", err)
+	}
+	if _, statErr := os.Stat(cfg.DSN); !os.IsNotExist(statErr) {
+		t.Errorf("a refused serve must not create the database (stat err = %v)", statErr)
+	}
+
+	for v, want := range map[string]string{"0": "alert output: none", "20": "alert output: last 20 lines"} {
+		t.Setenv("TEND_ALERT_OUTPUT_LINES", v)
+		stdout.Reset()
+		if err := cli.Run(context.Background(), cfg, []string{"doctor"}, nil, &stdout, &stderr); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("TEND_ALERT_OUTPUT_LINES=%s: doctor does not say %q:\n%s", v, want, stdout.String())
+		}
+	}
+}
