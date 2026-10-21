@@ -40,39 +40,45 @@ type rdapBootstrap struct {
 	services []rdapService
 }
 
-// lookup returns the base URL of the RDAP server for domain: the service of
-// the longest suffix of domain it lists, with its https:// URL preferred.
-func (b rdapBootstrap) lookup(domain string) (string, bool) {
+// service returns the bootstrap entry for domain: the one of the longest
+// suffix of domain it lists.
+func (b rdapBootstrap) service(domain string) (rdapService, bool) {
 	labels := strings.Split(domain, ".")
 	for i := 1; i < len(labels); i++ {
 		suffix := strings.Join(labels[i:], ".")
 		for _, svc := range b.services {
 			for _, tld := range svc.tlds {
 				if strings.EqualFold(tld, suffix) {
-					if u := pickRDAPURL(svc.urls); u != "" {
-						return u, true
-					}
+					return svc, true
 				}
 			}
+		}
+	}
+	return rdapService{}, false
+}
+
+// lookup returns the base URL of the RDAP server for domain: the https:// URL
+// of its entry. An entry with plain-http URLs only gives none: an answer that
+// anyone on the path can change is not taken from a file, only from an
+// rdap_url the user wrote down (see listsPlainHTTP).
+func (b rdapBootstrap) lookup(domain string) (string, bool) {
+	svc, ok := b.service(domain)
+	if !ok {
+		return "", false
+	}
+	for _, u := range svc.urls {
+		if strings.HasPrefix(strings.ToLower(u), "https://") {
+			return withSlash(u), true
 		}
 	}
 	return "", false
 }
 
-// pickRDAPURL picks the https:// URL of a service, or its first URL when it
-// lists no https:// one, with a trailing slash.
-func pickRDAPURL(urls []string) string {
-	for _, u := range urls {
-		if strings.HasPrefix(strings.ToLower(u), "https://") {
-			return withSlash(u)
-		}
-	}
-	for _, u := range urls {
-		if u != "" {
-			return withSlash(u)
-		}
-	}
-	return ""
+// listsPlainHTTP reports whether domain's entry exists but lists plain-http
+// servers only.
+func (b rdapBootstrap) listsPlainHTTP(domain string) bool {
+	svc, ok := b.service(domain)
+	return ok && len(svc.urls) > 0
 }
 
 func withSlash(u string) string {
@@ -105,7 +111,7 @@ func (e *Executor) rdapBase(ctx context.Context, domain string, r *probeReport) 
 	rdapBootstraps.Unlock()
 
 	if !held || now.Sub(b.fetched) >= rdapBootstrapTTL || now.Before(b.fetched) {
-		fresh, err := fetchBootstrap(ctx, src)
+		fresh, err := fetchBootstrap(ctx, e.rdapClient(), src)
 		switch {
 		case err == nil:
 			fresh.fetched = now
@@ -122,15 +128,44 @@ func (e *Executor) rdapBase(ctx context.Context, domain string, r *probeReport) 
 
 	base, ok := b.lookup(domain)
 	if !ok {
-		tld := domain[strings.LastIndex(domain, ".")+1:]
-		return "", fmt.Errorf("no RDAP server for %q in the IANA bootstrap file; some TLDs have none: set rdap_url if the registry runs one, or watch the date with an expiry job", "."+tld)
+		tld := "." + domain[strings.LastIndex(domain, ".")+1:]
+		if b.listsPlainHTTP(domain) {
+			return "", fmt.Errorf("the IANA bootstrap file lists only plain http RDAP servers for %q, which are not used unless asked for: set rdap_url to one to use it anyway", tld)
+		}
+		return "", fmt.Errorf("no RDAP server for %q in the IANA bootstrap file; some TLDs have none: set rdap_url if the registry runs one, or watch the date with an expiry job", tld)
 	}
 	return base, nil
 }
 
+// maxRDAPRedirects bounds how many redirects one RDAP request follows.
+const maxRDAPRedirects = 5
+
+// rdapClient is the HTTP client of the domain probes: e.RDAPTransport (or
+// Go's default transport) with a redirect policy that keeps a request on the
+// host it was made to and on https once it started there. A registry's
+// server redirecting elsewhere, or to plain http, would let another party
+// answer for the registry; such a redirect fails the request.
+func (e *Executor) rdapClient() *http.Client {
+	return &http.Client{
+		Transport: e.RDAPTransport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			first := via[0].URL
+			switch {
+			case len(via) >= maxRDAPRedirects:
+				return fmt.Errorf("stopped after %d redirects", len(via))
+			case first.Scheme == "https" && req.URL.Scheme != "https":
+				return fmt.Errorf("refused a redirect from https to http (%s)", req.URL.Redacted())
+			case !strings.EqualFold(req.URL.Host, first.Host):
+				return fmt.Errorf("refused a redirect to another host (%s)", req.URL.Host)
+			}
+			return nil
+		},
+	}
+}
+
 // fetchBootstrap fetches and parses a bootstrap file.
-func fetchBootstrap(ctx context.Context, src string) (rdapBootstrap, error) {
-	_, body, err := getRDAP(ctx, src, maxRDAPBootstrapBytes)
+func fetchBootstrap(ctx context.Context, client *http.Client, src string) (rdapBootstrap, error) {
+	_, body, err := getRDAP(ctx, client, src, maxRDAPBootstrapBytes)
 	if err != nil {
 		return rdapBootstrap{}, err
 	}
@@ -152,15 +187,16 @@ func fetchBootstrap(ctx context.Context, src string) (rdapBootstrap, error) {
 	return b, nil
 }
 
-// getRDAP fetches url with RDAP's media type and returns the status and, for
-// a 200, the body (at most limit bytes; a longer one is an error).
-func getRDAP(ctx context.Context, url string, limit int) (int, []byte, error) {
+// getRDAP fetches url with client and RDAP's media type and returns the
+// status and, for a 200, the body (at most limit bytes; a longer one is an
+// error).
+func getRDAP(ctx context.Context, client *http.Client, url string, limit int) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, nil, err
 	}
 	req.Header.Set("Accept", "application/rdap+json, application/json;q=0.9")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -285,7 +321,7 @@ func (e *Executor) runOnceDomain(ctx context.Context, j Job, attempt int, starte
 	url := withSlash(base) + "domain/" + domain
 	r.add("rdap", "%s", url)
 
-	status, body, err := getRDAP(ctx, url, maxRDAPAnswerBytes)
+	status, body, err := getRDAP(ctx, e.rdapClient(), url, maxRDAPAnswerBytes)
 	if status == http.StatusNotFound {
 		r.fail("the registry has no record of %s (HTTP 404): it is not registered, or was deleted after it lapsed", domain)
 		return r.result(attempt, started, "")

@@ -160,6 +160,13 @@ Not every TLD can be watched this way:
   probe fails with `no expiration date`; use an `expiry` job instead.
 - Registries rate-limit RDAP. Once a day is plenty.
 
+The answer is only taken over https and from the server that was asked. The
+probe uses the https URLs of the bootstrap file and ignores plain-http ones:
+a TLD whose entry lists only plain http fails with exit code `-1` unless you
+set `rdap_url` to that server yourself (an `http://` `rdap_url` is used as
+given). A redirect is followed only to the same host, and never from https to
+http; any other fails the run with exit code `-1`.
+
 ## `expiry`: dated secrets with no API
 
 API tokens, Tailscale node keys, software licences, a support contract: things
