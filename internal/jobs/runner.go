@@ -13,7 +13,6 @@ package jobs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -98,6 +97,8 @@ var ErrRunGone = errors.New("run no longer exists")
 // store imports jobs. The concrete *store.SQLiteStore / *store.PostgresStore
 // satisfy this structurally.
 type RunnerStore interface {
+	// DueJobs returns the due jobs it could read; when some due rows could
+	// not be read it also returns an *UnreadableJobsError naming them.
 	DueJobs(ctx context.Context, now time.Time) ([]Job, error)
 	EnqueueRun(ctx context.Context, orgID, jobID int64) (int64, error)
 	UpdateJob(ctx context.Context, j Job) error
@@ -127,6 +128,11 @@ type RunnerStore interface {
 	// event written) when the run already reached a terminal state, closing the
 	// race with a worker finishing the run concurrently.
 	ReapStaleRun(ctx context.Context, runID int64, output string, ev core.Event) (bool, error)
+	// FailUnreadableJob records, for a due job whose row cannot be read, a
+	// failed run with output and its run.failed event (deliveries queued) in
+	// one transaction, and clears the job's next run so it is not due again
+	// until it is repaired. It returns the event.
+	FailUnreadableJob(ctx context.Context, orgID, jobID int64, name, output string) (core.Event, error)
 }
 
 // inFlight is the set of runs this process is executing right now, each with
@@ -344,6 +350,11 @@ var secretRefRe = regexp.MustCompile(`^\{\{\s*secret\.([A-Za-z0-9_.-]+)\s*\}\}$`
 func (r *Runner) Tick(ctx context.Context) error {
 	now := r.clk.Now()
 	due, err := r.store.DueJobs(ctx, now)
+	// A due job whose row cannot be read is handled below; the others run.
+	var unreadable *UnreadableJobsError
+	if errors.As(err, &unreadable) {
+		err = nil
+	}
 	if err != nil {
 		r.logError(ctx, "runner: scheduler tick: list due jobs", err)
 		return err
@@ -380,6 +391,26 @@ func (r *Runner) Tick(ctx context.Context) error {
 		job.NextRunAt = next
 		if err := r.store.UpdateJob(ctx, job); err != nil {
 			record(job, "advance schedule", err)
+		}
+	}
+
+	// A due job that cannot be read is not run: it is logged, a failed run
+	// with run.failed is recorded for it, so it is alerted on like any failure,
+	// and it is taken off the schedule until tend sync repairs it (or tend job
+	// rm removes it), so that is recorded once, not on every tick.
+	if unreadable != nil {
+		for _, u := range unreadable.Jobs {
+			r.logError(ctx, "runner: scheduler tick: job cannot be read; recording a failed run and no longer scheduling it", u.Err,
+				"job", u.Name, "job_id", u.JobID)
+			ev, err := r.store.FailUnreadableJob(ctx, u.OrgID, u.JobID, u.Name, UnreadableRunOutput(u))
+			if err != nil {
+				r.logError(ctx, "runner: scheduler tick: record the failed run of a job that cannot be read", err, "job", u.Name, "job_id", u.JobID)
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			r.fire(ctx, ev)
 		}
 	}
 	return firstErr
@@ -809,32 +840,10 @@ func redact(s string, secretValues []string) string {
 }
 
 // buildEvent constructs a run.* lifecycle core.Event with the standard small
-// payload (no secret material, no output). It is shared by emit (best-effort
-// start event) and the terminal path in claimAndRun (atomic finish+emit).
+// payload (RunEvent). It is shared by emit (best-effort start event) and the
+// terminal path in claimAndRun (atomic finish+emit).
 func (r *Runner) buildEvent(run Run, job Job, typ string, status RunStatus, exitCode int) (core.Event, error) {
-	payload, err := json.Marshal(struct {
-		RunID    int64  `json:"run_id"`
-		JobID    int64  `json:"job_id"`
-		JobName  string `json:"job_name"`
-		Status   string `json:"status"`
-		ExitCode int    `json:"exit_code"`
-	}{
-		RunID:    run.ID,
-		JobID:    run.JobID,
-		JobName:  job.Name,
-		Status:   string(status),
-		ExitCode: exitCode,
-	})
-	if err != nil {
-		return core.Event{}, fmt.Errorf("marshal event payload: %w", err)
-	}
-	return core.Event{
-		OrgID:    run.OrgID,
-		Type:     typ,
-		Source:   "jobs.runner",
-		Payload:  string(payload),
-		DedupKey: fmt.Sprintf("run:%d:%s", run.ID, typ),
-	}, nil
+	return RunEvent(run, job.Name, typ, status, exitCode)
 }
 
 // emit appends a run.* lifecycle event. Payloads are deliberately small and
