@@ -82,8 +82,8 @@ func TestDashboardJobListRendersJobs(t *testing.T) {
 	}
 }
 
-// The job list says when each job last ran and when it runs next, measured
-// from the server's clock, with the exact time kept in the element.
+// The job list says when each job's last run ended and when it runs next,
+// measured from the server's clock, with the exact time kept in the element.
 func TestDashboardJobListShowsLastAndNextRun(t *testing.T) {
 	ts := newStore(t)
 	as := seedAuth(t, ts)
@@ -115,7 +115,7 @@ func TestDashboardJobListShowsLastAndNextRun(t *testing.T) {
 
 	body := dashGet(t, h, cookie, "/").Body.String()
 	for _, want := range []string{
-		`<time datetime="2026-10-21T13:56:00Z" title="2026-10-21 13:56:00 UTC">4m ago</time>`,
+		`<time datetime="2026-10-21T13:57:00Z" title="2026-10-21 13:57:00 UTC">3m ago</time>`,
 		`next <time datetime="2026-10-21T23:49:00Z" title="2026-10-21 23:49:00 UTC">in 9h 49m</time>`,
 	} {
 		if !strings.Contains(body, want) {
