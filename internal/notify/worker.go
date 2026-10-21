@@ -86,10 +86,9 @@ type Worker = kitnotify.Worker[Delivery]
 // provider from its kind and decrypted config (kitnotify.BuildProvider in
 // production). instance names this installation in the marsad envelope of
 // every notification (config.LoadInstance: TEND_INSTANCE or the hostname).
-// base is Tend's external URL (config.LoadBaseURL: TEND_BASE_URL), which the
-// chat alerts link to the run or heartbeat from; "" leaves the links out.
-func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance, base string, log *slog.Logger) *Worker {
-	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build, instance, base), log)
+// chat shapes the text of the chat alerts (their links and output).
+func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance string, chat ChatOptions, log *slog.Logger) *Worker {
+	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build, instance, chat), log)
 	w.LogAttrs = func(d kitnotify.Delivery[Delivery]) []any {
 		return []any{"channel", d.Item.ChannelID, "event", d.Item.Event.Type}
 	}
@@ -145,7 +144,7 @@ func (q queue) GiveUp(ctx context.Context, d kitnotify.Delivery[Delivery], _ err
 // config, build its provider, and send the rendered event. Its errors are
 // logged, so they never carry the config blob or decrypted secrets (provider
 // errors name only a destination's host).
-func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance, base string) kitnotify.SendFunc[Delivery] {
+func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance string, chat ChatOptions) kitnotify.SendFunc[Delivery] {
 	return func(ctx context.Context, kd kitnotify.Delivery[Delivery]) error {
 		d := kd.Item
 		ch, blob, err := s.GetChannel(ctx, d.OrgID, d.ChannelID)
@@ -161,6 +160,6 @@ func sender(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, [
 		if err != nil {
 			return fmt.Errorf("build provider for channel %d: %w", d.ChannelID, err)
 		}
-		return p.Send(ctx, messageFor(d.Event, instance, base))
+		return p.Send(ctx, messageFor(d.Event, instance, chat))
 	}
 }

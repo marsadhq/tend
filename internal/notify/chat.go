@@ -10,18 +10,31 @@ import (
 	"github.com/marsadhq/tend/internal/heartbeat"
 )
 
+// ChatOptions shape the text of the chat alerts.
+type ChatOptions struct {
+	// BaseURL is Tend's external URL (config.LoadBaseURL: TEND_BASE_URL),
+	// which the alerts link to the run or the heartbeat from; "" leaves the
+	// links out.
+	BaseURL string
+	// OutputLines is how many lines of output (a failed run's, a failure
+	// ping's) an alert shows (config.LoadAlertOutputLines:
+	// TEND_ALERT_OUTPUT_LINES); 0 leaves the output out. An event keeps at
+	// most core.MaxOutputTailLines.
+	OutputLines int
+}
+
 // chatText is the subject and body a person reads: the alert as Slack,
 // Discord, email, Telegram, ntfy and Pushover show it, often on a phone. The
 // subject names the job or heartbeat and the body never repeats it; the body
 // says what the subject does not: when a heartbeat last pinged and what it
 // expects, the run that did not finish, the last lines a failed run or a
-// failure ping left, the timeout a run reached. When base (Tend's external
-// URL, TEND_BASE_URL) is set, a link to the run's or the heartbeat's page
-// follows what happened and comes before any output, so a channel that cuts
-// long messages (Pushover, at 1024 characters) cuts the output, not the
+// failure ping left (as many lines as chat.OutputLines), the timeout a run
+// reached. When chat.BaseURL is set, a link to the run's or the heartbeat's
+// page follows what happened and comes before any output, so a channel that
+// cuts long messages (Pushover, at 1024 characters) cuts the output, not the
 // link. Events that already read well keep render's text. The webhook posts
 // render's text, byte for byte, whatever this says.
-func chatText(ev core.Event, base string) (subject, body string) {
+func chatText(ev core.Event, chat ChatOptions) (subject, body string) {
 	subject, body = render(ev)
 	var lead, output, page string
 	switch ev.Type {
@@ -40,7 +53,10 @@ func chatText(ev core.Event, base string) (subject, body string) {
 		return subject, body
 	}
 	var parts []string
-	for _, part := range []string{lead, link(base, page), output} {
+	if output = core.TailLines(output, chat.OutputLines); output != "" {
+		output = "Last output:\n" + output
+	}
+	for _, part := range []string{lead, link(chat.BaseURL, page), output} {
 		if part != "" {
 			parts = append(parts, part)
 		}
@@ -77,8 +93,8 @@ type runFailure struct {
 }
 
 // chatRunFailed says which job failed and how: its exit code in the subject,
-// or that it timed out in the subject and the timeout in lead, and the last
-// lines of its output.
+// or that it timed out in the subject and the timeout in lead, and the tail
+// of its output the event kept.
 func chatRunFailed(ev core.Event) (subject, lead, output string) {
 	var p struct {
 		JobName  string `json:"job_name"`
@@ -103,21 +119,13 @@ func chatRunFailed(ev core.Event) (subject, lead, output string) {
 	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
 		lead = "It was stopped after its " + span(seconds(d.TimeoutSeconds)) + " timeout."
 	}
-	return subject, lead, lastOutput(d.Output)
-}
-
-// lastOutput introduces the tail of some output, or is "" without one.
-func lastOutput(tail string) string {
-	if tail == "" {
-		return ""
-	}
-	return "Last output:\n" + tail
+	return subject, lead, d.Output
 }
 
 // chatMissed is what a heartbeat.missed says beyond its subject: for a
 // heartbeat that stopped pinging, how long it has been quiet and what it
 // expects; for a run that did not finish, when it started and how long it was
-// allowed; for a failure, the last lines the ping logged as output (the
+// allowed; for a failure, the tail of what the ping logged as output (the
 // subject has the exit status). A miss recorded before misses carried a
 // detail has nothing more to say.
 func chatMissed(ev core.Event) (lead, output string) {
@@ -127,7 +135,7 @@ func chatMissed(ev core.Event) (lead, output string) {
 	}
 	switch d.Reason {
 	case heartbeat.ReasonFailed:
-		return "", lastOutput(d.Output)
+		return "", d.Output
 	case heartbeat.ReasonOverran:
 		return fmt.Sprintf("A run started at %s and did not finish within %s.",
 			chatTime(d.StartedAt), span(seconds(d.GraceSeconds))), ""

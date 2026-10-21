@@ -223,6 +223,48 @@ func TestServeSmoke(t *testing.T) {
 	}
 }
 
+// failedRunAlert runs a failing job with `tend run`, with env set, and
+// returns the text its chat alert (a Slack channel's) carried and what the
+// command wrote on stderr.
+func failedRunAlert(t *testing.T, env map[string]string) (text, stderr string) {
+	t.Helper()
+	texts := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		texts <- m.Text
+	}))
+	defer srv.Close()
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	cfg := keyedConfig(t)
+	ctx := context.Background()
+	run := func(stdin string, args ...string) string {
+		var stdout, errOut bytes.Buffer
+		var in io.Reader
+		if stdin != "" {
+			in = strings.NewReader(stdin)
+		}
+		if err := cli.Run(ctx, cfg, args, in, &stdout, &errOut); err != nil && args[0] != "run" {
+			t.Fatalf("tend %v: %v\nstderr: %s", args, err, errOut.String())
+		}
+		return errOut.String()
+	}
+	run(`{"webhook_url":"`+srv.URL+`/hook"}`, "channel", "add", "-name", "ops", "-type", "slack")
+	run("", "rule", "add", "-channel", "ops", "-event", "run.failed")
+	run("", "job", "add", "-name", "backup", "-command", "echo uploading; echo 'UploadError: chunk 41' >&2; exit 3")
+	stderr = run("", "run", "backup")
+	select {
+	case text = <-texts:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no alert was posted")
+	}
+	return text, stderr
+}
+
 // TestRunAlertLinksToTheRun: end to end through `tend run`, a failed run's
 // chat alert (here Slack's text) names the job with its exit code, links to
 // the run when TEND_BASE_URL is set and ends with the last lines of its
@@ -236,45 +278,36 @@ func TestRunAlertLinksToTheRun(t *testing.T) {
 		{"with a bad base URL", "tend.example", "", "TEND_BASE_URL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			texts := make(chan string, 4)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var m struct {
-					Text string `json:"text"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&m)
-				texts <- m.Text
-			}))
-			defer srv.Close()
-			t.Setenv("TEND_BASE_URL", tc.base)
-
-			cfg := keyedConfig(t)
-			ctx := context.Background()
-			run := func(stdin string, args ...string) string {
-				var stdout, stderr bytes.Buffer
-				var in io.Reader
-				if stdin != "" {
-					in = strings.NewReader(stdin)
-				}
-				if err := cli.Run(ctx, cfg, args, in, &stdout, &stderr); err != nil && args[0] != "run" {
-					t.Fatalf("tend %v: %v\nstderr: %s", args, err, stderr.String())
-				}
-				return stderr.String()
-			}
-			run(`{"webhook_url":"`+srv.URL+`/hook"}`, "channel", "add", "-name", "ops", "-type", "slack")
-			run("", "rule", "add", "-channel", "ops", "-event", "run.failed")
-			run("", "job", "add", "-name", "backup", "-command", "echo uploading; echo 'UploadError: chunk 41' >&2; exit 3")
-			stderr := run("", "run", "backup")
-
-			select {
-			case text := <-texts:
-				want := "Job failed: backup (exit 3)\n" + tc.wantLink + "Last output:\nuploading\nUploadError: chunk 41"
-				if text != want {
-					t.Errorf("alert text:\n got %q\nwant %q", text, want)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("no alert was posted")
+			text, stderr := failedRunAlert(t, map[string]string{"TEND_BASE_URL": tc.base})
+			want := "Job failed: backup (exit 3)\n" + tc.wantLink + "Last output:\nuploading\nUploadError: chunk 41"
+			if text != want {
+				t.Errorf("alert text:\n got %q\nwant %q", text, want)
 			}
 			if !strings.Contains(stderr, tc.wantWarning) || (tc.wantWarning == "" && strings.Contains(stderr, "TEND_BASE_URL")) {
+				t.Errorf("stderr = %q, want a warning naming %q", stderr, tc.wantWarning)
+			}
+		})
+	}
+}
+
+// TestRunAlertOutputLines: TEND_ALERT_OUTPUT_LINES sets how many lines of
+// output the alert shows; 0 leaves the output out and keeps the rest, the
+// link included. A value out of range is reported and the default used.
+func TestRunAlertOutputLines(t *testing.T) {
+	const head = "Job failed: backup (exit 3)\nhttps://tend.example/runs/1"
+	for _, tc := range []struct {
+		lines, want, wantWarning string
+	}{
+		{"0", head, ""},
+		{"1", head + "\n\nLast output:\nUploadError: chunk 41", ""},
+		{"99", head + "\n\nLast output:\nuploading\nUploadError: chunk 41", "TEND_ALERT_OUTPUT_LINES"},
+	} {
+		t.Run(tc.lines, func(t *testing.T) {
+			text, stderr := failedRunAlert(t, map[string]string{"TEND_BASE_URL": "https://tend.example", "TEND_ALERT_OUTPUT_LINES": tc.lines})
+			if text != tc.want {
+				t.Errorf("alert text:\n got %q\nwant %q", text, tc.want)
+			}
+			if !strings.Contains(stderr, tc.wantWarning) || (tc.wantWarning == "" && strings.Contains(stderr, "TEND_ALERT_OUTPUT_LINES")) {
 				t.Errorf("stderr = %q, want a warning naming %q", stderr, tc.wantWarning)
 			}
 		})

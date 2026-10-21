@@ -23,7 +23,7 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	ev := heartbeat.FailedEvent(1, 4, "db-backup", &three, "dumping...\npg_dump: error: connection refused\n")
 	ev.ID, ev.CreatedAt = 41, at
 
-	m := messageFor(ev, "primary", "")
+	m := messageFor(ev, "primary", chat10)
 	w := m.Webhook.(event.TendWebhook)
 	if w.Subject != "Heartbeat failed: db-backup (exit 3)" {
 		t.Fatalf("subject = %q", w.Subject)
@@ -64,7 +64,7 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 
 // TestHeartbeatFailureWithoutExitStatusOrOutput: /fail with no body.
 func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
-	w := messageFor(heartbeat.FailedEvent(1, 4, "sync", nil, ""), "primary", "").Webhook.(event.TendWebhook)
+	w := messageFor(heartbeat.FailedEvent(1, 4, "sync", nil, ""), "primary", chat10).Webhook.(event.TendWebhook)
 	if w.Subject != "Heartbeat failed: sync" {
 		t.Fatalf("subject = %q", w.Subject)
 	}
@@ -77,7 +77,7 @@ func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
 // its grace.
 func TestHeartbeatOverranSaysSo(t *testing.T) {
 	at := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	w := messageFor(heartbeat.OverranEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "sync", GraceSeconds: 300, StartedAt: at}), "primary", "").Webhook.(event.TendWebhook)
+	w := messageFor(heartbeat.OverranEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "sync", GraceSeconds: 300, StartedAt: at}), "primary", chat10).Webhook.(event.TendWebhook)
 	if w.Subject != "Heartbeat missed: sync (run did not finish)" {
 		t.Fatalf("subject = %q", w.Subject)
 	}
@@ -92,7 +92,7 @@ func TestHeartbeatOverranSaysSo(t *testing.T) {
 func TestPlainHeartbeatMissUnchanged(t *testing.T) {
 	for _, detail := range []string{"", "junk", `{"reason":"something-new"}`,
 		`{"reason":"missed","heartbeat_id":4,"last_seen_at":"2026-10-20T03:00:00Z","period_seconds":86400,"grace_seconds":3600}`} {
-		w := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup", Detail: detail}, "primary", "").Webhook.(event.TendWebhook)
+		w := messageFor(core.Event{Type: "heartbeat.missed", Payload: "db-backup", Detail: detail}, "primary", chat10).Webhook.(event.TendWebhook)
 		if w.Subject != "Heartbeat missed: db-backup" || w.Body != "db-backup" {
 			t.Errorf("detail %q: subject %q body %q, want the plain miss", detail, w.Subject, w.Body)
 		}

@@ -93,7 +93,7 @@ func TestWebhookBodiesFromRealEventsMatchTheFixtures(t *testing.T) {
 		mkChannel("ward", srv.URL+"/ward", notify.AlertableTypes()...)
 		mkChannel("refuses", srv.URL+"/refuses", "heartbeat.missed") // its give-up is the notification.failed
 
-		w := notify.NewWorker(s, box, kitnotify.BuildProvider, "primary", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+		w := notify.NewWorker(s, box, kitnotify.BuildProvider, "primary", notify.ChatOptions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		w.Hold = 0
 		drain := func() {
 			t.Helper()
