@@ -475,7 +475,7 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `GET` | `/api/heartbeats/{id}` | Get a heartbeat, with the run being timed (`started_at`, `started_rid`). |
 | `GET` | `/api/heartbeats/{id}/history` | List a heartbeat's transitions; a miss's `detail` says why it went down, and a miss's or a recovery's `detail` names the heartbeat's `heartbeat_id` (one recorded by an older Tend has none). |
 | `GET` | `/api/heartbeats/{id}/pings` | List a heartbeat's ping log (`?limit=`, max 200): kind, exit status, run id, duration, logged body. |
-| `GET` | `/api/events` | List recent events (`?limit=`, max 200). |
+| `GET` | `/api/events` | List recent events (`?limit=`, max 200). An event's `detail` says more where Tend records it: a `run.failed`'s `verdict` (a probe's or drill's opening lines), `output` (up to 50 lines and 1000 bytes of the tail, already redacted), `truncated`, `timeout_seconds` and `http_status`; a heartbeat event's `heartbeat_id` and why it went down. |
 | `GET` | `/api/secrets` | List secret names and timestamps (no values). |
 | `POST` | `/api/jobs/{id}/run` | Enqueue a run. Returns `202 {"run_id": N}`. |
 | `POST` | `/api/jobs/{id}/enable` | Enable a job. Returns the updated job. |
@@ -548,6 +548,16 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ```
 
 Only run-now, enable, and disable are available as API mutations; creating, editing, and deleting resources is CLI- and config-file-driven to prevent drift against the declared config.
+
+## Upgrading
+
+### From v0.5
+
+The webhook body (the legacy keys and the `marsad` envelope) is unchanged. What the other channels send is new (see **What an alert says** under [Alerting](#alerting)):
+
+- An existing `TEND_BASE_URL` now also puts a link to the run's or the heartbeat's page in every chat alert. Check that it is the URL people reach the dashboard on; one with a user name or password is not used for links, and `tend doctor` says whether it is.
+- A failed run's chat alert now ends with up to 10 lines of its output (a probe's or drill's `FAIL:` lines first), with the job's secrets redacted. Set `TEND_ALERT_OUTPUT_LINES=0` to keep output out of chat alerts.
+- Events gain a `detail` in the API: see `GET /api/events` under [HTTP API](#http-api).
 
 ---
 
