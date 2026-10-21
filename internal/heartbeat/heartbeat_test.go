@@ -479,3 +479,38 @@ func TestCheck_RaceLost_NotLogged(t *testing.T) {
 		t.Errorf("dispatched %d events for race-lost no-op, want 0", n)
 	}
 }
+
+// TestCheck_SaysWhenAndWhy: the heartbeat.missed the watcher records carries
+// the heartbeat's id, its last ping, period and grace (a plain miss), or the
+// run that did not finish (an overrun), for the alert to say.
+func TestCheck_SaysWhenAndWhy(t *testing.T) {
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	last := now.Add(-2 * time.Hour)
+	fs := &fakeWatchStore{
+		due: []heartbeat.Heartbeat{
+			{ID: 1, OrgID: 1, Name: "quiet", Status: "up", LastSeenAt: last, PeriodSeconds: 3600, GraceSeconds: 600},
+			{ID: 2, OrgID: 1, Name: "stuck", Status: "up", LastSeenAt: now.Add(-10 * time.Minute),
+				PeriodSeconds: 3600, GraceSeconds: 60, StartedAt: now.Add(-5 * time.Minute)},
+		},
+		setStatusIfResult: map[int64]struct {
+			fired bool
+			err   error
+		}{1: {fired: true}, 2: {fired: true}},
+	}
+	w := heartbeat.NewWatcher(fs, clock.NewFake(now), nil, nil)
+	if err := w.Check(context.Background()); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(fs.emitted) != 2 {
+		t.Fatalf("emitted %d events, want 2", len(fs.emitted))
+	}
+	quiet, ok := heartbeat.ParseMissDetail(fs.emitted[0].Detail)
+	if !ok || quiet.Reason != heartbeat.ReasonMissed || quiet.HeartbeatID != 1 || !quiet.LastSeenAt.Equal(last) ||
+		quiet.PeriodSeconds != 3600 || quiet.GraceSeconds != 600 {
+		t.Errorf("plain miss detail = %+v (ok=%v)", quiet, ok)
+	}
+	stuck, ok := heartbeat.ParseMissDetail(fs.emitted[1].Detail)
+	if !ok || stuck.Reason != heartbeat.ReasonOverran || stuck.HeartbeatID != 2 || !stuck.StartedAt.Equal(now.Add(-5*time.Minute)) {
+		t.Errorf("overrun detail = %+v (ok=%v)", stuck, ok)
+	}
+}

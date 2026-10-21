@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/kit/clock"
+	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/store"
 )
@@ -101,7 +102,7 @@ func TestStartedRunThatFinishesInTimeStaysUp(t *testing.T) {
 			t.Fatalf("past the regular deadline: status %q, want down", hb.Status)
 		}
 		missed := eventsOfType(t, ctx, s, orgID, heartbeat.EventMissed)
-		if len(missed) != 1 || missed[0].Detail != "" {
+		if len(missed) != 1 || !plainMiss(missed[0]) {
 			t.Fatalf("heartbeat.missed = %+v, want one plain miss", missed)
 		}
 	})
@@ -122,7 +123,7 @@ func TestStartDoesNotPostponeTheRegularDeadline(t *testing.T) {
 			t.Fatalf("past the regular deadline with a later start: status %q, want down", hb.Status)
 		}
 		missed := eventsOfType(t, ctx, s, orgID, heartbeat.EventMissed)
-		if len(missed) != 1 || missed[0].Detail != "" {
+		if len(missed) != 1 || !plainMiss(missed[0]) {
 			t.Fatalf("heartbeat.missed = %+v, want one plain miss", missed)
 		}
 	})
@@ -194,7 +195,7 @@ func TestMarkDownLosesToANewerStart(t *testing.T) {
 			t.Fatalf("DueHeartbeats = %v, %v; want the overrunning heartbeat", due, err)
 		}
 		ping(t, ctx, s, "tok-raced-start", heartbeat.PingInput{Kind: heartbeat.PingStart}, base.Add(7*time.Minute))
-		fired, err := s.MarkHeartbeatDownAndEmit(ctx, due[0], heartbeat.OverranEvent(orgID, "raced", due[0].StartedAt, 300))
+		fired, err := s.MarkHeartbeatDownAndEmit(ctx, due[0], heartbeat.OverranEvent(due[0]))
 		if err != nil {
 			t.Fatalf("MarkHeartbeatDownAndEmit: %v", err)
 		}
@@ -315,4 +316,11 @@ func TestStartedRunWithoutGraceGetsAPeriod(t *testing.T) {
 			t.Fatalf("missed = %+v, detail %+v; want one overran with the period as its limit", missed, d)
 		}
 	})
+}
+
+// plainMiss reports whether ev is the watcher's plain miss (no ping within
+// period + grace), not a failure or an overrun.
+func plainMiss(ev core.Event) bool {
+	d, ok := heartbeat.ParseMissDetail(ev.Detail)
+	return ok && d.Reason == heartbeat.ReasonMissed
 }

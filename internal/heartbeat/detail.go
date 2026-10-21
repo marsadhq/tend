@@ -7,10 +7,12 @@ import (
 	"github.com/marsadhq/tend/internal/core"
 )
 
-// Reasons a heartbeat goes down other than a plain miss, as MissDetail.Reason.
-// A heartbeat.missed without a detail is a plain miss: no ping arrived within
-// period + grace.
+// Why a heartbeat went down, as MissDetail.Reason. A heartbeat.missed with no
+// detail (recorded before misses carried one) or with a reason this version
+// does not know reads as a plain miss.
 const (
+	// ReasonMissed: no ping arrived within period + grace (a plain miss).
+	ReasonMissed = "missed"
 	// ReasonFailed: a failure ping (/fail, or a non-zero exit status) took
 	// the heartbeat down at once.
 	ReasonFailed = "failed"
@@ -19,19 +21,26 @@ const (
 	ReasonOverran = "overran"
 )
 
-// MissDetail is the Detail of a heartbeat.missed that is more than a plain
-// miss. It says why the heartbeat went down so the alert can say it; the
-// event's payload stays the plain heartbeat name either way.
+// MissDetail is the Detail of a heartbeat.missed. It says why the heartbeat
+// went down, and what the alert needs to say so, while the event's payload
+// stays the plain heartbeat name.
 type MissDetail struct {
 	Reason string `json:"reason"`
+	// HeartbeatID is the heartbeat's id, for a link to its page.
+	HeartbeatID int64 `json:"heartbeat_id,omitempty"`
 	// ExitStatus is the exit status a failure ping reported, nil for /fail.
 	ExitStatus *int `json:"exit_status,omitempty"`
 	// Output is the tail of the failure ping's logged body (OutputTail).
 	Output string `json:"output,omitempty"`
-	// StartedAt and GraceSeconds describe the run that overran: when it
-	// started and how long it was allowed (Heartbeat.RunGrace).
-	StartedAt    time.Time `json:"started_at,omitzero"`
-	GraceSeconds int       `json:"grace_seconds,omitempty"`
+	// LastSeenAt is a plain miss's last ping, zero when it never pinged.
+	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
+	// PeriodSeconds is a plain miss's period.
+	PeriodSeconds int `json:"period_seconds,omitempty"`
+	// StartedAt is when the run that overran started.
+	StartedAt time.Time `json:"started_at,omitzero"`
+	// GraceSeconds is a plain miss's grace, or how long the run that overran
+	// was allowed (Heartbeat.RunGrace).
+	GraceSeconds int `json:"grace_seconds,omitempty"`
 }
 
 // The tail of a failure ping's body that its alert carries: its last
@@ -43,20 +52,30 @@ const (
 )
 
 // FailedEvent is the heartbeat.missed recorded when a failure ping takes the
-// heartbeat named name down. exitStatus is the status the ping reported (nil
-// for /fail) and body what it logged.
-func FailedEvent(orgID int64, name string, exitStatus *int, body string) core.Event {
+// heartbeat id, named name, down. exitStatus is the status the ping reported
+// (nil for /fail) and body what it logged.
+func FailedEvent(orgID, id int64, name string, exitStatus *int, body string) core.Event {
 	ev := MissedEvent(orgID, name)
-	ev.Detail = encodeDetail(MissDetail{Reason: ReasonFailed, ExitStatus: exitStatus, Output: OutputTail(body)})
+	ev.Detail = encodeDetail(MissDetail{Reason: ReasonFailed, HeartbeatID: id, ExitStatus: exitStatus, Output: OutputTail(body)})
 	return ev
 }
 
-// OverranEvent is the heartbeat.missed recorded when a run of the heartbeat
-// named name, started at startedAt, did not finish within graceSeconds (the
-// heartbeat's RunGrace).
-func OverranEvent(orgID int64, name string, startedAt time.Time, graceSeconds int) core.Event {
-	ev := MissedEvent(orgID, name)
-	ev.Detail = encodeDetail(MissDetail{Reason: ReasonOverran, StartedAt: startedAt.UTC(), GraceSeconds: graceSeconds})
+// OverdueEvent is the heartbeat.missed the watcher records when no ping of
+// hb arrived within its period + grace: when it last pinged (nothing when it
+// never did) and what it expects.
+func OverdueEvent(hb Heartbeat) core.Event {
+	ev := MissedEvent(hb.OrgID, hb.Name)
+	ev.Detail = encodeDetail(MissDetail{Reason: ReasonMissed, HeartbeatID: hb.ID, LastSeenAt: hb.LastSeenAt.UTC(),
+		PeriodSeconds: hb.PeriodSeconds, GraceSeconds: hb.GraceSeconds})
+	return ev
+}
+
+// OverranEvent is the heartbeat.missed recorded when the run hb started (at
+// hb.StartedAt) did not finish within the grace it is allowed (RunGrace).
+func OverranEvent(hb Heartbeat) core.Event {
+	ev := MissedEvent(hb.OrgID, hb.Name)
+	ev.Detail = encodeDetail(MissDetail{Reason: ReasonOverran, HeartbeatID: hb.ID, StartedAt: hb.StartedAt.UTC(),
+		GraceSeconds: int(hb.RunGrace() / time.Second)})
 	return ev
 }
 

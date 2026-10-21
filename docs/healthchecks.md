@@ -82,8 +82,10 @@ output the ping logged. The next success records `heartbeat.recovered`. A
 failure while the heartbeat is already down records nothing more. The
 `marsad` envelope keeps its `kind`, `subject`, `dedup_key` and `data`; its
 `title` and `body` carry the new text. Event DTOs in the API carry the reason
-under `detail` (`{"reason":"failed","exit_status":3,"output":"…"}` or
-`{"reason":"overran","started_at":"…","grace_seconds":300}`).
+under `detail`, with the heartbeat's id: `{"reason":"failed","heartbeat_id":4,"exit_status":3,"output":"…"}`,
+`{"reason":"overran","heartbeat_id":4,"started_at":"…","grace_seconds":300}`, or, for a heartbeat
+that stopped pinging, `{"reason":"missed","heartbeat_id":4,"last_seen_at":"…","period_seconds":86400,"grace_seconds":3600}`
+(no `last_seen_at` when it never pinged).
 
 ## Slug URLs and the ping key
 

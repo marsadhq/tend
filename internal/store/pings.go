@@ -138,7 +138,7 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 		wentDown, err = update(`last_seen_at = ?, status = 'down', started_at = NULL, started_rid = ''`,
 			`status <> 'down'`, seen)
 		if err == nil && wentDown {
-			ev := heartbeat.FailedEvent(res.OrgID, res.Name, in.ExitStatus, in.Body)
+			ev := heartbeat.FailedEvent(res.OrgID, res.HeartbeatID, res.Name, in.ExitStatus, in.Body)
 			event = &ev
 		}
 	}

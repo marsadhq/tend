@@ -185,9 +185,9 @@ func (w *Watcher) Check(ctx context.Context) error {
 		// dead-man's switch on created_at). Both transition to 'down' and emit the
 		// same heartbeat.missed event. The guard (status + last_seen_at, which is
 		// NULL for 'new') makes a concurrent ping win the race as a no-op.
-		ev := MissedEvent(hb.OrgID, hb.Name)
+		ev := OverdueEvent(hb)
 		if _, overran, _ := hb.Deadline(); overran {
-			ev = OverranEvent(hb.OrgID, hb.Name, hb.StartedAt, int(hb.RunGrace()/time.Second))
+			ev = OverranEvent(hb)
 		}
 		fired, err := w.store.MarkHeartbeatDownAndEmit(ctx, hb, ev)
 		if err != nil {

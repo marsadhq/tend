@@ -19,7 +19,7 @@ import (
 func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 	at := time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
 	three := 3
-	ev := heartbeat.FailedEvent(1, "db-backup", &three, "dumping...\npg_dump: error: connection refused\n")
+	ev := heartbeat.FailedEvent(1, 4, "db-backup", &three, "dumping...\npg_dump: error: connection refused\n")
 	ev.ID, ev.CreatedAt = 41, at
 
 	m := messageFor(ev, "primary")
@@ -63,7 +63,7 @@ func TestHeartbeatFailureSaysWhatHappened(t *testing.T) {
 
 // TestHeartbeatFailureWithoutExitStatusOrOutput: /fail with no body.
 func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
-	m := messageFor(heartbeat.FailedEvent(1, "sync", nil, ""), "primary")
+	m := messageFor(heartbeat.FailedEvent(1, 4, "sync", nil, ""), "primary")
 	if m.Subject != "Heartbeat failed: sync" {
 		t.Fatalf("subject = %q", m.Subject)
 	}
@@ -76,7 +76,7 @@ func TestHeartbeatFailureWithoutExitStatusOrOutput(t *testing.T) {
 // its grace.
 func TestHeartbeatOverranSaysSo(t *testing.T) {
 	at := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	m := messageFor(heartbeat.OverranEvent(1, "sync", at, 300), "primary")
+	m := messageFor(heartbeat.OverranEvent(heartbeat.Heartbeat{ID: 4, OrgID: 1, Name: "sync", GraceSeconds: 300, StartedAt: at}), "primary")
 	if m.Subject != "Heartbeat missed: sync (run did not finish)" {
 		t.Fatalf("subject = %q", m.Subject)
 	}
