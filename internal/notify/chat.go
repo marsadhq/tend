@@ -36,7 +36,8 @@ type ChatOptions struct {
 // render's text, byte for byte, whatever this says.
 func chatText(ev core.Event, chat ChatOptions) (subject, body string) {
 	subject, body = render(ev)
-	var lead, output, page string
+	var lead, page string
+	var output alertOutput
 	switch ev.Type {
 	case "run.failed":
 		subject, lead, output = chatRunFailed(ev)
@@ -54,10 +55,7 @@ func chatText(ev core.Event, chat ChatOptions) (subject, body string) {
 		return subject, body
 	}
 	var parts []string
-	if output = core.TailLines(output, chat.OutputLines); output != "" {
-		output = "Last output:\n" + output
-	}
-	for _, part := range []string{lead, link(chat.BaseURL, page), output} {
+	for _, part := range []string{lead, link(chat.BaseURL, page), output.text(chat.OutputLines)} {
 		if part != "" {
 			parts = append(parts, part)
 		}
@@ -86,17 +84,40 @@ func runPage(ev core.Event) string {
 	return fmt.Sprintf("/runs/%d", p.RunID)
 }
 
+// alertOutput is what an alert shows of a failure's output: the tail of it
+// the event kept, from its end, under a label.
+type alertOutput struct {
+	tail string
+	// truncated says the tail comes from before a 1 MiB cut.
+	truncated bool
+}
+
+// text is the output section of an alert showing at most lines lines, or ""
+// when there is nothing to show.
+func (o alertOutput) text(lines int) string {
+	tail := core.TailLines(o.tail, lines)
+	if tail == "" {
+		return ""
+	}
+	label := "Last output:"
+	if o.truncated {
+		label = "Last output before the 1 MiB cut:"
+	}
+	return label + "\n" + tail
+}
+
 // runFailure is the part of a run.failed's detail an alert uses (the
 // runner's jobs.FailureDetail; notify does not import jobs).
 type runFailure struct {
 	Output         string `json:"output"`
+	Truncated      bool   `json:"truncated"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 }
 
 // chatRunFailed says which job failed and how: its exit code in the subject,
 // or that it timed out in the subject and the timeout in lead, and the tail
 // of its output the event kept.
-func chatRunFailed(ev core.Event) (subject, lead, output string) {
+func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	var p struct {
 		JobName  string `json:"job_name"`
 		Status   string `json:"status"`
@@ -120,7 +141,7 @@ func chatRunFailed(ev core.Event) (subject, lead, output string) {
 	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
 		lead = "It was stopped after its " + span(seconds(d.TimeoutSeconds)) + " timeout."
 	}
-	return subject, lead, d.Output
+	return subject, lead, alertOutput{tail: d.Output, truncated: d.Truncated}
 }
 
 // chatMissed is what a heartbeat.missed says beyond its subject: for a
@@ -129,17 +150,17 @@ func chatRunFailed(ev core.Event) (subject, lead, output string) {
 // allowed; for a failure, the tail of what the ping logged as output (the
 // subject has the exit status). A miss recorded before misses carried a
 // detail has nothing more to say.
-func chatMissed(ev core.Event) (lead, output string) {
+func chatMissed(ev core.Event) (lead string, output alertOutput) {
 	d, ok := heartbeat.ParseMissDetail(ev.Detail)
 	if !ok {
-		return "", ""
+		return "", alertOutput{}
 	}
 	switch d.Reason {
 	case heartbeat.ReasonFailed:
-		return "", d.Output
+		return "", alertOutput{tail: d.Output}
 	case heartbeat.ReasonOverran:
 		return fmt.Sprintf("A run started at %s and did not finish within %s.",
-			chatTime(d.StartedAt), span(seconds(d.GraceSeconds))), ""
+			chatTime(d.StartedAt), span(seconds(d.GraceSeconds))), alertOutput{}
 	case heartbeat.ReasonMissed:
 		expected := ""
 		if d.PeriodSeconds > 0 {
@@ -151,14 +172,14 @@ func chatMissed(ev core.Event) (lead, output string) {
 		}
 		switch {
 		case d.LastSeenAt.IsZero():
-			return "It has never pinged" + expected + ".", ""
+			return "It has never pinged" + expected + ".", alertOutput{}
 		case ev.CreatedAt.After(d.LastSeenAt):
-			return fmt.Sprintf("No ping for %s, since %s%s.", span(ev.CreatedAt.Sub(d.LastSeenAt)), chatTime(d.LastSeenAt), expected), ""
+			return fmt.Sprintf("No ping for %s, since %s%s.", span(ev.CreatedAt.Sub(d.LastSeenAt)), chatTime(d.LastSeenAt), expected), alertOutput{}
 		default:
-			return "No ping since " + chatTime(d.LastSeenAt) + expected + ".", ""
+			return "No ping since " + chatTime(d.LastSeenAt) + expected + ".", alertOutput{}
 		}
 	}
-	return "", ""
+	return "", alertOutput{}
 }
 
 func seconds(n int) time.Duration { return time.Duration(n) * time.Second }

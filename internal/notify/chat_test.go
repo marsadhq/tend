@@ -270,3 +270,15 @@ func TestChatTextLinksARecovery(t *testing.T) {
 		t.Errorf("the detail changed the webhook body:\n got %s\nwant %s", got, want)
 	}
 }
+
+// The tail of a run whose output was cut at 1 MiB says it comes from before
+// the cut, not from the end of what the run printed.
+func TestChatTextLabelsATruncatedTail(t *testing.T) {
+	ev := core.Event{Type: "run.failed",
+		Payload: `{"run_id":21,"job_id":3,"job_name":"chatty","status":"failed","exit_code":1}`,
+		Detail:  `{"output":"line 1\nline 2","truncated":true}`}
+	m := messageFor(ev, "primary", chat10)
+	if want := "Last output before the 1 MiB cut:\nline 1\nline 2"; m.Body != want {
+		t.Errorf("body %q, want %q", m.Body, want)
+	}
+}
