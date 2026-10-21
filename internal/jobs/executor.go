@@ -43,6 +43,7 @@ const truncationMarker = "\n... [output truncated at 1MiB]"
 // cappedBuffer is an io.Writer keeping at most max bytes and discarding the
 // rest, recording that truncation happened. Write never errors, so a child
 // process is never killed by a full pipe — its extra output just vanishes.
+// NUL bytes are dropped as they are written (withoutNULs).
 type cappedBuffer struct {
 	buf       bytes.Buffer
 	max       int
@@ -50,6 +51,8 @@ type cappedBuffer struct {
 }
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	p = withoutNULs(p)
 	if room := c.max - c.buf.Len(); room > 0 {
 		if len(p) > room {
 			c.buf.Write(p[:room])
@@ -60,7 +63,25 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	} else if len(p) > 0 {
 		c.truncated = true
 	}
-	return len(p), nil
+	return n, nil
+}
+
+// withoutNULs returns p without its NUL bytes, leaving p itself as it is.
+// Stored output never keeps them (cleanOutput), so a capture drops them as
+// they come: they do not count against its size (a job printing UTF-16 keeps
+// as much text as any other), and a secret printed with NULs between its
+// characters is whole in the capture, where a cut across it is found.
+func withoutNULs(p []byte) []byte {
+	if bytes.IndexByte(p, 0) < 0 {
+		return p
+	}
+	out := make([]byte, 0, len(p))
+	for _, c := range p {
+		if c != 0 {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // String returns the kept output, with the truncation marker when the cap hit.

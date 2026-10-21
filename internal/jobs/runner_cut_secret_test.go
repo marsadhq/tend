@@ -47,3 +47,24 @@ func TestRunnerRedactsASecretAcrossTheOutputCap(t *testing.T) {
 		}
 	})
 }
+
+// TestRunnerRedactsAUTF16SecretAcrossTheOutputCap: the same as plain text,
+// for a job printing UTF-16 (a NUL byte after each character).
+func TestRunnerRedactsAUTF16SecretAcrossTheOutputCap(t *testing.T) {
+	const secret = "tok_0123456789abcdefghijklmnopqrstuvw"
+	const mib = 1 << 20
+	utf16 := func(s string) string { return between(s, "\x00") + "\x00" }
+	cases := []outputJob{{name: "utf-16-across-the-cap",
+		raw: utf16(strings.Repeat("x", mib-20) + secret + strings.Repeat("y", 4096)), secret: secret}}
+	forEachStore(t, func(t *testing.T, s store.Store) {
+		out := runOutputJobs(t, context.Background(), s, cases)["utf-16-across-the-cap"]
+		for n := 6; n <= len(secret); n++ {
+			if strings.Contains(out, secret[:n]) {
+				t.Fatalf("%d bytes of the secret are stored", n)
+			}
+		}
+		if !strings.HasSuffix(out, "x***\n... [output truncated at 1MiB]") {
+			t.Errorf("the secret was not redacted whole at the cap: ...%q", clip(out[max(0, len(out)-120):]))
+		}
+	})
+}
