@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"time"
@@ -111,10 +112,16 @@ func MissedEvent(orgID int64, name string) core.Event {
 	return core.Event{OrgID: orgID, Type: EventMissed, Source: eventSource, Payload: name}
 }
 
-// RecoveredEvent is the event recorded when a ping brings a heartbeat that
-// was down back up.
-func RecoveredEvent(orgID int64, name string) core.Event {
-	return core.Event{OrgID: orgID, Type: EventRecovered, Source: eventSource, Payload: name}
+// RecoveredEvent is the event recorded when a ping brings the heartbeat id,
+// named name, that was down back up. Its Detail names the heartbeat
+// ({"heartbeat_id":id}, read by IDOf) so the alert can link to it; with no id
+// it carries none.
+func RecoveredEvent(orgID, id int64, name string) core.Event {
+	ev := core.Event{OrgID: orgID, Type: EventRecovered, Source: eventSource, Payload: name}
+	if id > 0 {
+		ev.Detail = fmt.Sprintf(`{"heartbeat_id":%d}`, id)
+	}
+	return ev
 }
 
 // RemovedEvent is the event recorded when a heartbeat is deleted.

@@ -129,7 +129,7 @@ func recordHeartbeatPing(ctx context.Context, db *sql.DB, d dialect, token strin
 			started_rid = CASE WHEN ? = '' OR started_rid = ? THEN '' ELSE started_rid END`,
 			`status = 'down'`, seen, in.RID, in.RID, in.RID, in.RID)
 		if err == nil && recovered {
-			ev := heartbeat.RecoveredEvent(res.OrgID, res.Name)
+			ev := heartbeat.RecoveredEvent(res.OrgID, res.HeartbeatID, res.Name)
 			event = &ev
 		}
 	case heartbeat.PingFail:

@@ -115,3 +115,33 @@ func TestOutputTail(t *testing.T) {
 		t.Fatal("blank output should have an empty tail")
 	}
 }
+
+// TestRecoveredEventNamesTheHeartbeat: a recovery keeps its plain-name
+// payload and names the heartbeat's id in its detail, for the alert's link;
+// IDOf reads the id from any heartbeat event's detail.
+func TestRecoveredEventNamesTheHeartbeat(t *testing.T) {
+	ev := heartbeat.RecoveredEvent(7, 4, "db-backup")
+	if ev.Type != heartbeat.EventRecovered || ev.Payload != "db-backup" || ev.OrgID != 7 || ev.Source != "heartbeat" || ev.DedupKey != "" {
+		t.Fatalf("event = %+v, want heartbeat.recovered for db-backup", ev)
+	}
+	if ev.Detail != `{"heartbeat_id":4}` {
+		t.Fatalf("detail = %q", ev.Detail)
+	}
+	if d, ok := heartbeat.ParseMissDetail(ev.Detail); ok {
+		t.Fatalf("a recovery's detail parsed as a miss: %+v", d)
+	}
+	for detail, want := range map[string]int64{
+		ev.Detail: 4,
+		heartbeat.FailedEvent(7, 9, "x", nil, "").Detail: 9,
+		"":                    0,
+		"junk":                0,
+		`{"reason":"missed"}`: 0,
+	} {
+		if got := heartbeat.IDOf(detail); got != want {
+			t.Errorf("IDOf(%q) = %d, want %d", detail, got, want)
+		}
+	}
+	if heartbeat.RecoveredEvent(7, 0, "x").Detail != "" {
+		t.Error("a recovery with no id should carry no detail")
+	}
+}

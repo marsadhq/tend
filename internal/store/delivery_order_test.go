@@ -42,7 +42,7 @@ func TestClaimHoldsBackAChannelsLaterDeliveries(t *testing.T) {
 		}
 		emit(heartbeat.MissedEvent(org.ID, "nightly"))                                               // x, first
 		emit(core.Event{OrgID: org.ID, Type: "run.failed", Source: "test", Payload: `{"job_id":1}`}) // y
-		emit(heartbeat.RecoveredEvent(org.ID, "nightly"))                                            // x, second
+		emit(heartbeat.RecoveredEvent(org.ID, 0, "nightly"))                                         // x, second
 
 		now := time.Now().Add(time.Second)
 		first, err := s.ClaimDueDeliveries(ctx, now, time.Minute, kitnotify.DefaultHold, 10)
@@ -158,7 +158,7 @@ func TestWorkerDeliversAMissBeforeItsRecovery(t *testing.T) {
 				t.Fatalf("CreateRule: %v", err)
 			}
 		}
-		for _, ev := range []core.Event{heartbeat.MissedEvent(org.ID, "nightly"), heartbeat.RecoveredEvent(org.ID, "nightly")} {
+		for _, ev := range []core.Event{heartbeat.MissedEvent(org.ID, "nightly"), heartbeat.RecoveredEvent(org.ID, 0, "nightly")} {
 			if _, err := s.EmitEvent(ctx, ev); err != nil {
 				t.Fatalf("EmitEvent: %v", err)
 			}

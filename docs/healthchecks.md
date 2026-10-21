@@ -85,7 +85,8 @@ failure while the heartbeat is already down records nothing more. The
 under `detail`, with the heartbeat's id: `{"reason":"failed","heartbeat_id":4,"exit_status":3,"output":"…"}`,
 `{"reason":"overran","heartbeat_id":4,"started_at":"…","grace_seconds":300}`, or, for a heartbeat
 that stopped pinging, `{"reason":"missed","heartbeat_id":4,"last_seen_at":"…","period_seconds":86400,"grace_seconds":3600}`
-(no `last_seen_at` when it never pinged).
+(no `last_seen_at` when it never pinged). A `heartbeat.recovered` carries
+`{"heartbeat_id":4}`, so its alert can link to the heartbeat as well.
 
 ## Slug URLs and the ping key
 

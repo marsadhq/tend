@@ -174,7 +174,7 @@ func TestPingAPIFailureAndRecovery(t *testing.T) {
 		if hb := p.hb(t); hb.Status != "up" {
 			t.Fatalf("after /0: status %q, want up", hb.Status)
 		}
-		if len(p.events) != 2 || p.events[1].Type != heartbeat.EventRecovered {
+		if len(p.events) != 2 || p.events[1].Type != heartbeat.EventRecovered || heartbeat.IDOf(p.events[1].Detail) != p.hb(t).ID {
 			t.Fatalf("dispatched %+v, want heartbeat.recovered second", p.events)
 		}
 	})

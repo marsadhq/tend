@@ -473,7 +473,7 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `GET` | `/api/rules` | List notification rules. |
 | `GET` | `/api/heartbeats` | List heartbeats (no ping token). |
 | `GET` | `/api/heartbeats/{id}` | Get a heartbeat, with the run being timed (`started_at`, `started_rid`). |
-| `GET` | `/api/heartbeats/{id}/history` | List a heartbeat's transitions; an event's `detail` says why it went down. |
+| `GET` | `/api/heartbeats/{id}/history` | List a heartbeat's transitions; a miss's `detail` says why it went down, and a miss's or a recovery's `detail` names the heartbeat's `heartbeat_id` (one recorded by an older Tend has none). |
 | `GET` | `/api/heartbeats/{id}/pings` | List a heartbeat's ping log (`?limit=`, max 200): kind, exit status, run id, duration, logged body. |
 | `GET` | `/api/events` | List recent events (`?limit=`, max 200). |
 | `GET` | `/api/secrets` | List secret names and timestamps (no values). |
