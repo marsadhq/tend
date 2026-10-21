@@ -470,14 +470,18 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
 }
 
 /* --- touch ----------------------------------------------------------------- */
-/* A touch screen gets 44px targets at any width: a tablet shows the desktop
-   layout but is tapped like a phone. */
+/* Everything a finger taps is at least 44px tall: at phone width, and on a
+   touch screen at any width (a tablet shows the desktop layout but is tapped
+   like a phone). */
 
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 640px) {
   .btn-action,
   .btn-ghost { min-height: 44px; }
   .nav-link,
+  .crumbs a,
+  .jobs-poll-toggle a,
   .output-jump { display: inline-flex; align-items: center; min-height: 44px; }
+  .pings-table summary { padding: 12px 0; cursor: pointer; }
 }
 
 /* --- phones ---------------------------------------------------------------- */
@@ -517,7 +521,7 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
     min-height: 48px;
     font-size: 14px;
   }
-  .btn-ghost { min-height: 44px; padding: 0 16px; font-size: 13px; }
+  .btn-ghost { padding: 0 16px; font-size: 13px; }
 
   /* Tables become a list of cards: a row wraps its cells onto as many lines
      as it needs, and a cell with a data-label shows its column's name in
@@ -568,13 +572,8 @@ a:focus-visible, button:focus-visible, .field-input:focus-visible {
   .jobs-table .row-actions { display: flex; gap: 8px; }
   .jobs-table .btn-action { flex: 1 1 0; }
 
-  /* Everything a thumb taps is at least 44px tall. */
-  .btn-action { min-height: 44px; padding: 0 14px; font-size: 13px; }
+  .btn-action { padding: 0 14px; font-size: 13px; }
   .crumbs { display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; margin-bottom: 10px; }
-  .crumbs a,
-  .jobs-poll-toggle a,
-  .output-jump { display: inline-flex; align-items: center; min-height: 44px; }
-  .pings-table summary { padding: 12px 0; cursor: pointer; }
 
   /* Output scrolls with the page, not in a box of its own: one scroll is
      easier on a touch screen. It is set smaller so more of a line fits, and
