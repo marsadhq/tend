@@ -53,9 +53,11 @@ func runDrillStep(ctx context.Context, label, command string, env map[string]str
 // directory), runs the restore in it, and, when the restore succeeded, every
 // check in order. Then, however that went, it runs the cleanup command and
 // removes the scratch directory. The steps learn where the scratch directory
-// is from $TEND_SCRATCH (also their working directory) and get a name safe to
-// use for a temporary database in $TEND_DRILL_ID; Tend never splices either
-// into a command.
+// is from $TEND_SCRATCH and get a name safe to use for a temporary database
+// in $TEND_DRILL_ID; Tend never splices either into a command. The restore
+// and the checks run in the scratch directory, the cleanup in the directory
+// that holds it; a restore that removes the scratch directory or replaces it
+// (with a symbolic link, say) fails the run before any check runs there.
 //
 // The run fails when the restore or a check fails, when the restore took
 // longer than max_duration, when the cleanup fails, or when the scratch
@@ -109,12 +111,27 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 		failed(StatusFailed, restore.code)
 	}
 
+	// The checks run in the scratch directory, so it must still be the one
+	// Tend made: a restore that removed it, or swapped it for a symbolic link
+	// to somewhere else, would have them run (and write) there.
+	replaced := false
+	if restore.status == StatusSucceeded {
+		if fi, err := os.Lstat(scratch); err != nil || !fi.IsDir() {
+			replaced = true
+			r.fail("the restore removed or replaced the scratch directory %s; the checks were not run", scratch)
+			failed(StatusFailed, probeExitError)
+		}
+	}
+
 	passed := 0
 	for i, command := range s.Checks {
 		label := fmt.Sprintf("check %d", i+1)
 		switch {
 		case restore.status != StatusSucceeded:
 			r.add(label, "not run (the restore did not succeed)")
+			continue
+		case replaced:
+			r.add(label, "not run (the scratch directory was replaced)")
 			continue
 		case ctx.Err() != nil:
 			r.add(label, "not run (the job's timeout was reached)")
@@ -138,7 +155,7 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 	}
 
 	limit := seconds(s.MaxDurationSeconds)
-	if restore.status == StatusSucceeded && limit > 0 && restore.took > limit {
+	if restore.status == StatusSucceeded && !replaced && limit > 0 && restore.took > limit {
 		r.fail("the restore took %s, over max_duration %s", durationText(restore.took), durationText(limit))
 		failed(StatusFailed, probeExitFailed)
 	}
@@ -147,7 +164,10 @@ func (e *Executor) runOnceDrill(ctx context.Context, j Job, env map[string]strin
 		// Detached from ctx, whose deadline may well have passed already: the
 		// cleanup runs however the restore ended, within its own bound.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drillCleanupTimeout)
-		c := runDrillStep(cctx, "cleanup", s.Cleanup, stepEnv, secrets, scratch)
+		// It runs beside the scratch directory, not in it: whatever the
+		// restore did to that directory, the cleanup's working directory is
+		// one Tend chose.
+		c := runDrillStep(cctx, "cleanup", s.Cleanup, stepEnv, secrets, filepath.Dir(scratch))
 		cancel()
 		steps = append(steps, c)
 		switch c.status {

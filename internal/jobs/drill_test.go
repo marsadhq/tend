@@ -313,3 +313,60 @@ func TestHeadTail(t *testing.T) {
 		t.Errorf("mixed writes: %q", got)
 	}
 }
+
+// TestDrillCleanupRunsBesideScratch: the cleanup's working directory is the
+// directory that holds the scratch directory, not the scratch directory,
+// which the restore may have changed.
+func TestDrillCleanupRunsBesideScratch(t *testing.T) {
+	where := filepath.Join(t.TempDir(), "where")
+	j, parent := drillJob(t, Spec{Restore: `true`, Cleanup: `pwd -P > ` + where})
+	if res := NewExecutor().Run(context.Background(), j, nil); res.Status != StatusSucceeded {
+		t.Fatalf("status %s, output:\n%s", res.Status, res.Output)
+	}
+	got, err := os.ReadFile(where)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(parent)
+	if strings.TrimSpace(string(got)) != real {
+		t.Fatalf("cleanup ran in %s, want %s", strings.TrimSpace(string(got)), real)
+	}
+}
+
+// TestDrillRestoreReplacingScratch: a restore that swaps $TEND_SCRATCH for a
+// symbolic link elsewhere fails the drill. No check runs in the link's
+// target, the cleanup runs beside the scratch directory, and removing the
+// scratch directory removes the link, not what it points at.
+func TestDrillRestoreReplacingScratch(t *testing.T) {
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	if err := os.WriteFile(keep, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	where := filepath.Join(t.TempDir(), "where")
+	j, parent := drillJob(t, Spec{
+		Restore: `cd .. && rm -rf "$TEND_SCRATCH" && ln -s ` + outside + ` "$TEND_SCRATCH"`,
+		Checks:  []string{`touch from-a-check`},
+		Cleanup: `pwd -P > ` + where,
+	})
+	res := NewExecutor().Run(context.Background(), j, nil)
+	if res.Status != StatusFailed || res.ExitCode != -1 || !strings.Contains(res.Output, "FAIL: the restore removed or replaced the scratch directory") {
+		t.Fatalf("status %s exit %d, output:\n%s", res.Status, res.ExitCode, res.Output)
+	}
+	wantOutput(t, res.Output, "check 1:", "not run")
+	if _, err := os.Stat(filepath.Join(outside, "from-a-check")); err == nil {
+		t.Fatal("a check ran in the symbolic link's target")
+	}
+	got, err := os.ReadFile(where)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, _ := filepath.EvalSymlinks(parent)
+	if strings.TrimSpace(string(got)) != real {
+		t.Fatalf("cleanup ran in %s, want %s", strings.TrimSpace(string(got)), real)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("the link's target was emptied: %v", err)
+	}
+	assertEmpty(t, parent)
+}

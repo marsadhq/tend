@@ -607,10 +607,13 @@ These limits are constants in the code, not configuration.
   after the job's secrets are redacted: the runner hands the executor the
   secret values, each capture keeps the longest secret's length past its
   cut, and a secret straddling a cut is redacted whole before the cut is
-  made. A drill's cleanup runs however the restore ended, detached from the
-  attempt's context and bounded by `drillCleanupTimeout` (one minute), and its
-  scratch directory is removed after it, made writable first when a restore
-  left read-only directories. Because that cleanup can run past the attempt's
+  made. A drill's checks run only when the scratch directory is still the
+  directory Tend made (`os.Lstat`: a restore that replaced it with a symbolic
+  link fails the run). Its cleanup runs however the restore ended, in the
+  directory that holds the scratch directory, detached from the attempt's
+  context and bounded by `drillCleanupTimeout` (one minute), and the scratch
+  directory is removed after it, made writable first when a restore left
+  read-only directories. Because that cleanup can run past the attempt's
   timeout, `maxRunDuration` allows a drill's attempts that much more, so the
   reaper does not fail a drill that is cleaning up.
 - **Cron validation at the edges.** `jobs.ValidateCron` uses the same parser as

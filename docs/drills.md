@@ -29,18 +29,21 @@ channel or to Ward.
    `scratch_dir`, or the system's temporary directory.
 2. It runs `restore`. Every step runs as a shell job's command does (`sh -c`,
    the job's `env` with its `{{ secret.NAME }}` references resolved, in its
-   own process group) with the scratch directory as its working directory and
-   two more variables:
+   own process group) with two more variables:
    - `TEND_SCRATCH`: the scratch directory's path;
    - `TEND_DRILL_ID`: its name, `tend_drill_<digits>`, unique to the run and
      safe to use as the name of a temporary database.
    Tend never puts either into a command; quote them in your commands
-   (`"$TEND_SCRATCH"`).
+   (`"$TEND_SCRATCH"`). The restore and the checks run in the scratch
+   directory.
 3. When the restore succeeded, it runs each of `checks` in order, all of them
-   even when one fails, so the output shows everything that is wrong.
-4. However that went, a timeout included, it runs `cleanup` (if set) and then
-   removes the scratch directory with everything in it, read-only directories
-   included.
+   even when one fails, so the output shows everything that is wrong. A
+   restore that removed the scratch directory, or replaced it (with a symbolic
+   link to somewhere else, say), fails the drill instead, and no check runs.
+4. However that went, a timeout included, it runs `cleanup` (if set), in the
+   directory that holds the scratch directory, and then removes the scratch
+   directory with everything in it, read-only directories included. A
+   symbolic link in it is removed, never followed.
 
 The run **fails** when the restore fails, when a check fails, when the
 restore took longer than `max_duration_seconds`, when the cleanup fails, or
@@ -104,6 +107,15 @@ Things to get right:
   needs a `ReadWritePaths=` line; `ProtectHome=true` hides `/home`; and
   `DynamicUser=yes` runs it as a user of its own, so backups must be readable
   to it (a group added with `SupplementaryGroups=`, say).
+- **No background processes.** As for a shell job, a step's process group is
+  killed when it times out, but processes it leaves running in the
+  background when it exits normally are not (one that keeps the step's
+  output open fails the step 5 seconds later, with exit code -1), and one
+  that left the group (`setsid`, a daemon) is not killed even on a timeout.
+  A restore must finish its
+  work before it exits: a process left behind could keep writing into a
+  scratch directory Tend is removing, or keep a temporary database open
+  while the cleanup drops it.
 - **Check the data, not the exit status.** A restore that exits 0 can still
   bring back an empty database. Count rows, look for a recent record, compare
   against a threshold you would notice.
@@ -213,8 +225,8 @@ checks too; it checks the repository rather than the restore.
 
 ### Borg
 
-`borg extract` restores into the current directory, which for a drill step
-is the scratch directory; paths in a Borg archive have no leading slash.
+`borg extract` restores into the current directory, which for the restore
+and the checks is the scratch directory; paths in a Borg archive have no leading slash.
 Borg 1.x syntax:
 
 ```yaml
