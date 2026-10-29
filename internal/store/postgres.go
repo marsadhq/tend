@@ -212,9 +212,12 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// The job's row is locked first, as every transaction about its alerts
+	// does (pacing.go), so a delete and a run's finish or a release take
+	// their turns instead of deadlocking.
 	var name string
 	err = tx.QueryRowContext(ctx,
-		`SELECT name FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&name)
+		`SELECT name FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
