@@ -7,11 +7,13 @@ package notify
 // touching the network or a real database.
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,7 +412,7 @@ func TestWorkerRejectedFailureReportIsNotReported(t *testing.T) {
 // TestWorkerReleasesHeldAlertsBeforeEachClaim: the worker's poll is what
 // sends a held failure alert once its interval ends (see Pacing), so every
 // claim first asks the store to queue the ones that are due, at the
-// worker's time; an error there is the claim's error and nothing is sent.
+// worker's time.
 func TestWorkerReleasesHeldAlertsBeforeEachClaim(t *testing.T) {
 	at := time.Date(2026, 10, 28, 20, 4, 0, 0, time.UTC)
 	fs := &fakeWorkerStore{due: []Delivery{due(1, "run.failed", `{"job_id":2,"job_name":"x"}`, at)}}
@@ -427,10 +429,23 @@ func TestWorkerReleasesHeldAlertsBeforeEachClaim(t *testing.T) {
 		t.Errorf("released %d times for 2 claims (one batch, then an empty one)", len(fs.released))
 	}
 
+	// A release that fails is logged and the claim goes on: the other
+	// notifications do not wait on it.
 	fs = &fakeWorkerStore{due: []Delivery{due(2, "run.failed", `{"job_id":2,"job_name":"x"}`, at)}, releaseErr: errors.New("database is locked")}
 	p = &fakeProvider{}
-	w = newTestWorker(t, fs, p)
-	if _, err := w.DrainOnce(context.Background()); err == nil || p.calls != 0 || len(fs.claimed) != 0 {
-		t.Fatalf("a failing release: err %v, %d sent, %d claimed; want the error and nothing claimed", err, p.calls, len(fs.claimed))
+	var logged bytes.Buffer
+	box := testBox(t)
+	blob, err := box.Encrypt([]byte(`{"url":"https://example/x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.blob = blob
+	w = NewWorker(fs, box, func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error) { return p, nil }, "primary", ChatOptions{},
+		slog.New(slog.NewTextHandler(&logged, nil)))
+	if _, err := w.DrainOnce(context.Background()); err != nil || p.calls != 1 {
+		t.Fatalf("a failing release: err %v, %d sent; want the delivery sent", err, p.calls)
+	}
+	if !strings.Contains(logged.String(), "held failure alerts") || !strings.Contains(logged.String(), "database is locked") {
+		t.Errorf("the failing release was not logged: %s", logged.String())
 	}
 }

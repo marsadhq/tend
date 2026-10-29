@@ -378,7 +378,8 @@ in one transaction (`FailDeliveryAndEmit`).
 
 **`notify.Worker` drains the queue.** It is kit's `notify.Worker`, driving
 Tend's deliveries through the `kit/notify` `Queue` interface. Each claim first
-queues the held failure alerts that are due (`ReleaseHeldAlerts`, above). It claims due rows (`ClaimDueDeliveries`
+queues the held failure alerts that are due (`ReleaseHeldAlerts`, above); a
+failure there is logged and does not hold up the claim. It claims due rows (`ClaimDueDeliveries`
 increments the attempt count and pushes `next_attempt_at` out by a one-minute
 lease, so a claim held by a crashed worker simply becomes due again), decrypts
 the channel config, builds the provider, and sends. Success marks the row

@@ -92,7 +92,7 @@ type Worker = kitnotify.Worker[Delivery]
 // every notification (config.LoadInstance: TEND_INSTANCE or the hostname).
 // chat shapes the text of the chat alerts (their links and output).
 func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType, []byte) (kitnotify.Provider, error), instance string, chat ChatOptions, log *slog.Logger) *Worker {
-	w := kitnotify.NewWorker[Delivery](queue{s}, sender(s, box, build, instance, chat), log)
+	w := kitnotify.NewWorker[Delivery](queue{s: s, log: log}, sender(s, box, build, instance, chat), log)
 	w.LogAttrs = func(d kitnotify.Delivery[Delivery]) []any {
 		return []any{"channel", d.Item.ChannelID, "event", d.Item.Event.Type}
 	}
@@ -100,13 +100,18 @@ func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType
 }
 
 // queue is kitnotify.Queue over Tend's deliveries table.
-type queue struct{ s WorkerStore }
+type queue struct {
+	s   WorkerStore
+	log *slog.Logger
+}
 
 // Claim queues the held failure alerts that are due (ReleaseHeldAlerts),
-// then claims due deliveries (see WorkerStore.ClaimDueDeliveries).
+// then claims due deliveries (see WorkerStore.ClaimDueDeliveries). A release
+// that fails is logged and tried again at the next poll; the claim goes on,
+// so the other notifications never wait on it.
 func (q queue) Claim(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]kitnotify.Delivery[Delivery], error) {
-	if _, err := q.s.ReleaseHeldAlerts(ctx, now); err != nil {
-		return nil, err
+	if _, err := q.s.ReleaseHeldAlerts(ctx, now); err != nil && ctx.Err() == nil && q.log != nil {
+		q.log.Warn("notify: queue held failure alerts", "err", err)
 	}
 	ds, err := q.s.ClaimDueDeliveries(ctx, now, lease, hold, limit)
 	if err != nil {
