@@ -24,30 +24,43 @@ func pgEmitEventTx(ctx context.Context, tx *sql.Tx, e core.Event) (int64, error)
 	return dialectTx{tx: tx, d: dialectPostgres}.emitEvent(ctx, e)
 }
 
-// emitEvent appends an event on the transaction and returns its ID. This is
-// the single source of the event-insert SQL: every way an event is recorded
-// (EmitEvent, FinishRunAndEmit, ReapStaleRun, a heartbeat transition, ...)
-// goes through here, so it also enqueues the event's deliveries in the same
-// transaction. A zero CreatedAt is stamped with the current time.
+// emitEvent appends an event on the transaction and returns its ID (see
+// recordEvent).
 func (t dialectTx) emitEvent(ctx context.Context, e core.Event) (int64, error) {
-	created := e.CreatedAt
-	if created.IsZero() {
-		created = time.Now()
+	rec, err := t.recordEvent(ctx, e)
+	return rec.ID, err
+}
+
+// recordEvent appends an event on the transaction and returns it as it was
+// recorded: with its ID, its CreatedAt (a zero one is stamped with the
+// current time) and its detail. This is the single source of the
+// event-insert SQL: every way an event is recorded (EmitEvent,
+// FinishRunAndEmit, ReapStaleRun, a heartbeat transition, ...) goes through
+// here, so it also keeps the job's failing streak for a run event
+// (streakOf), recording it in the event's detail, and enqueues the event's
+// deliveries, all in the same transaction.
+func (t dialectTx) recordEvent(ctx context.Context, e core.Event) (core.Event, error) {
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now()
 	}
-	var id int64
-	err := t.queryRow(ctx, `INSERT INTO events
+	_, streak, err := t.streakOf(ctx, e, e.CreatedAt)
+	if err != nil {
+		return core.Event{}, err
+	}
+	e = withStreak(e, streak)
+	err = t.queryRow(ctx, `INSERT INTO events
 		(org_id, type, source, payload, dedup_key, created_at, detail)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
 		e.OrgID, e.Type, nullIfEmpty(e.Source), nullIfEmpty(e.Payload), nullIfEmpty(e.DedupKey),
-		formatTime(created), nullIfEmpty(t.text(e.Detail))).Scan(&id)
+		formatTime(e.CreatedAt), nullIfEmpty(t.text(e.Detail))).Scan(&e.ID)
 	if err != nil {
-		return 0, fmt.Errorf("emit event: %w", err)
+		return core.Event{}, fmt.Errorf("emit event: %w", err)
 	}
-	if err := t.enqueueDeliveries(ctx, id, e); err != nil {
-		return 0, err
+	if err := t.enqueueDeliveries(ctx, e.ID, e); err != nil {
+		return core.Event{}, err
 	}
-	return id, nil
+	return e, nil
 }
 
 // enqueueDeliveries inserts one pending deliveries row per channel with an

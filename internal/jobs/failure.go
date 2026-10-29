@@ -35,6 +35,47 @@ type FailureDetail struct {
 	// echo the request, a token in the URL's path or query included. The
 	// error of a request that got no response is, naming only the host.
 	HTTPStatus int `json:"http_status,omitempty"`
+	// Streak is the job's failing streak this run is part of. The store
+	// records it, in the transaction that records the event (WithStreak).
+	Streak
+}
+
+// Streak is a job's failing streak: how many runs in a row, the one an
+// event is about included, have not succeeded (failed, timed out or reaped),
+// and when the first of them was recorded. The store keeps it on the job,
+// adds it to each run.failed's detail (WithStreak) and gives the run.recovered
+// that ends it the streak it ended (RecoveryDetail); a success starts over.
+type Streak struct {
+	FailedRuns   int       `json:"failed_runs,omitempty"`
+	FailingSince time.Time `json:"failing_since,omitzero"`
+}
+
+// WithStreak is the detail of a run.failed with s added after what detail
+// says. A detail that is not a FailureDetail is returned as it is.
+func WithStreak(detail string, s Streak) string {
+	var d FailureDetail
+	if detail != "" && json.Unmarshal([]byte(detail), &d) != nil {
+		return detail
+	}
+	d.Streak = s
+	b, err := json.Marshal(d)
+	if err != nil {
+		return detail // cannot happen for this struct
+	}
+	return string(b)
+}
+
+// RecoveryDetail is the detail of a run.recovered: the streak it ended, or
+// "" when there is none to tell.
+func RecoveryDetail(s Streak) string {
+	if s.FailedRuns <= 0 {
+		return ""
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return "" // cannot happen for this struct
+	}
+	return string(b)
 }
 
 // failureDetail is the Detail of the run.failed of a run of job that ended in
