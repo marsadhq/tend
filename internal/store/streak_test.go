@@ -374,3 +374,26 @@ func TestMigrationBackfillsFailingStreaks(t *testing.T) {
 		})
 	}
 }
+
+// TestFailingStreakStartsOverAfterASuccessItMissed: a failure after a
+// success always starts a new streak, even when the stored streak did not
+// see that success (a run recorded by v0.6 after a rollback, or by hand).
+func TestFailingStreakStartsOverAfterASuccessItMissed(t *testing.T) {
+	ctx := context.Background()
+	for _, b := range backends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			orgID, jobID := seedJob(t, ctx, s)
+			runAt(t, ctx, s, orgID, jobID, "runner", jobs.StatusFailed, streakT0, "")
+			runAt(t, ctx, s, orgID, jobID, "runner", jobs.StatusFailed, streakT0.Add(5*time.Minute), "")
+			now := store.FormatTime(time.Now())
+			if _, err := store.RawDB(s).ExecContext(ctx, `INSERT INTO job_runs (org_id, job_id, status, attempt, exit_code, created_at, started_at, ended_at)
+				VALUES (`+phs(b.name, 1, 8)+`)`, orgID, jobID, "succeeded", 1, 0, now, now, now); err != nil {
+				t.Fatal(err)
+			}
+			at := streakT0.Add(15 * time.Minute)
+			f := runAt(t, ctx, s, orgID, jobID, "runner", jobs.StatusFailed, at, "")
+			wantStreak(t, runEvent(t, ctx, s, orgID, f, jobs.EventRunFailed), 1, at)
+		})
+	}
+}
