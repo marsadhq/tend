@@ -294,3 +294,56 @@ func TestParseRepeat(t *testing.T) {
 		}
 	}
 }
+
+// TestPacingAShorterIntervalAppliesAtOnce: shortening a rule's interval in
+// the middle of a streak (4h to 1h) makes the next reminder due an hour after
+// the last alert, not at the mark the longer interval had set; a held
+// failure is released by the same rule.
+func TestPacingAShorterIntervalAppliesAtOnce(t *testing.T) {
+	c := &channelSim{repeat: 4 * time.Hour}
+	c.fail(paceT0)
+	c.fail(paceT0.Add(30 * time.Minute))
+	c.repeat = time.Hour
+	for i := 7; i <= 36; i++ { // every 5 minutes to 3h
+		c.fail(paceT0.Add(time.Duration(i) * 5 * time.Minute))
+	}
+	want := []time.Time{paceT0, paceT0.Add(time.Hour), paceT0.Add(2 * time.Hour), paceT0.Add(3 * time.Hour)}
+	if len(c.failed) != len(want) {
+		t.Fatalf("sent at %v, want %v", c.failed, want)
+	}
+	for i := range want {
+		if !c.failed[i].Equal(want[i]) {
+			t.Errorf("failure %d sent at %v, want %v", i, c.failed[i], want[i])
+		}
+	}
+
+	h := &channelSim{repeat: 4 * time.Hour}
+	h.fail(paceT0)
+	h.succeed(paceT0.Add(5 * time.Minute))
+	h.fail(paceT0.Add(10 * time.Minute)) // held until 4h
+	h.repeat = time.Hour
+	h.tick(paceT0.Add(59*time.Minute + 30*time.Second))
+	if len(h.failed) != 2 {
+		t.Fatalf("a held failure under a shortened interval was not released an hour after the alert (%v)", h.failed)
+	}
+}
+
+// TestPacingRemindersDoNotDrift: a reminder sent just before its mark (within
+// the minute's slack) does not pull the next mark earlier: over a day of a
+// job that runs hourly, each run ending 40 seconds earlier than the last,
+// the reminders stay on the marks of the first alert.
+func TestPacingRemindersDoNotDrift(t *testing.T) {
+	var st AlertState
+	known := false
+	for i := range 24 {
+		at := paceT0.Add(time.Duration(i)*time.Hour - time.Duration(i%2)*40*time.Second)
+		send, next := PaceFailure(st, known, at, paceT0, time.Hour)
+		if !send {
+			t.Fatalf("hourly failure %d at %v not sent", i, at)
+		}
+		if want := paceT0.Add(time.Duration(i+1) * time.Hour); !next.NextAt.Equal(want) {
+			t.Fatalf("after failure %d the mark is %v, want %v", i, next.NextAt, want)
+		}
+		st, known = next, true
+	}
+}
