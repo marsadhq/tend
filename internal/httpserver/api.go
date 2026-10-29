@@ -328,9 +328,10 @@ type eventDTO struct {
 	// Detail says more about what happened, when the event has one: for a
 	// run.failed its verdict (a probe's or drill's opening lines), the tail
 	// of its output (up to 50 lines and 1000 bytes, redacted), whether that
-	// tail is from before the 1 MiB cut, the timeout it hit and an http
-	// job's status (jobs.FailureDetail); for a heartbeat event the
-	// heartbeat's id and why it went down (heartbeat.MissDetail).
+	// tail is from before the 1 MiB cut, the timeout it hit, an http job's
+	// status and the failing streak it is part of (jobs.FailureDetail); for
+	// a run.recovered the streak it ended (jobs.Streak); for a heartbeat
+	// event the heartbeat's id and why it went down (heartbeat.MissDetail).
 	Detail json.RawMessage `json:"detail,omitempty"`
 }
 
