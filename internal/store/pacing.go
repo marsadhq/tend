@@ -164,27 +164,27 @@ func (t dialectTx) deleteAlertStates(ctx context.Context, orgID int64, column st
 	return nil
 }
 
-// heldCandidate is a held failure whose reminder mark is near.
+// heldCandidate is a held failure.
 type heldCandidate struct {
 	orgID, channelID, jobID, eventID int64
 	kind                             kitnotify.ChannelType
-	nextAt                           time.Time
 }
 
 // releaseHeld queues, for both backends, the held failures whose interval
-// has ended at now (notify.ReleaseDue): the job is still failing and the
-// channel still routes its run.failed. Each is its own transaction, and it
-// takes the job's row lock before it touches the job's alert state. A held
-// failure whose job recovered or went, whose channel no longer routes it, or
-// whose event is gone is dropped. It returns how many were queued.
+// has ended at now (notify.ReleaseDue, under the channel's rules as they are
+// now): the job is still failing and the channel still routes its
+// run.failed. Each is its own transaction, which takes the job's row lock
+// before it writes the job's alert state. A held failure whose job recovered
+// or went, whose channel no longer routes it, or whose event is gone is
+// dropped. It returns how many were queued. Held failures are few (a
+// flapping job's, one per channel), so every one is looked at each time.
 func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int, error) {
 	// Candidates are read first, and the rows closed, because SQLite has one
-	// connection and each release needs it for its own transaction. The
-	// longest slack is a minute.
-	rows, err := db.QueryContext(ctx, rebind(d, `SELECT fa.org_id, fa.channel_id, fa.job_id, fa.held_event_id, fa.next_at, c.kind
+	// connection and each release needs it for its own transaction.
+	rows, err := db.QueryContext(ctx, `SELECT fa.org_id, fa.channel_id, fa.job_id, fa.held_event_id, c.kind
 		FROM failure_alerts fa JOIN notification_channels c ON c.id = fa.channel_id AND c.org_id = fa.org_id
-		WHERE fa.held_event_id IS NOT NULL AND fa.next_at <= ?
-		ORDER BY fa.next_at, fa.channel_id, fa.job_id`), formatTime(now.Add(time.Minute)))
+		WHERE fa.held_event_id IS NOT NULL
+		ORDER BY fa.next_at, fa.channel_id, fa.job_id`)
 	if err != nil {
 		return 0, fmt.Errorf("release held alerts: %w", err)
 	}
@@ -192,16 +192,11 @@ func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int
 	for rows.Next() {
 		var c heldCandidate
 		var kind string
-		var next sql.NullString
-		if err := rows.Scan(&c.orgID, &c.channelID, &c.jobID, &c.eventID, &next, &kind); err != nil {
+		if err := rows.Scan(&c.orgID, &c.channelID, &c.jobID, &c.eventID, &kind); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("release held alerts: scan: %w", err)
 		}
 		c.kind = kitnotify.ChannelType(kind)
-		if c.nextAt, err = parseTime(next); err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("release held alerts: %w", err)
-		}
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -223,7 +218,9 @@ func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int
 	return released, nil
 }
 
-// releaseOne releases one held failure, if it is still held and due.
+// releaseOne releases one held failure, if it is still held and due. Whether
+// it is due is read first, without a lock, since it mostly is not; only then
+// is the job's row locked and the state read again.
 func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now time.Time) (bool, error) {
 	sqlTx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -240,6 +237,27 @@ func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now
 		}
 		return false, sqlTx.Commit()
 	}
+	// stillHeld reads the channel's state for the job and whether c is still
+	// what it holds.
+	stillHeld := func() (notify.AlertState, bool, error) {
+		st, known, held, err := t.alertState(ctx, c.channelID, c.jobID)
+		return st, known && held == c.eventID, err
+	}
+
+	st, held, err := stillHeld()
+	if err != nil || !held {
+		return false, err // sent, superseded or dropped meanwhile
+	}
+	repeat, routed, err := t.failedRepeat(ctx, c.orgID, c.channelID, c.jobID, c.kind)
+	if err != nil {
+		return false, err
+	}
+	if !routed {
+		return drop()
+	}
+	if !notify.ReleaseDue(st, now, repeat) {
+		return false, nil
+	}
 
 	lock := `SELECT failed_runs FROM jobs WHERE org_id = ? AND id = ?`
 	if d == dialectPostgres {
@@ -253,22 +271,8 @@ func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now
 	if err != nil {
 		return false, fmt.Errorf("release held alert: lock job: %w", err)
 	}
-	st, known, held, err := t.alertState(ctx, c.channelID, c.jobID)
-	if err != nil {
+	if st, held, err = stillHeld(); err != nil || !held || !notify.ReleaseDue(st, now, repeat) {
 		return false, err
-	}
-	if !known || held != c.eventID {
-		return false, nil // sent, superseded or dropped meanwhile
-	}
-	repeat, routed, err := t.failedRepeat(ctx, c.orgID, c.channelID, c.jobID, c.kind)
-	if err != nil {
-		return false, err
-	}
-	if !routed {
-		return drop()
-	}
-	if !notify.ReleaseDue(st, now, repeat) {
-		return false, nil
 	}
 	var one int
 	err = t.queryRow(ctx, `SELECT 1 FROM events WHERE id = ?`, c.eventID).Scan(&one)

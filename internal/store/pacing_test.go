@@ -599,3 +599,34 @@ func TestPacingKeepsAHeldEventFromPruning(t *testing.T) {
 		}
 	})
 }
+
+// TestPacingFollowsARuleChange: a rule's new interval applies from the next
+// failure (or poll), measured from the channel's last alert, also when it is
+// shorter than the one in force at that alert.
+func TestPacingFollowsARuleChange(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		p := newPacing(t, s)
+		ch := p.channel("ops-telegram", kitnotify.Telegram, dur(4*time.Hour), jobs.EventRunFailed, jobs.EventRunRecovered)
+		p.fail(streakT0)
+		p.fail(streakT0.Add(30 * time.Minute))
+		p.rule(ch, jobs.EventRunFailed, 0, dur(time.Hour))
+		p.fail(streakT0.Add(time.Hour))
+		evs := p.sent()["ops-telegram"]
+		if len(evs) != 2 || !evs[1].CreatedAt.Equal(streakT0.Add(time.Hour)) {
+			t.Fatalf("queued %v, want the first failure and one an hour later", types(evs))
+		}
+
+		// A failure held under a long interval is released an hour after the
+		// alert once the rule says an hour.
+		p.succeed(streakT0.Add(65 * time.Minute))
+		slack := p.channel("ops-slack", kitnotify.Slack, dur(4*time.Hour), jobs.EventRunFailed, jobs.EventRunRecovered)
+		p.fail(streakT0.Add(3 * time.Hour))
+		p.succeed(streakT0.Add(3*time.Hour + 5*time.Minute))
+		p.fail(streakT0.Add(3*time.Hour + 10*time.Minute)) // held on both: telegram until 4h, slack until 7h
+		p.sent()
+		p.rule(slack, jobs.EventRunFailed, 0, dur(time.Hour))
+		if n := p.release(streakT0.Add(3*time.Hour + 59*time.Minute + 30*time.Second)); n != 2 {
+			t.Fatalf("released %d at 4h, want both: telegram's mark, and slack's an hour after its alert under the shortened rule", n)
+		}
+	})
+}

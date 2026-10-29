@@ -103,7 +103,8 @@ type AlertState struct {
 	// failures (zero: never).
 	LastSentAt time.Time
 	// NextAt is the reminder mark: the next failure is sent once it is
-	// reached (give or take slack).
+	// reached (give or take slack), or an interval after LastSentAt if the
+	// interval has been shortened to make that sooner.
 	NextAt time.Time
 	// Held says a failure of the current streak, which the channel has not
 	// heard of, waits for NextAt (ReleaseDue).
@@ -114,6 +115,17 @@ type AlertState struct {
 // began at since.
 func (s AlertState) Told(since time.Time) bool {
 	return !s.LastSentAt.IsZero() && !s.LastSentAt.Before(since)
+}
+
+// mark is the reminder mark st waits for under repeat: the one it keeps,
+// unless that is further from the last alert than an interval (and its
+// slack) allows, because the rule's interval was shortened since the mark
+// was set; then an interval after the last alert.
+func (s AlertState) mark(repeat time.Duration) time.Time {
+	if repeat > 0 && !s.LastSentAt.IsZero() && s.NextAt.Sub(s.LastSentAt) > repeat+slack(repeat) {
+		return s.LastSentAt.Add(repeat)
+	}
+	return s.NextAt
 }
 
 // slack is how much earlier than a reminder mark a failure still counts as
@@ -136,15 +148,16 @@ func PaceFailure(st AlertState, known bool, at, since time.Time, repeat time.Dur
 	if repeat <= 0 {
 		return true, AlertState{LastSentAt: at, NextAt: at}
 	}
-	if known && !reached(at, st.NextAt, repeat) {
+	mark := st.mark(repeat)
+	if known && !reached(at, mark, repeat) {
 		st.Held = !told
 		return false, st
 	}
 	next = AlertState{LastSentAt: at, NextAt: at.Add(repeat)}
-	if told && !st.NextAt.IsZero() {
+	if told && !mark.IsZero() {
 		// The first mark on the streak's grid that this failure did not reach.
-		k := at.Sub(st.NextAt.Add(-slack(repeat)))/repeat + 1
-		next.NextAt = st.NextAt.Add(k * repeat)
+		k := at.Sub(mark.Add(-slack(repeat)))/repeat + 1
+		next.NextAt = mark.Add(k * repeat)
 	}
 	return true, next
 }
@@ -162,7 +175,7 @@ func PaceRecovery(st AlertState, known bool, since time.Time) bool {
 // ReleaseDue reports whether a held failure (st.Held) is to be sent at now:
 // the interval since the channel's last failure alert has ended.
 func ReleaseDue(st AlertState, now time.Time, repeat time.Duration) bool {
-	return st.Held && (repeat <= 0 || reached(now, st.NextAt, repeat))
+	return st.Held && (repeat <= 0 || reached(now, st.mark(repeat), repeat))
 }
 
 // Released is the state a channel is left in when its held failure is sent
