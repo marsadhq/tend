@@ -284,7 +284,7 @@ func (s *PostgresStore) FailUnreadableJob(ctx context.Context, orgID, jobID int6
 		return core.Event{}, err
 	}
 	ev.Detail = jobs.UnreadableFailureDetail(output)
-	if ev.ID, err = pgEmitEventTx(ctx, tx, ev); err != nil {
+	if ev, err = (dialectTx{tx: tx, d: dialectPostgres}).recordEvent(ctx, ev); err != nil {
 		return core.Event{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET next_run = NULL WHERE org_id = $1 AND id = $2`, orgID, jobID); err != nil {
@@ -443,6 +443,9 @@ func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, statu
 			if _, err := pgEmitEventTx(ctx, tx, jobs.RecoveredEvent(ev, runID)); err != nil {
 				return 0, err
 			}
+		}
+		if err := (dialectTx{tx: tx, d: dialectPostgres}).endStreak(ctx, runID); err != nil {
+			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {

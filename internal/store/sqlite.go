@@ -536,7 +536,7 @@ func (s *SQLiteStore) FailUnreadableJob(ctx context.Context, orgID, jobID int64,
 		return core.Event{}, err
 	}
 	ev.Detail = jobs.UnreadableFailureDetail(output)
-	if ev.ID, err = emitEventTx(ctx, tx, ev); err != nil {
+	if ev, err = (dialectTx{tx: tx, d: dialectSQLite}).recordEvent(ctx, ev); err != nil {
 		return core.Event{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET next_run = NULL WHERE org_id = ? AND id = ?`, orgID, jobID); err != nil {
@@ -684,6 +684,9 @@ func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status 
 			if _, err := emitEventTx(ctx, tx, jobs.RecoveredEvent(ev, runID)); err != nil {
 				return 0, err
 			}
+		}
+		if err := (dialectTx{tx: tx, d: dialectSQLite}).endStreak(ctx, runID); err != nil {
+			return 0, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
