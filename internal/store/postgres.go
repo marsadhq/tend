@@ -232,6 +232,9 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 		`DELETE FROM notification_rules WHERE org_id = $1 AND job_id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job rules: %w", err)
 	}
+	if err := (dialectTx{tx: tx, d: dialectPostgres}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job: %w", err)
@@ -653,6 +656,9 @@ func (s *PostgresStore) DeleteChannel(ctx context.Context, orgID, id int64) erro
 		`DELETE FROM notification_rules WHERE org_id = $1 AND channel_id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete channel rules: %w", err)
 	}
+	if err := (dialectTx{tx: tx, d: dialectPostgres}).deleteAlertStates(ctx, orgID, "channel_id", id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE deliveries SET state = $1 WHERE org_id = $2 AND channel_id = $3 AND state = $4`,
 		notify.DeliveryFailed, orgID, id, notify.DeliveryPending); err != nil {
@@ -965,7 +971,8 @@ func (s *PostgresStore) FailDeliveryAndEmit(ctx context.Context, id int64, ev co
 func (s *PostgresStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM events
 		WHERE created_at < $1
-		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = $2)`,
+		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = $2)
+		  AND id NOT IN (SELECT held_event_id FROM failure_alerts WHERE held_event_id IS NOT NULL)`,
 		formatTime(before), notify.DeliveryPending)
 	if err != nil {
 		return 0, fmt.Errorf("prune events: %w", err)

@@ -480,6 +480,9 @@ func (s *SQLiteStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 		`DELETE FROM notification_rules WHERE org_id = ? AND job_id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete job rules: %w", err)
 	}
+	if err := (dialectTx{tx: tx, d: dialectSQLite}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM jobs WHERE org_id = ? AND id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete job: %w", err)
@@ -1003,6 +1006,9 @@ func (s *SQLiteStore) DeleteChannel(ctx context.Context, orgID, id int64) error 
 		`DELETE FROM notification_rules WHERE org_id = ? AND channel_id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete channel rules: %w", err)
 	}
+	if err := (dialectTx{tx: tx, d: dialectSQLite}).deleteAlertStates(ctx, orgID, "channel_id", id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE deliveries SET state = ? WHERE org_id = ? AND channel_id = ? AND state = ?`,
 		notify.DeliveryFailed, orgID, id, notify.DeliveryPending); err != nil {
@@ -1395,12 +1401,14 @@ func (s *SQLiteStore) FailDeliveryAndEmit(ctx context.Context, id int64, ev core
 
 // PruneEvents hard-deletes events created strictly before the cutoff, except
 // events still referenced by a pending delivery (the notify worker joins the
-// event when it claims the row; pruning it would orphan the queue entry).
-// Returns rows deleted.
+// event when it claims the row; pruning it would orphan the queue entry) and
+// held failure alerts, which are queued when their interval ends. Returns
+// rows deleted.
 func (s *SQLiteStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM events
 		WHERE created_at < ?
-		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = ?)`,
+		  AND id NOT IN (SELECT event_id FROM deliveries WHERE state = ?)
+		  AND id NOT IN (SELECT held_event_id FROM failure_alerts WHERE held_event_id IS NOT NULL)`,
 		formatTime(before), notify.DeliveryPending)
 	if err != nil {
 		return 0, fmt.Errorf("prune events: %w", err)

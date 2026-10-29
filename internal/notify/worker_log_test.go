@@ -21,6 +21,8 @@ type logStore struct {
 	getErr, markErr, reschedErr, failErr error
 }
 
+func (f *logStore) ReleaseHeldAlerts(context.Context, time.Time) (int, error) { return 0, nil }
+
 func (f *logStore) ClaimDueDeliveries(_ context.Context, _ time.Time, _, _ time.Duration, _ int) ([]Delivery, error) {
 	ds := f.due
 	f.due = nil

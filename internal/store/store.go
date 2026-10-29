@@ -145,7 +145,7 @@ type Store interface {
 	// created strictly before the cutoff and returns the rows removed.
 	// PruneEvents keeps events still referenced by a PENDING delivery (the
 	// notify worker joins the event on claim; pruning it would break the
-	// queue). PruneJobRuns keeps pending/running rows regardless of age (the
+	// queue) or held as a failure alert (ReleaseHeldAlerts queues it later). PruneJobRuns keeps pending/running rows regardless of age (the
 	// runner and the orphan reaper own their lifecycle). PruneDeliveries only
 	// removes finalized rows (delivered or failed).
 	PruneEvents(ctx context.Context, before time.Time) (int64, error)
@@ -170,6 +170,12 @@ type Store interface {
 	// exists; the notify.Worker drains them. See notify.WorkerStore for the
 	// claim/lease semantics.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]notify.Delivery, error)
+	// ReleaseHeldAlerts queues the failure alerts held back for a job that
+	// failed again soon after a channel's last alert about it, once that
+	// channel's interval has ended at now and the job is still failing
+	// (notify.Pacing); it returns how many it queued. The delivery worker
+	// calls it before each claim.
+	ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error)
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error
 	FailDelivery(ctx context.Context, id int64) error

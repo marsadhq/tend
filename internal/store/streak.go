@@ -82,11 +82,11 @@ func withStreak(e core.Event, s jobs.Streak) core.Event {
 }
 
 // endStreak clears the failing streak of the job of run runID, which has just
-// succeeded.
+// succeeded, and forgets the failures of it that were held (dropHeld).
 func (t dialectTx) endStreak(ctx context.Context, runID int64) error {
 	if _, err := t.exec(ctx, `UPDATE jobs SET failed_runs = 0, failing_since = NULL
 		WHERE id = (SELECT job_id FROM job_runs WHERE id = ?) AND failed_runs <> 0`, runID); err != nil {
 		return fmt.Errorf("end job streak: %w", err)
 	}
-	return nil
+	return t.dropHeld(ctx, runID)
 }
