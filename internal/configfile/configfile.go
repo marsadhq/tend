@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,11 +52,15 @@ type ChannelSpec struct {
 
 // RuleSpec is one notification rule from the config. It expands at Reconcile
 // time to one notification_rules row per event in Events. Job, when set, scopes
-// the rule to that named job; empty means all jobs (job_id 0).
+// the rule to that named job; empty means all jobs (job_id 0). Repeat is how
+// often its run.failed reminds while a job keeps failing (notify.Pacing):
+// nil for the channel type's default, 0 for every failure; it is set on the
+// run.failed row only.
 type RuleSpec struct {
 	Channel string
 	Events  []string
 	Job     string
+	Repeat  *time.Duration
 }
 
 // HeartbeatSpec is one heartbeat from the config.
@@ -91,6 +96,7 @@ type ruleSpec struct {
 	Channel string   `yaml:"channel"`
 	Events  []string `yaml:"events"`
 	Job     string   `yaml:"job"`
+	Repeat  string   `yaml:"repeat"` // "every", 0 or a Go duration; "" for the default
 }
 
 type hbSpec struct {
@@ -213,10 +219,22 @@ func Parse(data []byte) (Config, error) {
 					return Config{}, fmt.Errorf("configfile: rule[%d] for channel %q: %w", i, r.Channel, err)
 				}
 			}
+			var repeat *time.Duration
+			if strings.TrimSpace(r.Repeat) != "" {
+				if !slices.Contains(r.Events, "run.failed") {
+					return Config{}, fmt.Errorf("configfile: rule[%d] for channel %q: repeat paces run.failed alerts, and this rule does not route run.failed", i, r.Channel)
+				}
+				d, err := notify.ParseRepeat(r.Repeat)
+				if err != nil {
+					return Config{}, fmt.Errorf("configfile: rule[%d] for channel %q: %w", i, r.Channel, err)
+				}
+				repeat = &d
+			}
 			cfg.Rules = append(cfg.Rules, RuleSpec{
 				Channel: r.Channel,
 				Events:  append([]string(nil), r.Events...),
 				Job:     r.Job,
+				Repeat:  repeat,
 			})
 		}
 	}
@@ -693,13 +711,17 @@ func reconcileRules(ctx context.Context, s ReconcileStore, orgID int64, rules []
 		}
 
 		for _, ev := range r.Events {
-			if _, err := s.CreateRule(ctx, notify.Rule{
+			rule := notify.Rule{
 				OrgID:     orgID,
 				ChannelID: channelID,
 				EventType: ev,
 				Enabled:   true,
 				JobID:     jobID,
-			}); err != nil {
+			}
+			if ev == "run.failed" {
+				rule.Repeat = r.Repeat
+			}
+			if _, err := s.CreateRule(ctx, rule); err != nil {
 				return 0, fmt.Errorf("reconcile: rule channel %q event %q: %w", r.Channel, ev, err)
 			}
 			count++

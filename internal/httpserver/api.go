@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	kitnotify "github.com/marsadhq/kit/notify"
 	"github.com/marsadhq/tend/internal/core"
 	"github.com/marsadhq/tend/internal/heartbeat"
 	"github.com/marsadhq/tend/internal/jobs"
@@ -238,10 +239,18 @@ type ruleDTO struct {
 	Enabled   bool      `json:"enabled"`
 	JobID     int64     `json:"job_id"`
 	CreatedAt time.Time `json:"created_at"`
+	// RepeatSeconds is, for a run.failed rule, how often it reminds while a
+	// job keeps failing, in seconds (0: every failure), and RepeatDefault
+	// whether that is its channel type's default (the rule sets none).
+	// Rules for other events have neither.
+	RepeatSeconds *int64 `json:"repeat_seconds,omitempty"`
+	RepeatDefault *bool  `json:"repeat_default,omitempty"`
 }
 
-func fromRule(r notify.Rule) ruleDTO {
-	return ruleDTO{
+// fromRule is r as the API shows it; kind is its channel's type, which a
+// run.failed rule's default interval depends on.
+func fromRule(r notify.Rule, kind kitnotify.ChannelType) ruleDTO {
+	dto := ruleDTO{
 		ID:        r.ID,
 		ChannelID: r.ChannelID,
 		EventType: r.EventType,
@@ -249,6 +258,11 @@ func fromRule(r notify.Rule) ruleDTO {
 		JobID:     r.JobID,
 		CreatedAt: r.CreatedAt,
 	}
+	if r.EventType == "run.failed" {
+		secs, dflt := int64(notify.EffectiveRepeat(kind, r.Repeat)/time.Second), r.Repeat == nil
+		dto.RepeatSeconds, dto.RepeatDefault = &secs, &dflt
+	}
+	return dto
 }
 
 // heartbeatDTO is the wire shape of a heartbeat. It STRUCTURALLY OMITS the Token
@@ -494,9 +508,19 @@ func (s *Server) handleListRules(w http.ResponseWriter, r *http.Request) {
 		s.apiError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	channels, err := s.store.ListChannels(r.Context(), p.OrgID)
+	if err != nil {
+		s.log.Error("api: list rules: list channels failed", "err", err)
+		s.apiError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	kinds := make(map[int64]kitnotify.ChannelType, len(channels))
+	for _, c := range channels {
+		kinds[c.ID] = c.Kind
+	}
 	out := make([]ruleDTO, 0, len(rules))
 	for _, rule := range rules {
-		out = append(out, fromRule(rule))
+		out = append(out, fromRule(rule, kinds[rule.ChannelID]))
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
