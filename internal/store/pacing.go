@@ -175,8 +175,8 @@ type heldCandidate struct {
 // now): the job is still failing and the channel still routes its
 // run.failed. Each is its own transaction, which takes the job's row lock
 // before it writes the job's alert state. A held failure whose job recovered
-// or went, whose channel no longer routes it, or whose event is gone is
-// dropped. It returns how many were queued. Held failures are few (a
+// (by its streak or by its last run) or went, whose channel no longer routes
+// it, or whose event is gone is dropped. It returns how many were queued. Held failures are few (a
 // flapping job's, one per channel), so every one is looked at each time.
 func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int, error) {
 	// Candidates are read first, and the rows closed, because SQLite has one
@@ -270,6 +270,18 @@ func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now
 	}
 	if err != nil {
 		return false, fmt.Errorf("release held alert: lock job: %w", err)
+	}
+	// The job's runs have the last word: a success the streak did not see
+	// (one an older Tend recorded after a rollback) means it is not failing.
+	var last string
+	err = t.queryRow(ctx, `SELECT status FROM job_runs
+		WHERE org_id = ? AND job_id = ? AND status NOT IN ('pending', 'running') AND ended_at IS NOT NULL
+		ORDER BY ended_at DESC, id DESC LIMIT 1`, c.orgID, c.jobID).Scan(&last)
+	if err == nil && jobs.RunStatus(last) == jobs.StatusSucceeded {
+		return drop()
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("release held alert: last run: %w", err)
 	}
 	if st, held, err = stillHeld(); err != nil || !held || !notify.ReleaseDue(st, now, repeat) {
 		return false, err
