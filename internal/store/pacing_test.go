@@ -630,3 +630,31 @@ func TestPacingFollowsARuleChange(t *testing.T) {
 		}
 	})
 }
+
+// TestPacingDropsAHeldFailureWhoseJobSucceeded: a held failure is sent only
+// while the job is still failing by its runs, not just by its stored
+// streak: a success recorded by v0.6 after a rollback leaves the streak and
+// the hold as they were, and the release must not report a healthy job.
+func TestPacingDropsAHeldFailureWhoseJobSucceeded(t *testing.T) {
+	for _, b := range backends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			p := newPacing(t, b.store)
+			p.channel("ops-telegram", kitnotify.Telegram, nil, jobs.EventRunFailed, jobs.EventRunRecovered)
+			p.fail(streakT0)
+			p.succeed(streakT0.Add(5 * time.Minute))
+			p.fail(streakT0.Add(10 * time.Minute)) // held
+			p.sent()
+			now := store.FormatTime(time.Now())
+			if _, err := store.RawDB(b.store).ExecContext(p.ctx, `INSERT INTO job_runs (org_id, job_id, status, attempt, exit_code, created_at, started_at, ended_at)
+				VALUES (`+phs(b.name, 1, 8)+`)`, p.org, p.job, "succeeded", 1, 0, now, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if n := p.release(streakT0.Add(2 * time.Hour)); n != 0 {
+				t.Fatalf("released %d for a job whose last run succeeded, want 0", n)
+			}
+			if evs := p.sent()["ops-telegram"]; len(evs) != 0 {
+				t.Fatalf("sent %v", types(evs))
+			}
+		})
+	}
+}
