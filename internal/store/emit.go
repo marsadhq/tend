@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/marsadhq/tend/internal/core"
+	"github.com/marsadhq/tend/internal/jobs"
 	"github.com/marsadhq/tend/internal/notify"
 )
 
@@ -43,7 +44,7 @@ func (t dialectTx) recordEvent(ctx context.Context, e core.Event) (core.Event, e
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now()
 	}
-	_, streak, err := t.streakOf(ctx, e, e.CreatedAt)
+	jobID, streak, err := t.streakOf(ctx, e, e.CreatedAt)
 	if err != nil {
 		return core.Event{}, err
 	}
@@ -57,49 +58,42 @@ func (t dialectTx) recordEvent(ctx context.Context, e core.Event) (core.Event, e
 	if err != nil {
 		return core.Event{}, fmt.Errorf("emit event: %w", err)
 	}
-	if err := t.enqueueDeliveries(ctx, e.ID, e); err != nil {
+	if err := t.enqueueDeliveries(ctx, e, jobID, streak); err != nil {
 		return core.Event{}, err
 	}
 	return e, nil
 }
 
 // enqueueDeliveries inserts one pending deliveries row per channel with an
-// enabled matching rule for e, on the SAME transaction that inserted the
-// event. This is what makes notification delivery durable: a crash after
-// commit can no longer lose a matched alert, because the pending delivery row
-// commits atomically with the event. Non-alertable event types enqueue
-// nothing, and only channels that exist are matched. Channels are
-// deduplicated so overlapping rules (org-wide + job-scoped) yield a single
-// delivery.
-func (t dialectTx) enqueueDeliveries(ctx context.Context, eventID int64, e core.Event) error {
+// enabled matching rule for e (recorded, with its ID), on the SAME
+// transaction that inserted the event. This is what makes notification
+// delivery durable: a crash after commit can no longer lose a matched alert,
+// because the pending delivery row commits atomically with the event.
+// Non-alertable event types enqueue nothing, and only channels that exist
+// are matched. Channels are deduplicated so overlapping rules (org-wide +
+// job-scoped) yield a single delivery. A run event of a job with a streak is
+// paced per channel (paced): its run.failed goes out as the first failure of
+// the streak or as a reminder, its run.recovered where its failures went.
+func (t dialectTx) enqueueDeliveries(ctx context.Context, e core.Event, jobID int64, streak jobs.Streak) error {
 	if !notify.Alertable(e.Type) {
 		return nil
 	}
-	rows, err := t.tx.QueryContext(ctx, rebind(t.d,
-		`SELECT DISTINCT r.channel_id FROM notification_rules r
-		 JOIN notification_channels c ON c.id = r.channel_id AND c.org_id = r.org_id
-		 WHERE r.org_id = ? AND r.enabled = 1 AND r.event_type = ? AND (r.job_id = 0 OR r.job_id = ?)`),
-		e.OrgID, e.Type, notify.EventJobID(e))
+	if jobID <= 0 {
+		jobID = notify.EventJobID(e)
+	}
+	channels, err := t.matchedChannels(ctx, e, jobID)
 	if err != nil {
-		return fmt.Errorf("enqueue deliveries match: %w", err)
+		return err
 	}
-	var channelIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan matched channel: %w", err)
+	for _, ch := range channels {
+		send, err := t.paced(ctx, e, jobID, streak, ch)
+		if err != nil {
+			return err
 		}
-		channelIDs = append(channelIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return fmt.Errorf("iterate matched channels: %w", err)
-	}
-	rows.Close()
-
-	for _, chID := range channelIDs {
-		if err := t.insertDelivery(ctx, e.OrgID, eventID, chID); err != nil {
+		if !send {
+			continue
+		}
+		if err := t.insertDelivery(ctx, e.OrgID, e.ID, ch.id); err != nil {
 			return err
 		}
 	}

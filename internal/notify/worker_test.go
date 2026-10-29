@@ -37,6 +37,8 @@ type fakeWorkerStore struct {
 	emitted     []core.Event
 }
 
+func (f *fakeWorkerStore) ReleaseHeldAlerts(context.Context, time.Time) (int, error) { return 0, nil }
+
 func (f *fakeWorkerStore) ClaimDueDeliveries(_ context.Context, _ time.Time, _, _ time.Duration, _ int) ([]Delivery, error) {
 	ds := f.due
 	f.due = nil

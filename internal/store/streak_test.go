@@ -36,17 +36,17 @@ func runAt(t *testing.T, ctx context.Context, s store.Store, orgID, jobID int64,
 	if err != nil || !ok || run.ID != runID {
 		t.Fatalf("ClaimRun = (%d, %v, %v), want run %d", run.ID, ok, err, runID)
 	}
-	typ := jobs.EventRunFailed
+	typ, exit := jobs.EventRunFailed, 1
 	if status == jobs.StatusSucceeded {
-		typ = jobs.EventRunSucceeded
+		typ, exit = jobs.EventRunSucceeded, 0
 	}
-	ev, err := jobs.RunEvent(run, "health-poll", typ, status, 1)
+	ev, err := jobs.RunEvent(run, "backup", typ, status, exit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ev.CreatedAt = at
 	ev.Detail = detail
-	if _, err := s.FinishRunAndEmit(ctx, runID, status, 1, 1, "", ev); err != nil {
+	if _, err := s.FinishRunAndEmit(ctx, runID, status, exit, 1, "", ev); err != nil {
 		t.Fatalf("FinishRunAndEmit(%s): %v", status, err)
 	}
 	return runID
@@ -63,7 +63,7 @@ func reapAt(t *testing.T, ctx context.Context, s store.Store, orgID, jobID int64
 	if err != nil || !ok || run.ID != runID {
 		t.Fatalf("ClaimRun = (%d, %v, %v), want run %d", run.ID, ok, err, runID)
 	}
-	ev, err := jobs.RunEvent(run, "health-poll", jobs.EventRunFailed, jobs.StatusFailed, -1)
+	ev, err := jobs.RunEvent(run, "backup", jobs.EventRunFailed, jobs.StatusFailed, -1)
 	if err != nil {
 		t.Fatal(err)
 	}

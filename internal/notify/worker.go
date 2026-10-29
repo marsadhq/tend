@@ -46,6 +46,10 @@ type WorkerStore interface {
 	// notifications in order, one at a time, but only until it was first
 	// attempted more than hold ago; hold <= 0 turns ordering off.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]Delivery, error)
+	// ReleaseHeldAlerts queues the failure alerts held back by the pacing
+	// (see Pacing) whose interval has ended at now. The queue calls it
+	// before each claim, so the worker's poll is what sends them.
+	ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error)
 	// MarkDeliveryDelivered finalizes a delivery as delivered.
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	// RescheduleDelivery sets the next attempt time of a still-pending delivery.
@@ -98,8 +102,12 @@ func NewWorker(s WorkerStore, box *secrets.Box, build func(kitnotify.ChannelType
 // queue is kitnotify.Queue over Tend's deliveries table.
 type queue struct{ s WorkerStore }
 
-// Claim claims due deliveries (see WorkerStore.ClaimDueDeliveries).
+// Claim queues the held failure alerts that are due (ReleaseHeldAlerts),
+// then claims due deliveries (see WorkerStore.ClaimDueDeliveries).
 func (q queue) Claim(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]kitnotify.Delivery[Delivery], error) {
+	if _, err := q.s.ReleaseHeldAlerts(ctx, now); err != nil {
+		return nil, err
+	}
 	ds, err := q.s.ClaimDueDeliveries(ctx, now, lease, hold, limit)
 	if err != nil {
 		return nil, err
