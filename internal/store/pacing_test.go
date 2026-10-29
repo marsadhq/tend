@@ -223,6 +223,23 @@ func TestPacingTheIncident(t *testing.T) {
 				t.Fatalf("%s was sent %d messages, want 19 (the failure, 17 reminders, the recovery)", name, n)
 			}
 		}
+		// What Telegram showed: the first failure as always, then reminders
+		// that say the job is still failing, then the recovery with the
+		// streak it ended. (The first run ended 10 seconds before 19:04.)
+		tg := got["ops-telegram"]
+		for i, want := range []struct{ subject, body string }{
+			{"Job failed: backup (exit 1)", ""},
+			{"Job still failing: backup (exit 1)", "13 runs in a row have failed, since 2026-10-28 19:03 UTC (1h)."},
+			{"Job still failing: backup (exit 1)", "25 runs in a row have failed, since 2026-10-28 19:03 UTC (2h)."},
+		} {
+			if tg[i].Subject != want.subject || tg[i].Body != want.body {
+				t.Errorf("telegram message %d: %q / %q, want %q / %q", i, tg[i].Subject, tg[i].Body, want.subject, want.body)
+			}
+		}
+		if last := tg[18]; last.Subject != "Job recovered: backup" ||
+			last.Body != "It succeeded after 216 failed runs in a row, since 2026-10-28 19:03 UTC (18h)." {
+			t.Errorf("telegram's last message: %q / %q", last.Subject, last.Body)
+		}
 		if len(bodies) != 217 {
 			t.Fatalf("ward was sent %d bodies, want 217 (every failure and the recovery)", len(bodies))
 		}

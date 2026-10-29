@@ -31,8 +31,10 @@ type ChatOptions struct {
 // phone (forChannel puts it together for each). The subject names the job or
 // heartbeat and the body never repeats it; the body says what the subject
 // does not: when a heartbeat last pinged and what it expects, the run that
-// did not finish, the timeout a run reached, and, when chat.BaseURL is set, a
-// link to the run's or the heartbeat's page. The output is what a failed run
+// did not finish, the timeout a run reached, for a reminder that a job is
+// still failing how many runs in a row have failed since when, for a
+// recovery the streak it ended, and, when chat.BaseURL is set, a link to the
+// run's or the heartbeat's page. The output is what a failed run
 // or a failure ping printed (a probe's or drill's verdict first, then as many
 // lines of the tail as chat.OutputLines allows): text Tend did not write,
 // kept apart so that Slack and Discord show it as code, and after the body
@@ -47,7 +49,7 @@ func chatText(ev core.Event, chat ChatOptions) (subject, body string, out alertO
 		subject, lead, out = chatRunFailed(ev)
 		page = runPage(ev)
 	case "run.recovered":
-		lead, page = "Its previous run had not succeeded.", runPage(ev)
+		lead, page = chatRecovered(ev), runPage(ev)
 	case "heartbeat.missed", "heartbeat.recovered":
 		if ev.Type == "heartbeat.missed" {
 			lead, out = chatMissed(ev)
@@ -220,11 +222,30 @@ type runFailure struct {
 	Truncated      bool   `json:"truncated"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
 	HTTPStatus     int    `json:"http_status"`
+	runStreak
+}
+
+// runStreak is the failing streak a run event's detail records (the
+// store's jobs.Streak): with a run.failed, the runs in a row that have
+// failed, this one included; with a run.recovered, the streak it ended.
+type runStreak struct {
+	FailedRuns   int       `json:"failed_runs"`
+	FailingSince time.Time `json:"failing_since"`
+}
+
+// streakSpan is how long the streak had lasted at t, as " (3h)", or "" when
+// that is not known.
+func (s runStreak) streakSpan(t time.Time) string {
+	if s.FailingSince.IsZero() || !t.After(s.FailingSince) {
+		return ""
+	}
+	return " (" + span(t.Sub(s.FailingSince)) + ")"
 }
 
 // chatRunFailed says which job failed and how: its exit code in the subject,
 // or that it timed out in the subject and the timeout in lead, and the tail
-// of its output the event kept.
+// of its output the event kept. A failure after the first of a streak (a
+// reminder) says the job is still failing, and since when, how many runs.
 func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	var p struct {
 		JobName  string `json:"job_name"`
@@ -235,8 +256,12 @@ func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	var d runFailure
 	_ = json.Unmarshal([]byte(ev.Detail), &d)
 
+	reminder := d.FailedRuns > 1
 	what := "Job failed"
-	if p.Status == "timed_out" {
+	switch {
+	case reminder:
+		what = "Job still failing"
+	case p.Status == "timed_out":
 		what = "Job timed out"
 	}
 	subject = what
@@ -245,15 +270,42 @@ func chatRunFailed(ev core.Event) (subject, lead string, output alertOutput) {
 	}
 	switch {
 	case p.Status == "timed_out":
+		if reminder {
+			subject += " (timed out)"
+		}
 	case d.HTTPStatus > 0:
 		subject += fmt.Sprintf(" (HTTP %d)", d.HTTPStatus)
 	case p.ExitCode > 0:
 		subject += fmt.Sprintf(" (exit %d)", p.ExitCode)
 	}
-	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
-		lead = "It was stopped after its " + span(seconds(d.TimeoutSeconds)) + " timeout."
+	var says []string
+	if reminder {
+		line := fmt.Sprintf("%d runs in a row have failed", d.FailedRuns)
+		if !d.FailingSince.IsZero() {
+			line += ", since " + chatTime(d.FailingSince) + d.streakSpan(ev.CreatedAt)
+		}
+		says = append(says, line+".")
 	}
-	return subject, lead, alertOutput{verdict: d.Verdict, tail: d.Output, truncated: d.Truncated}
+	if p.Status == "timed_out" && d.TimeoutSeconds > 0 {
+		says = append(says, "It was stopped after its "+span(seconds(d.TimeoutSeconds))+" timeout.")
+	}
+	return subject, strings.Join(says, " "), alertOutput{verdict: d.Verdict, tail: d.Output, truncated: d.Truncated}
+}
+
+// chatRecovered is what a run.recovered says beyond its subject: the streak
+// it ended, when there was one of more than one run, or that the previous
+// run had not succeeded.
+func chatRecovered(ev core.Event) string {
+	var s runStreak
+	_ = json.Unmarshal([]byte(ev.Detail), &s)
+	if s.FailedRuns <= 1 {
+		return "Its previous run had not succeeded."
+	}
+	line := fmt.Sprintf("It succeeded after %d failed runs in a row", s.FailedRuns)
+	if !s.FailingSince.IsZero() {
+		line += ", since " + chatTime(s.FailingSince) + s.streakSpan(ev.CreatedAt)
+	}
+	return line + "."
 }
 
 // chatMissed is what a heartbeat.missed says beyond its subject: for a
