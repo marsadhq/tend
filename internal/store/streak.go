@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -15,9 +16,9 @@ import (
 // A job's failing streak (jobs.Streak) is kept on its row: failed_runs and
 // failing_since (migration 0014). It is written on both backends by the code
 // below, in the transaction that records the run event, so it can never
-// disagree with the events: every run.failed adds one, the run.recovered
-// that ends a streak reads it, and FinishRunAndEmit clears it for any
-// success.
+// disagree with the events: every run.failed adds one (or starts over after
+// a success), the run.recovered that ends a streak reads it, and
+// FinishRunAndEmit clears it for any success.
 
 // streakOf is the failing streak of the job a run event is about, as
 // recording e leaves it: for a run.failed it is extended by e (a new streak
@@ -36,6 +37,15 @@ func (t dialectTx) streakOf(ctx context.Context, e core.Event, at time.Time) (jo
 	var row *sql.Row
 	switch e.Type {
 	case jobs.EventRunFailed:
+		fresh, err := t.afterSuccess(ctx, e)
+		if err != nil {
+			return 0, jobs.Streak{}, err
+		}
+		if fresh {
+			row = t.queryRow(ctx, `UPDATE jobs SET failed_runs = 1, failing_since = ?
+				WHERE org_id = ? AND id = ? RETURNING failed_runs, failing_since`, formatTime(at), e.OrgID, jobID)
+			break
+		}
 		row = t.queryRow(ctx, `UPDATE jobs SET failed_runs = failed_runs + 1, failing_since = COALESCE(failing_since, ?)
 			WHERE org_id = ? AND id = ? RETURNING failed_runs, failing_since`, formatTime(at), e.OrgID, jobID)
 	case jobs.EventRunRecovered:
@@ -62,6 +72,28 @@ func (t dialectTx) streakOf(ctx context.Context, e core.Event, at time.Time) (jo
 		s = jobs.Streak{}
 	}
 	return jobID, s, nil
+}
+
+// afterSuccess reports whether the run of the run.failed e comes after a
+// success: the job's previous finished run succeeded. Its failure then
+// starts a new streak whatever the stored one says, so a streak that missed
+// a success (one an older Tend recorded after a rollback) does not run on.
+func (t dialectTx) afterSuccess(ctx context.Context, e core.Event) (bool, error) {
+	var p struct {
+		RunID int64 `json:"run_id"`
+	}
+	if json.Unmarshal([]byte(e.Payload), &p) != nil || p.RunID <= 0 {
+		return false, nil
+	}
+	placeholder := "?"
+	if t.d == dialectPostgres {
+		placeholder = "$1"
+	}
+	prev, found, err := previousRunStatusTx(ctx, t.tx, p.RunID, placeholder)
+	if err != nil {
+		return false, err
+	}
+	return found && prev == jobs.StatusSucceeded, nil
 }
 
 // withStreak is e with its streak in its detail: a run.failed's detail gains
