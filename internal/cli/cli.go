@@ -1302,6 +1302,7 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 	channelName := fs.String("channel", "", "channel name to route to (required)")
 	event := fs.String("event", "", "event type (required): "+strings.Join(notify.AlertableTypes(), ", "))
 	jobName := fs.String("job", "", "job name to scope to (optional; omit for all jobs)")
+	repeatFlag := fs.String("repeat", "", "run.failed only: how often to remind while a job keeps failing, \"every\" for every failure or a duration such as 30m (default 1h, every failure for a webhook)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1314,6 +1315,17 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 	if err := notify.ValidateRuleEvent(*event); err != nil {
 		return fmt.Errorf("rule add: %w", err)
 	}
+	var repeat *time.Duration
+	if strings.TrimSpace(*repeatFlag) != "" {
+		if *event != jobs.EventRunFailed {
+			return fmt.Errorf("rule add: -repeat paces run.failed alerts; it does not apply to %s", *event)
+		}
+		d, err := notify.ParseRepeat(*repeatFlag)
+		if err != nil {
+			return fmt.Errorf("rule add: %w", err)
+		}
+		repeat = &d
+	}
 
 	// Resolve channel name -> id.
 	channels, err := st.ListChannels(ctx, orgID)
@@ -1321,9 +1333,10 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 		return fmt.Errorf("rule add: list channels: %w", err)
 	}
 	var channelID int64
+	var kind kitnotify.ChannelType
 	for _, c := range channels {
 		if c.Name == *channelName {
-			channelID = c.ID
+			channelID, kind = c.ID, c.Kind
 			break
 		}
 	}
@@ -1350,6 +1363,7 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 		EventType: *event,
 		Enabled:   true,
 		JobID:     jobID,
+		Repeat:    repeat,
 	})
 	if err != nil {
 		return fmt.Errorf("rule add: %w", err)
@@ -1358,8 +1372,40 @@ func cmdRuleAdd(ctx context.Context, st store.Store, orgID int64, args []string,
 	if jobID != 0 {
 		scope = fmt.Sprintf("job %q", *jobName)
 	}
+	if *event == jobs.EventRunFailed {
+		scope += "; " + describeRepeat(kind, repeat)
+	}
 	fmt.Fprintf(stdout, "rule saved id=%d: %s -> %q (%s)\n", id, *event, *channelName, scope)
 	return nil
+}
+
+// describeRepeat says how often a run.failed rule with repeat (nil: none
+// set) on a channel of kind reminds: "reminders every 1h, the default for
+// slack", "every failure".
+func describeRepeat(kind kitnotify.ChannelType, repeat *time.Duration) string {
+	d := notify.EffectiveRepeat(kind, repeat)
+	s := "every failure"
+	if d > 0 {
+		s = "reminders every " + notify.FormatRepeat(d)
+	}
+	if repeat == nil {
+		s += fmt.Sprintf(", the default for %s", kind)
+	}
+	return s
+}
+
+// repeatColumn is the REPEAT column of `tend rule list` for r on a channel
+// of kind: the interval of a run.failed rule, "(default)" when it sets
+// none, and "-" for the other events, which it does not apply to.
+func repeatColumn(r notify.Rule, kind kitnotify.ChannelType) string {
+	if r.EventType != jobs.EventRunFailed {
+		return "-"
+	}
+	s := notify.FormatRepeat(notify.EffectiveRepeat(kind, r.Repeat))
+	if r.Repeat == nil {
+		s += " (default)"
+	}
+	return s
 }
 
 func cmdRuleList(ctx context.Context, st store.Store, orgID int64, args []string, stdout, stderr io.Writer) error {
@@ -1383,12 +1429,14 @@ func cmdRuleList(ctx context.Context, st store.Store, orgID int64, args []string
 		return fmt.Errorf("rule list: list channels: %w", err)
 	}
 	nameByID := make(map[int64]string, len(channels))
+	kindByID := make(map[int64]kitnotify.ChannelType, len(channels))
 	for _, c := range channels {
 		nameByID[c.ID] = c.Name
+		kindByID[c.ID] = c.Kind
 	}
 
-	fmt.Fprintf(stdout, "%-24s  %-20s  %-10s  %s\n", "CHANNEL", "EVENT", "JOB_ID", "ENABLED")
-	fmt.Fprintf(stdout, "%s\n", strings.Repeat("-", 70))
+	fmt.Fprintf(stdout, "%-24s  %-20s  %-10s  %-15s  %s\n", "CHANNEL", "EVENT", "JOB_ID", "REPEAT", "ENABLED")
+	fmt.Fprintf(stdout, "%s\n", strings.Repeat("-", 87))
 	for _, r := range rules {
 		chName := nameByID[r.ChannelID]
 		if chName == "" {
@@ -1406,7 +1454,7 @@ func cmdRuleList(ctx context.Context, st store.Store, orgID int64, args []string
 			// A rule stored before event types were checked; it never fires.
 			enabled += " (never fires: not an alertable event)"
 		}
-		fmt.Fprintf(stdout, "%-24s  %-20s  %-10s  %s\n", chName, r.EventType, jobCol, enabled)
+		fmt.Fprintf(stdout, "%-24s  %-20s  %-10s  %-15s  %s\n", chName, r.EventType, jobCol, repeatColumn(r, kindByID[r.ChannelID]), enabled)
 	}
 	return nil
 }
