@@ -16,5 +16,10 @@ type Rule struct {
 	EventType string
 	Enabled   bool
 	JobID     int64
+	// Repeat is how often a run.failed rule reminds a channel while a job
+	// keeps failing (see Pacing): nil for the channel type's default
+	// (EffectiveRepeat), 0 for every failure. Rules for other events ignore
+	// it.
+	Repeat    *time.Duration
 	CreatedAt time.Time
 }

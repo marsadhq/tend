@@ -1024,9 +1024,9 @@ func (s *SQLiteStore) DeleteChannel(ctx context.Context, orgID, id int64) error 
 // LOAD-BEARING: scanRule reads these by ordinal position, so this list must
 // match the column order of the notification_rules table in BOTH
 // migrations/sqlite/0001_init.sql + 0002_notifications.sql and the Postgres
-// equivalents (job_id is appended LAST by 0002). Reorder here only if you
-// reorder there.
-const ruleColumns = `id, org_id, channel_id, event_type, enabled, created_at, job_id`
+// equivalents (job_id is appended by 0002, repeat_seconds by 0016). Reorder
+// here only if you reorder there.
+const ruleColumns = `id, org_id, channel_id, event_type, enabled, created_at, job_id, repeat_seconds`
 
 // scanRule reads a notify.Rule from a row produced by a SELECT of ruleColumns.
 func scanRule(sc interface{ Scan(...any) error }) (notify.Rule, error) {
@@ -1034,11 +1034,16 @@ func scanRule(sc interface{ Scan(...any) error }) (notify.Rule, error) {
 		r       notify.Rule
 		enabled int
 		created sql.NullString
+		repeat  sql.NullInt64
 	)
-	if err := sc.Scan(&r.ID, &r.OrgID, &r.ChannelID, &r.EventType, &enabled, &created, &r.JobID); err != nil {
+	if err := sc.Scan(&r.ID, &r.OrgID, &r.ChannelID, &r.EventType, &enabled, &created, &r.JobID, &repeat); err != nil {
 		return notify.Rule{}, err
 	}
 	r.Enabled = enabled != 0
+	if repeat.Valid {
+		d := time.Duration(repeat.Int64) * time.Second
+		r.Repeat = &d
+	}
 	var err error
 	if r.CreatedAt, err = parseTime(created); err != nil {
 		return notify.Rule{}, err
@@ -1047,24 +1052,33 @@ func scanRule(sc interface{ Scan(...any) error }) (notify.Rule, error) {
 }
 
 // CreateRule upserts a rule by (org, channel, event_type, job_id) and returns
-// its row ID. The idempotent ON CONFLICT update (only enabled changes) lets
-// config sync re-apply a rule without creating duplicates; created_at is
-// preserved on update.
+// its row ID. The idempotent ON CONFLICT update (enabled and repeat change)
+// lets config sync re-apply a rule without creating duplicates; created_at
+// is preserved on update.
 func (s *SQLiteStore) CreateRule(ctx context.Context, r notify.Rule) (int64, error) {
 	// RETURNING id (rather than LastInsertId) yields the canonical row id on both
 	// the insert and the ON CONFLICT update paths, matching the Postgres backend
 	// and avoiding SQLite's unreliable last_insert_rowid() after an upsert update.
 	row := s.db.QueryRowContext(ctx, `INSERT INTO notification_rules
-		(org_id, channel_id, event_type, enabled, created_at, job_id)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(org_id, channel_id, event_type, job_id) DO UPDATE SET enabled = excluded.enabled
+		(org_id, channel_id, event_type, enabled, created_at, job_id, repeat_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(org_id, channel_id, event_type, job_id) DO UPDATE SET
+			enabled = excluded.enabled, repeat_seconds = excluded.repeat_seconds
 		RETURNING id`,
-		r.OrgID, r.ChannelID, r.EventType, boolToInt(r.Enabled), nowStr(), r.JobID)
+		r.OrgID, r.ChannelID, r.EventType, boolToInt(r.Enabled), nowStr(), r.JobID, repeatSeconds(r.Repeat))
 	var id int64
 	if err := row.Scan(&id); err != nil {
 		return 0, fmt.Errorf("create rule: %w", err)
 	}
 	return id, nil
+}
+
+// repeatSeconds is a rule's repeat as stored: NULL when it sets none.
+func repeatSeconds(d *time.Duration) sql.NullInt64 {
+	if d == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*d / time.Second), Valid: true}
 }
 
 // ListRules returns all rules for an org ordered by ID.
