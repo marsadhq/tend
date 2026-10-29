@@ -65,7 +65,7 @@ SIGINT/SIGTERM-cancelled context, and calls `cli.Run`.
 | `internal/store` | The `Store` interface (single persistence seam) plus the SQLite and Postgres implementations and embedded SQL migrations. |
 | `internal/jobs` | Job/Run domain types, scheduling (`Job.NextRun`, `ValidateCron`), the `Executor` (shell + HTTP, the `tls`, `domain` and `expiry` probes and the restore `drill`, with capped output), the type-specific settings (`Spec`, `ValidateSpec`), and the `Runner` loop (scheduler + workers + stale-run reaper + secret resolution + output redaction). |
 | `internal/auth` | The identity types `Principal`, `User`, `APIToken`, `Membership`, and the `tend_` prefix of the API tokens Tend issues. |
-| `internal/notify` | The notification domain: channels, rules, the `Alertable` filter, how each event is rendered, and the wiring of kit's delivery worker over the store's deliveries queue (`NewWorker`: the queue, the send step, the give-up that records `notification.failed`). |
+| `internal/notify` | The notification domain: channels, rules, the `Alertable` filter, the pacing of failure alerts (`Pacing`: the first failure of a streak, reminders at a rule's interval, recoveries where a failure went), how each event is rendered, and the wiring of kit's delivery worker over the store's deliveries queue (`NewWorker`: the queue, the send step, the give-up that records `notification.failed`). |
 | `internal/heartbeat` | The `Heartbeat` domain type with its `Deadline` (a started run brings it forward), the ping kinds and ping log types, the detail a `heartbeat.missed` carries when it is a failure or an overrun, and the `Watcher` that marks missed heartbeats down. |
 | `internal/pingexec` | `tend exec`: run a command between a start ping and an exit-status ping carrying its output's tail, with retries, signal forwarding and the command's exit status. Talks to any Healthchecks-compatible ping URL; no store. |
 | `internal/hcimport` | `tend import healthchecks`: read a project's checks from the Healthchecks Management API (v3) and plan the heartbeats they become (UUID as token, cron schedules approximated by a period). |
@@ -293,7 +293,10 @@ Event types currently emitted:
   (exit 3)` or `Heartbeat missed: <name> (run did not finish)`. A
   `heartbeat.recovered` names the heartbeat's id in its `Detail`
   (`{"heartbeat_id":…}`, read by `heartbeat.IDOf`) for the alert's link. Every heartbeat event carries the plain heartbeat name as its
-  payload; there are no other heartbeat event types.
+  payload; there are no other heartbeat event types. A heartbeat that is
+  down records nothing more until it recovers: the watcher does not watch
+  it, and a failure ping on it changes no status. So a heartbeat alerts once
+  per outage and its events are not paced (below).
 - **Removals:** `job.removed` (payload `{"job_id":…,"job_name":…}`, dedup key
   `job:<id>:removed`) and `heartbeat.removed` are recorded by the store's
   `DeleteJob` / `DeleteHeartbeat` in the delete's own transaction, so every
@@ -333,6 +336,35 @@ Because the delivery commits atomically with the event, neither a crash nor a
 slow destination can lose a matched notification. Overlapping rules for the
 same channel produce a single delivery.
 
+**Failure alerts are paced per channel.** A job's failing streak
+(`jobs.Streak`: the runs in a row that did not succeed, and when the first
+of them was recorded) is kept on its row (`failed_runs`, `failing_since`;
+migration 0014, and 0015, which works it out from the stored runs of a job
+failing at the upgrade) and written by the event insert itself
+(`dialectTx.recordEvent`, `streak.go`): each `run.failed` extends it (or
+starts a new one when the job's previous finished run succeeded, so a streak
+that missed a success, recorded by an older Tend after a rollback, does not
+run on) and records it in its `Detail`, the `run.recovered` that ends it
+records the streak it ended, and any success clears it (`FinishRunAndEmit`). The enqueue
+then applies `notify.Pacing` to each matched channel (`pacing.go`), with the
+most frequent interval of the channel's matching rules (`Rule.Repeat`,
+`notify.EffectiveRepeat`: by default an hour for the channels people read
+and every failure for a webhook, whose receiver paces alerts itself):
+`notify.PaceFailure` decides whether a `run.failed` goes out (the first of a
+streak, or the first failure on each interval mark after it), and
+`notify.PaceRecovery` whether a `run.recovered` does (only where one of the
+streak's failures went). What each channel was told about each job
+(`notify.AlertState`: when it was last sent a failure, the next mark, and a
+held failure) is kept in `failure_alerts` (migration 0017) in the same
+transaction, and goes with its job and its channel. A failure that comes
+within the interval of the channel's last alert after a recovery (a flap) is
+held rather than sent: `ReleaseHeldAlerts`, which the delivery worker's queue
+calls before each claim, queues it once the interval has ended and the job is
+still failing; a success drops it, and pruning keeps its event. The job's row
+lock, taken first, orders the transactions about one job's alerts on
+Postgres; SQLite runs one write transaction at a time. Events are recorded as
+before, and the webhook bodies of the deliveries that go out are unchanged.
+
 **Only alertable events enqueue.** Only the `alertable` set (`run.failed`,
 `run.recovered`, `heartbeat.missed`, `heartbeat.recovered`, `job.removed`,
 `heartbeat.removed`, `notification.failed`; see `notify.Alertable`) ever
@@ -345,7 +377,8 @@ failure reports. A given-up delivery and its `notification.failed` are written
 in one transaction (`FailDeliveryAndEmit`).
 
 **`notify.Worker` drains the queue.** It is kit's `notify.Worker`, driving
-Tend's deliveries through the `kit/notify` `Queue` interface. It claims due rows (`ClaimDueDeliveries`
+Tend's deliveries through the `kit/notify` `Queue` interface. Each claim first
+queues the held failure alerts that are due (`ReleaseHeldAlerts`, above). It claims due rows (`ClaimDueDeliveries`
 increments the attempt count and pushes `next_attempt_at` out by a one-minute
 lease, so a claim held by a crashed worker simply becomes due again), decrypts
 the channel config, builds the provider, and sends. Success marks the row
