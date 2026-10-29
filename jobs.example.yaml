@@ -202,20 +202,27 @@ notifications:
         priority: 1
 
   rules:
-    # Send every failure, its all-clear, and every heartbeat transition to
-    # Slack.
+    # Send failures, their all-clear, and every heartbeat transition to
+    # Slack. A failing job alerts once, then reminds once an hour while it
+    # keeps failing (the default for chat channels; a webhook gets every
+    # failure), and its recovery says what it ended. `repeat` sets that
+    # interval for this rule's run.failed: a duration from 1m to 168h, or
+    # "every" for every failure.
     - channel: ops-slack
       events: [run.failed, run.recovered, heartbeat.missed, heartbeat.recovered]
+      repeat: 1h
 
     # Hear about deliveries that were given up through a second channel: a
     # report of a failed delivery is never itself reported again.
     - channel: oncall-email
       events: [notification.failed]
 
-    # Escalate failures of the critical backup job to email as well.
+    # Escalate failures of the critical backup job to email as well: every
+    # one, the runs retried by hand within the hour included.
     - channel: oncall-email
       events: [run.failed]
       job: nightly-db-backup
+      repeat: every
 
 # Dead-man's-switch heartbeats for work tend does NOT run itself (an external
 # cron, a backup on another host, etc.). Tend emits heartbeat.missed if no ping

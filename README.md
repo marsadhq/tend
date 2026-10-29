@@ -242,6 +242,7 @@ notifications:
     - channel: ops-slack
       events: [run.failed]
       job: nightly-backup         # scoped to this job only
+      repeat: 30m                 # remind every 30m while it keeps failing (default 1h; "every": each failure)
 
 heartbeats:
   - name: external-backup
@@ -288,7 +289,7 @@ Tend emits events; a **channel** is a delivery destination and a **rule** routes
 
 | Event | When | Payload |
 |---|---|---|
-| `run.failed` | a run failed, timed out, or was reaped (the precise status is in the payload) | `{"run_id","job_id","job_name","status","exit_code"}` |
+| `run.failed` | a run failed, timed out, or was reaped (the precise status is in the payload); every one is recorded, and each channel is sent the first of a streak, then [reminders](#a-failing-job-alerts-once-then-reminds) | `{"run_id","job_id","job_name","status","exit_code"}` |
 | `run.recovered` | a run succeeded and the job's previous finished run had not | same as `run.failed` |
 | `heartbeat.missed` | a heartbeat's `period + grace` passed without a ping, a run it started (`/start`) did not finish within its grace (its period when the grace is 0), or it reported a failure (`/fail`, an exit status of 1 to 255); the subject says which, e.g. `Heartbeat failed: db-backup (exit 3)`, and a failure's body ends with the tail of its logged output | the heartbeat name |
 | `heartbeat.recovered` | a ping arrived for a heartbeat that was down | the heartbeat name |
@@ -330,15 +331,33 @@ uploading chunk 40/40 to s3://backups/primary/chunk-40.bin
 UploadError: chunk 41 failed after 5 attempts: RequestTimeout
 ```
 
-The link to the run's or the heartbeat's page is there when `TEND_BASE_URL` is set; it comes before the output. The output is text Tend did not write, so Slack and Discord show it in a code block, where it can neither mention anyone (`<!channel>`, `@everyone`) nor make a link with a label of its own. The rest of the text, which can hold a job's or a heartbeat's name, is escaped for Slack, and on Discord its link and mention syntax is escaped and no one is pinged. Where a channel keeps only so much (Pushover 1024 characters, Discord 2000), the output is fitted to the room the rest leaves: a probe's or drill's `FAIL:` lines whole, then the tail cut from its start, so the link, the reason the run failed and the output's last lines all arrive.
+A reminder that a job is still failing says how many runs in a row have failed and since when, and a recovery what it ended ([below](#a-failing-job-alerts-once-then-reminds)). The link to the run's or the heartbeat's page is there when `TEND_BASE_URL` is set; it comes before the output. The output is text Tend did not write, so Slack and Discord show it in a code block, where it can neither mention anyone (`<!channel>`, `@everyone`) nor make a link with a label of its own. The rest of the text, which can hold a job's or a heartbeat's name, is escaped for Slack, and on Discord its link and mention syntax is escaped and no one is pinged. Where a channel keeps only so much (Pushover 1024 characters, Discord 2000), the output is fitted to the room the rest leaves: a probe's or drill's `FAIL:` lines whole, then the tail cut from its start, so the link, the reason the run failed and the output's last lines all arrive.
 
 The output in an alert is the tail of what the run stored, or of what the failure ping logged: its last 10 lines by default, any number from 0 to 50 with `TEND_ALERT_OUTPUT_LINES`, and at most 1000 bytes. A run's has the job's secret values already redacted, as they are in the stored output; when the run printed more than the 1 MiB Tend keeps, the alert says its tail comes from before that cut and leaves out the line the cut fell in. The output goes to every channel a rule routes `run.failed` to; keep other secrets out of what a job prints, or set `TEND_ALERT_OUTPUT_LINES=0` to leave the output out of chat alerts (they keep the rest, the link included). `job.removed`, `heartbeat.removed` and `notification.failed` read as their subject and a line saying what it means. The webhook channel posts the subject and body Tend has always sent (`Job failed: nightly-backup`, `status=failed exit_code=3`), byte for byte, not this text; `TEND_ALERT_OUTPUT_LINES` does not change it, so a heartbeat failure's webhook text still ends with the last 10 lines of its output.
 
 **Delivery.** When an event matches a rule, the notification is written to the database in the same transaction as the event and sent by a background worker inside `tend serve`, so a crash or a slow destination does not lose it. Each send is bounded (10 seconds for webhook, Slack, Discord, Telegram, ntfy and Pushover, 30 seconds for SMTP), so a destination that hangs fails that attempt instead of holding up the others. A failed send is retried with exponential backoff (1 second, doubling up to 5 minutes) for up to 24 hours; after that the delivery is marked failed and a `notification.failed` event is recorded. A destination that refuses the notification for good (an HTTP 4xx other than 408 and 429 from a webhook, Slack, Discord, Telegram or ntfy, any 4xx from Pushover, or an SMTP 5xx reply) is not retried: the delivery is given up at once, the same way. Pushover asks to be retried no sooner than 5 seconds after any other failure, so its retries wait at least that long. Each channel receives its notifications in order, one at a time: a notification waits until the ones queued before it on the same channel have been delivered or given up, so after an outage a receiver gets `heartbeat.missed` before the `heartbeat.recovered` that followed it (other channels are not held up). The wait is bounded: once a notification that keeps failing was first attempted more than 15 minutes ago (`TEND_DELIVERY_HOLD_MINUTES`), the ones behind it go out while it keeps retrying, so one notification a destination keeps failing cannot silence the channel; past that point their order is no longer guaranteed, and a receiver should order by the event's `CreatedAt`. Delivery is at-least-once, so a receiver can occasionally see the same notification twice. Sending needs `TEND_MASTER_KEY` (to decrypt the channel config); without it notifications stay queued. `tend run <name>` also drains the queue once before it exits, so a manual run notifies even when no server is running.
 
+### A failing job alerts once, then reminds
+
+A job's failures come in streaks: the runs in a row that failed, timed out or were reaped, until one succeeds. A channel is sent the first `run.failed` of a streak, then a reminder at most once an hour while the job keeps failing, then the `run.recovered` that ends it. A health check every 5 minutes that fails for 18 hours sends 1 alert, 17 reminders and 1 recovery, not 216 alerts. The interval is the rule's `repeat` (`tend sync`, or `tend rule add -repeat`): a duration from `1m` to `168h`, or `every` (or `0`) for every failure, as before v0.7:
+
+```yaml
+  rules:
+    - channel: ops-telegram
+      events: [run.failed, run.recovered]
+      repeat: 4h                  # remind every 4 hours; "every" sends each failure
+```
+
+- **The defaults.** A rule without `repeat` reminds once an hour on the channels people read (Slack, Discord, email, Telegram, ntfy, Pushover), the same gap Ward waits before it re-alerts. A webhook gets every failure: it is read by a program that groups and paces alerts itself. Ward makes one incident of a job's failures, re-alerts on its own schedule from the failures it receives, and folds a flapping job into that incident, so it needs them all. Set `repeat` on a webhook's rule to thin it too.
+- **Reminders say so.** `Job still failing: api-health (HTTP 503)`, then `37 runs in a row have failed, since 2026-10-28 19:04 UTC (3h).` They fall on the interval's marks after the first alert (an hour, two hours, ... after it): each is the first failure at or after its mark, and a run that ends up to a minute early counts, so a job that runs exactly hourly reminds every hour.
+- **Recoveries go where the failure went.** A channel is sent a `run.recovered` when it was sent one of the streak's failures (or when it routes `run.recovered` but not `run.failed`, as before), and it says what ended: `It succeeded after 216 failed runs in a row, since 2026-10-28 19:04 UTC (18h).`
+- **Flapping is held.** A job that recovers and fails again within the interval of a channel's last alert about it is not announced at once: the failure is held, and sent when that interval ends if the job is still failing; if it recovers first, neither the failure nor its recovery is sent. A job that fails and succeeds by turns every 5 minutes sends one failure and one recovery an hour, and a failing job is never unannounced for longer than the interval.
+- **Rules for one channel that overlap** (all jobs, and one job) take the shorter interval. What each channel was told is kept in the database, so a restart changes nothing, and it goes when its job or its channel is deleted.
+- **Every failure is still recorded** (the dashboard, `tend logs`, `GET /api/events`), each `run.failed` with how many runs in a row have failed and since when; only what is sent is paced. `tend run` and the API's run-now runs count like any other run. Heartbeats need no interval: a heartbeat that is down records nothing more until it recovers, however long that takes and however often it reports a failure.
+
 ### Alert on a missed heartbeat
 
-A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. The job can say more with the [Healthchecks-compatible](#coming-from-healthchecksio) suffixes: `/start` when it begins (it is then reported if it does not finish within the grace, or within the period when the grace is 0), `/fail` or `/<exit-status>` when it ends (a failure is reported at once), `/log` for a note, with its output as the POST body; `tend exec` does all of that for any command. The alert for a failure ends with the tail of the output the failing ping logged (its last 10 lines, at most 1000 bytes), and that alert goes to every channel a rule routes `heartbeat.missed` to, so keep secrets out of what a job prints, set `TEND_ALERT_OUTPUT_LINES=0` to leave the output out of chat alerts, or set `TEND_PING_BODY_KB=0` to keep no bodies at all. Route both events to a channel with a rule:
+A heartbeat is a dead-man's-switch: register it, then have an external job ping `<TEND_BASE_URL>/ping/<token>` on its own schedule. If a ping does not arrive within `period + grace`, Tend emits `heartbeat.missed`; a later ping emits `heartbeat.recovered`. A heartbeat that is down is not reported again until it has recovered, so it alerts once per outage. A heartbeat that has never been pinged is armed from the moment it is created, so a job that never sends its first ping is reported too. The job can say more with the [Healthchecks-compatible](#coming-from-healthchecksio) suffixes: `/start` when it begins (it is then reported if it does not finish within the grace, or within the period when the grace is 0), `/fail` or `/<exit-status>` when it ends (a failure is reported at once), `/log` for a note, with its output as the POST body; `tend exec` does all of that for any command. The alert for a failure ends with the tail of the output the failing ping logged (its last 10 lines, at most 1000 bytes), and that alert goes to every channel a rule routes `heartbeat.missed` to, so keep secrets out of what a job prints, set `TEND_ALERT_OUTPUT_LINES=0` to leave the output out of chat alerts, or set `TEND_PING_BODY_KB=0` to keep no bodies at all. Route both events to a channel with a rule:
 
 ```yaml
 notifications:
@@ -377,7 +396,7 @@ notifications:
                job.removed, heartbeat.removed, notification.failed]
 ```
 
-The webhook payload is JSON with `subject`, `body` (the text Tend has always sent, not the chat alert's), and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. Rules are org-wide; per-heartbeat routing is not yet supported.
+The webhook payload is JSON with `subject`, `body` (the text Tend has always sent, not the chat alert's), and the full originating `event` (`ID`, `OrgID`, `Type`, `Source`, `Payload`, `DedupKey`, `CreatedAt`; the run events carry their dedup key, e.g. `run:42:run.recovered`, and `CreatedAt` is when Tend recorded the event, so a receiver can order and deduplicate what it gets). A channel receives its notifications in order, and at least once. A webhook rule sends every `run.failed` unless it sets `repeat` ([a failing job alerts once, then reminds](#a-failing-job-alerts-once-then-reminds)): Ward groups them into one incident and re-alerts from them itself. Rules are org-wide; per-heartbeat routing is not yet supported.
 
 The same body also carries the event as a [`marsad.event/v1`](https://github.com/marsadhq/kit#the-event-format) envelope under `marsad`, the format the Marsad tools exchange events in. The legacy keys above are unchanged, so a receiver that ignores keys it does not know keeps working as before (one that refuses unknown keys with a 4xx would now refuse every notification, and Tend would give each one up at once):
 
@@ -439,8 +458,8 @@ All commands share `TEND_DB` (and `TEND_MASTER_KEY` for secret-bearing commands)
 | `tend secret set <key>` | Store a secret; value read from stdin. Requires `TEND_MASTER_KEY`. |
 | `tend channel add -name <n> -type <t>` | Create/update a channel; JSON config read from stdin. Requires `TEND_MASTER_KEY`. |
 | `tend channel list` | List channels (no config/credentials shown). |
-| `tend rule add -channel <n> -event <e> [-job <n>]` | Create/update a notification rule. `-event` must be one of the [alertable event types](#alerting). |
-| `tend rule list` | List rules. |
+| `tend rule add -channel <n> -event <e> [-job <n>] [-repeat <interval>]` | Create/update a notification rule. `-event` must be one of the [alertable event types](#alerting). `-repeat` (`run.failed` only) is how often it reminds while a job keeps failing: a duration from `1m` to `168h`, or `every`; without it, the channel type's default ([1h, or every failure for a webhook](#a-failing-job-alerts-once-then-reminds)). |
+| `tend rule list` | List rules, with each `run.failed` rule's reminder interval. |
 | `tend heartbeat add -name <n> -period <s> [-grace <s>]` | Create/update a heartbeat; prints the ping URL. |
 | `tend heartbeat list` | List heartbeats and their current status. |
 | `tend heartbeat show <name>` | Show a heartbeat's status, period, grace, last-seen, the run being timed, the last ping and result (with its duration and the tail of its output), and its ping URLs. |
@@ -470,12 +489,12 @@ All `/api/...` routes require authentication via a session cookie (browser login
 | `GET` | `/api/jobs/{id}/runs` | List runs for a job (`?limit=`, max 200). |
 | `GET` | `/api/runs/{id}` | Get a run (includes full output). |
 | `GET` | `/api/channels` | List channels (metadata only; no config/credentials). |
-| `GET` | `/api/rules` | List notification rules. |
+| `GET` | `/api/rules` | List notification rules; a `run.failed` rule has its reminder interval in seconds (`repeat_seconds`, 0 for every failure) and whether that is its channel type's default (`repeat_default`). |
 | `GET` | `/api/heartbeats` | List heartbeats (no ping token). |
 | `GET` | `/api/heartbeats/{id}` | Get a heartbeat, with the run being timed (`started_at`, `started_rid`). |
 | `GET` | `/api/heartbeats/{id}/history` | List a heartbeat's transitions; a miss's `detail` says why it went down, and a miss's or a recovery's `detail` names the heartbeat's `heartbeat_id` (one recorded by an older Tend has none). |
 | `GET` | `/api/heartbeats/{id}/pings` | List a heartbeat's ping log (`?limit=`, max 200): kind, exit status, run id, duration, logged body. |
-| `GET` | `/api/events` | List recent events (`?limit=`, max 200). An event's `detail` says more where Tend records it: a `run.failed`'s `verdict` (a probe's or drill's opening lines), `output` (up to 50 lines and 1000 bytes of the tail, already redacted), `truncated`, `timeout_seconds` and `http_status`; a heartbeat event's `heartbeat_id` and why it went down. |
+| `GET` | `/api/events` | List recent events (`?limit=`, max 200). An event's `detail` says more where Tend records it: a `run.failed`'s `verdict` (a probe's or drill's opening lines), `output` (up to 50 lines and 1000 bytes of the tail, already redacted), `truncated`, `timeout_seconds`, `http_status`, and `failed_runs` and `failing_since` (the runs in a row that have failed, this one included, and when the first of them did), which a `run.recovered` has for the streak it ended; a heartbeat event's `heartbeat_id` and why it went down. |
 | `GET` | `/api/secrets` | List secret names and timestamps (no values). |
 | `POST` | `/api/jobs/{id}/run` | Enqueue a run. Returns `202 {"run_id": N}`. |
 | `POST` | `/api/jobs/{id}/enable` | Enable a job. Returns the updated job. |
@@ -550,6 +569,12 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 Only run-now, enable, and disable are available as API mutations; creating, editing, and deleting resources is CLI- and config-file-driven to prevent drift against the declared config.
 
 ## Upgrading
+
+### From v0.6
+
+- **A failing job no longer sends every failure to chat.** Slack, Discord, email, Telegram, ntfy and Pushover get its first failure, a reminder an hour while it keeps failing, and its recovery, with no change to your config: every existing rule sets no `repeat`, so it takes its channel type's default. To keep a channel on every failure, set `repeat: every` on its rule (or `tend rule add ... -repeat every`). Webhooks, Ward among them, get every failure, as before; their bodies are unchanged byte for byte. See [a failing job alerts once, then reminds](#a-failing-job-alerts-once-then-reminds).
+- **Migrations 0014 to 0017** run at start, on SQLite and Postgres: they add the failing streak to jobs (and work it out from the stored runs, so a job failing during the upgrade carries on with its count and its next alert reads as a reminder), `repeat_seconds` to rules, and a `failure_alerts` table.
+- The API gains fields only: `failed_runs` and `failing_since` in a `run.failed`'s and a `run.recovered`'s `detail`, `repeat_seconds` and `repeat_default` on `run.failed` rules.
 
 ### From v0.5
 
