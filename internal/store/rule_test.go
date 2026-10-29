@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/marsadhq/tend/internal/notify"
 	"github.com/marsadhq/tend/internal/store"
@@ -178,6 +179,47 @@ func TestMatchingRules(t *testing.T) {
 		}
 		if len(got) != 0 {
 			t.Fatalf("MatchingRules other org leaked %d rules", len(got))
+		}
+	})
+}
+
+// TestRuleRepeatRoundTrips: a rule's reminder interval is stored as set (nil
+// for the channel type's default, 0 for every failure) and, like the rest of
+// a rule, replaced by an upsert, so a re-sync without it goes back to the
+// default.
+func TestRuleRepeatRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		org, err := s.BootstrapDefaultOrg(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		half, every := 30*time.Minute, time.Duration(0)
+		for _, repeat := range []*time.Duration{nil, &half, &every, nil} {
+			id, err := s.CreateRule(ctx, notify.Rule{OrgID: org.ID, ChannelID: 7, EventType: "run.failed", Enabled: true, Repeat: repeat})
+			if err != nil {
+				t.Fatalf("CreateRule: %v", err)
+			}
+			listed, err := s.ListRules(ctx, org.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			matched, err := s.MatchingRules(ctx, org.ID, "run.failed", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, list := range [][]notify.Rule{listed, matched} {
+				if len(list) != 1 || list[0].ID != id {
+					t.Fatalf("rules = %+v, want the one rule %d", list, id)
+				}
+				got := list[0].Repeat
+				switch {
+				case repeat == nil && got != nil:
+					t.Errorf("repeat unset read back as %v", *got)
+				case repeat != nil && (got == nil || *got != *repeat):
+					t.Errorf("repeat %v read back as %v", *repeat, got)
+				}
+			}
 		}
 	})
 }

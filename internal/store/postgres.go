@@ -675,17 +675,18 @@ func (s *PostgresStore) DeleteChannel(ctx context.Context, orgID, id int64) erro
 // $N placeholders.
 
 // CreateRule upserts a rule by (org, channel, event_type, job_id) and returns
-// its row ID via RETURNING id. The idempotent ON CONFLICT update (only enabled
-// changes) lets config sync re-apply a rule without creating duplicates;
-// created_at is preserved on update.
+// its row ID via RETURNING id. The idempotent ON CONFLICT update (enabled and
+// repeat change) lets config sync re-apply a rule without creating
+// duplicates; created_at is preserved on update.
 func (s *PostgresStore) CreateRule(ctx context.Context, r notify.Rule) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx, `INSERT INTO notification_rules
-		(org_id, channel_id, event_type, enabled, created_at, job_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (org_id, channel_id, event_type, job_id) DO UPDATE SET enabled = excluded.enabled
+		(org_id, channel_id, event_type, enabled, created_at, job_id, repeat_seconds)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (org_id, channel_id, event_type, job_id) DO UPDATE SET
+			enabled = excluded.enabled, repeat_seconds = excluded.repeat_seconds
 		RETURNING id`,
-		r.OrgID, r.ChannelID, r.EventType, boolToInt(r.Enabled), nowStr(), r.JobID).Scan(&id)
+		r.OrgID, r.ChannelID, r.EventType, boolToInt(r.Enabled), nowStr(), r.JobID, repeatSeconds(r.Repeat)).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create rule: %w", err)
 	}
