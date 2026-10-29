@@ -168,8 +168,9 @@ dialects force it:
   when the job is absent.
 - **Atomic finish + emit.** `FinishRunAndEmit` writes the terminal run state and
   the terminal lifecycle event in a single transaction (see §4).
-- **Atomic emit + enqueue.** Every event insert goes through one helper per
-  backend (`emitEventTx` / `pgEmitEventTx`), which also inserts the pending
+- **Atomic emit + enqueue.** Every event insert, on both backends, goes
+  through one helper (`dialectTx.emitEvent` in `emit.go`, which
+  `emitEventTx` / `pgEmitEventTx` call), and it also inserts the pending
   `deliveries` rows for that event on the same transaction (see §4).
 - **Retention pruning.** `PruneEvents`, `PruneJobRuns`, and `PruneDeliveries`
   hard-delete rows created before a cutoff. They never touch pending or

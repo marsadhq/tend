@@ -54,10 +54,7 @@ func (t dialectTx) exec(ctx context.Context, q string, args ...any) (sql.Result,
 
 // emit appends e, with the deliveries its rules match, on the transaction.
 func (t dialectTx) emit(ctx context.Context, e core.Event) (int64, error) {
-	if t.d == dialectPostgres {
-		return pgEmitEventTx(ctx, t.tx, e)
-	}
-	return emitEventTx(ctx, t.tx, e)
+	return t.emitEvent(ctx, e)
 }
 
 // text makes s storable in a TEXT column of the backend (see pgText).
