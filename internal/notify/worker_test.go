@@ -35,9 +35,14 @@ type fakeWorkerStore struct {
 	rescheduled map[int64]time.Time
 	failed      []int64
 	emitted     []core.Event
+	released    []time.Time // the now of each ReleaseHeldAlerts
+	releaseErr  error
 }
 
-func (f *fakeWorkerStore) ReleaseHeldAlerts(context.Context, time.Time) (int, error) { return 0, nil }
+func (f *fakeWorkerStore) ReleaseHeldAlerts(_ context.Context, now time.Time) (int, error) {
+	f.released = append(f.released, now)
+	return 0, f.releaseErr
+}
 
 func (f *fakeWorkerStore) ClaimDueDeliveries(_ context.Context, _ time.Time, _, _ time.Duration, _ int) ([]Delivery, error) {
 	ds := f.due
@@ -399,5 +404,33 @@ func TestWorkerRejectedFailureReportIsNotReported(t *testing.T) {
 	}
 	if len(fs.failed) != 1 || len(fs.emitted) != 0 {
 		t.Fatalf("failed=%v emitted=%+v, want the delivery failed and nothing recorded", fs.failed, fs.emitted)
+	}
+}
+
+// TestWorkerReleasesHeldAlertsBeforeEachClaim: the worker's poll is what
+// sends a held failure alert once its interval ends (see Pacing), so every
+// claim first asks the store to queue the ones that are due, at the
+// worker's time; an error there is the claim's error and nothing is sent.
+func TestWorkerReleasesHeldAlertsBeforeEachClaim(t *testing.T) {
+	at := time.Date(2026, 10, 28, 20, 4, 0, 0, time.UTC)
+	fs := &fakeWorkerStore{due: []Delivery{due(1, "run.failed", `{"job_id":2,"job_name":"x"}`, at)}}
+	p := &fakeProvider{}
+	w := newTestWorker(t, fs, p)
+	w.Clock = clock.NewFake(at)
+	if _, err := w.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if len(fs.released) == 0 || !fs.released[0].Equal(at) || p.calls != 1 {
+		t.Fatalf("released at %v and sent %d, want a release at %v before the send", fs.released, p.calls, at)
+	}
+	if len(fs.released) != 2 {
+		t.Errorf("released %d times for 2 claims (one batch, then an empty one)", len(fs.released))
+	}
+
+	fs = &fakeWorkerStore{due: []Delivery{due(2, "run.failed", `{"job_id":2,"job_name":"x"}`, at)}, releaseErr: errors.New("database is locked")}
+	p = &fakeProvider{}
+	w = newTestWorker(t, fs, p)
+	if _, err := w.DrainOnce(context.Background()); err == nil || p.calls != 0 || len(fs.claimed) != 0 {
+		t.Fatalf("a failing release: err %v, %d sent, %d claimed; want the error and nothing claimed", err, p.calls, len(fs.claimed))
 	}
 }
