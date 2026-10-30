@@ -145,7 +145,8 @@ type Store interface {
 	// created strictly before the cutoff and returns the rows removed.
 	// PruneEvents keeps events still referenced by a PENDING delivery (the
 	// notify worker joins the event on claim; pruning it would break the
-	// queue) or held as a failure alert (ReleaseHeldAlerts queues it later). PruneJobRuns keeps pending/running rows regardless of age (the
+	// queue) or held as a failure alert (ReleaseHeldAlerts queues it
+	// later). PruneJobRuns keeps pending/running rows regardless of age (the
 	// runner and the orphan reaper own their lifecycle). PruneDeliveries only
 	// removes finalized rows (delivered or failed).
 	PruneEvents(ctx context.Context, before time.Time) (int64, error)
