@@ -186,8 +186,9 @@ type heldCandidate struct {
 // run.failed. Each is its own transaction, which takes the job's row lock
 // before it writes the job's alert state. A held failure whose job recovered
 // (by its streak or by its last run) or went, whose channel no longer routes
-// it, or whose event is gone is dropped. It returns how many were queued. Held failures are few (a
-// flapping job's, one per channel), so every one is looked at each time.
+// it, or whose event is gone is dropped. It returns how many were queued and
+// what failed, past which it goes on. Held failures are few (a flapping
+// job's, one per channel), so every one is looked at each time.
 func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int, error) {
 	// Candidates are read first, and the rows closed, because SQLite has one
 	// connection and each release needs it for its own transaction.
@@ -215,17 +216,24 @@ func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int
 	}
 	rows.Close()
 
+	// One that fails is reported and the others still go; it is tried again
+	// at the next poll.
 	released := 0
+	var errs []error
 	for _, c := range cands {
 		ok, err := releaseOne(ctx, db, d, c, now)
 		if err != nil {
-			return released, err
+			if ctx.Err() != nil {
+				return released, err
+			}
+			errs = append(errs, fmt.Errorf("channel %d, job %d: %w", c.channelID, c.jobID, err))
+			continue
 		}
 		if ok {
 			released++
 		}
 	}
-	return released, nil
+	return released, errors.Join(errs...)
 }
 
 // releaseOne releases one held failure, if it is still held and due. Whether

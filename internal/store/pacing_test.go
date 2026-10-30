@@ -715,3 +715,34 @@ func TestPacingRecoveryWhereFailuresNoLongerGo(t *testing.T) {
 		})
 	}
 }
+
+// TestPacingReleasesTheOthersWhenOneFails: a held failure that cannot be
+// released (here its row cannot be read) is reported, and the ones after it
+// are released all the same.
+func TestPacingReleasesTheOthersWhenOneFails(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		p := newPacing(t, s)
+		p.channel("ops-telegram", kitnotify.Telegram, nil, jobs.EventRunFailed, jobs.EventRunRecovered)
+		other, err := s.CreateJob(p.ctx, jobs.Job{OrgID: p.org, Name: "other", Type: jobs.Shell, Command: "false", Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, job := range []int64{p.job, other} {
+			runAt(t, p.ctx, s, p.org, job, "runner", jobs.StatusFailed, streakT0, "")
+			runAt(t, p.ctx, s, p.org, job, "runner", jobs.StatusSucceeded, streakT0.Add(5*time.Minute), "")
+			runAt(t, p.ctx, s, p.org, job, "runner", jobs.StatusFailed, streakT0.Add(10*time.Minute), "")
+		}
+		p.sent()
+		// The broken one sorts first.
+		if _, err := store.RawDB(s).ExecContext(p.ctx, `UPDATE failure_alerts SET last_sent_at = '0-not-a-time' WHERE job_id = `+ph(backendName(s), 1), p.job); err != nil {
+			t.Fatal(err)
+		}
+		n, err := s.ReleaseHeldAlerts(p.ctx, streakT0.Add(2*time.Hour))
+		if err == nil || n != 1 {
+			t.Fatalf("ReleaseHeldAlerts = %d, %v; want the other job's released and the broken one reported", n, err)
+		}
+		if evs := p.sent()["ops-telegram"]; len(evs) != 1 {
+			t.Fatalf("sent %v, want the other job's held failure", types(evs))
+		}
+	})
+}
