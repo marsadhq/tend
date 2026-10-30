@@ -480,12 +480,13 @@ func (s *SQLiteStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 		`DELETE FROM notification_rules WHERE org_id = ? AND job_id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete job rules: %w", err)
 	}
-	if err := (dialectTx{tx: tx, d: dialectSQLite}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
-		return err
-	}
+	// The same order as Postgres: the runs, the job, then its alert state.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM jobs WHERE org_id = ? AND id = ?`, orgID, id); err != nil {
 		return fmt.Errorf("delete job: %w", err)
+	}
+	if err := (dialectTx{tx: tx, d: dialectSQLite}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete job commit: %w", err)
@@ -669,6 +670,7 @@ func (s *SQLiteStore) FinishRunAndEmit(ctx context.Context, runID int64, status 
 	if err := finishRunTx(ctx, tx, runID, status, exitCode, output); err != nil {
 		return 0, err
 	}
+	pause(pauseFinishRunLocked)
 	// Persist the final attempt count (the executor may have retried). The run
 	// row was claimed with attempt=1; this records how many attempts actually ran.
 	if _, err := tx.ExecContext(ctx, `UPDATE job_runs SET attempt = ? WHERE id = ?`, attempt, runID); err != nil {

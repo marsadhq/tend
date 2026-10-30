@@ -54,3 +54,16 @@ func SetMaxPingLogBytes(n int) (restore func()) {
 	maxPingLogBytes = n
 	return func() { maxPingLogBytes = old }
 }
+
+// SetPauseAt sets the store's pause hook for a test and returns a func that
+// removes it.
+func SetPauseAt(f func(point string)) (restore func()) {
+	pauseAt = f
+	return func() { pauseAt = nil }
+}
+
+// Pause points, for SetPauseAt.
+const (
+	PauseFinishRunLocked  = pauseFinishRunLocked
+	PauseReleaseJobLocked = pauseReleaseJobLocked
+)

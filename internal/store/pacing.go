@@ -18,9 +18,10 @@ import (
 // backends, in the transaction that records each run event: a run.failed is
 // queued for a channel when notify.PaceFailure says so, a run.recovered when
 // notify.PaceRecovery does, and what each channel was told about each job is
-// kept in failure_alerts (migration 0017). Every writer of a job's rows there
-// holds the job's row lock first (streakOf, releaseHeld), so on Postgres the
-// transactions about one job take their turns.
+// kept in failure_alerts (migration 0017). On Postgres every transaction
+// about one job takes its rows in one order: its runs, then the job's row
+// (streakOf, releaseOne, DeleteJob), then its failure_alerts rows, so they
+// take their turns instead of deadlocking.
 
 // matchedChannel is a channel with an enabled rule matching an event: its
 // kind and the most frequent reminder interval of its matching rules
@@ -271,6 +272,7 @@ func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now
 	if err != nil {
 		return false, fmt.Errorf("release held alert: lock job: %w", err)
 	}
+	pause(pauseReleaseJobLocked)
 	// The job's runs have the last word: a success the streak did not see
 	// (one an older Tend recorded after a rollback) means it is not failing.
 	var last string

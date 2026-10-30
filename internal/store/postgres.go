@@ -212,12 +212,9 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// The job's row is locked first, as every transaction about its alerts
-	// does (pacing.go), so a delete and a run's finish or a release take
-	// their turns instead of deadlocking.
 	var name string
 	err = tx.QueryRowContext(ctx,
-		`SELECT name FROM jobs WHERE org_id = $1 AND id = $2 FOR UPDATE`, orgID, id).Scan(&name)
+		`SELECT name FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -235,12 +232,16 @@ func (s *PostgresStore) DeleteJob(ctx context.Context, orgID, id int64) error {
 		`DELETE FROM notification_rules WHERE org_id = $1 AND job_id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job rules: %w", err)
 	}
-	if err := (dialectTx{tx: tx, d: dialectPostgres}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
-		return err
-	}
+	// The job's row goes before its alert state: every transaction about a
+	// job takes its runs, then the job, then its failure_alerts rows (a run
+	// finishing, a held alert's release), so this one takes its turn behind
+	// them instead of deadlocking with them.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM jobs WHERE org_id = $1 AND id = $2`, orgID, id); err != nil {
 		return fmt.Errorf("delete job: %w", err)
+	}
+	if err := (dialectTx{tx: tx, d: dialectPostgres}).deleteAlertStates(ctx, orgID, "job_id", id); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete job commit: %w", err)
@@ -431,6 +432,7 @@ func (s *PostgresStore) FinishRunAndEmit(ctx context.Context, runID int64, statu
 	if err := pgFinishRunTx(ctx, tx, runID, status, exitCode, output); err != nil {
 		return 0, err
 	}
+	pause(pauseFinishRunLocked)
 	// Persist the final attempt count (the executor may have retried). The run
 	// row was claimed with attempt=1; this records how many attempts actually ran.
 	if _, err := tx.ExecContext(ctx, `UPDATE job_runs SET attempt = $1 WHERE id = $2`, attempt, runID); err != nil {
