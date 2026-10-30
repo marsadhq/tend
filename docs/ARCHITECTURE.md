@@ -352,8 +352,8 @@ most frequent interval of the channel's matching rules (`Rule.Repeat`,
 and every failure for a webhook, whose receiver paces alerts itself):
 `notify.PaceFailure` decides whether a `run.failed` goes out (the first of a
 streak, or the first failure on each interval mark after it), and
-`notify.PaceRecovery` whether a `run.recovered` does (only where one of the
-streak's failures went). What each channel was told about each job
+`notify.PaceRecovery` whether a `run.recovered` does (where one of the
+streak's failures went, and wherever the job's failures are not routed). What each channel was told about each job
 (`notify.AlertState`: when it was last sent a failure, when the alert that
 told it of the streak went, from which its reminder marks are counted, and a
 held failure) is kept in `failure_alerts` (migration 0017) in the same

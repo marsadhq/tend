@@ -100,6 +100,15 @@ func (t dialectTx) paced(ctx context.Context, e core.Event, jobID int64, streak 
 		}
 		return send, t.saveAlertState(ctx, e.OrgID, ch.id, jobID, next, held)
 	case jobs.EventRunRecovered:
+		// A channel that does not get the job's failures (any more) gets
+		// its recoveries, whatever it was told before.
+		_, routed, err := t.failedRepeat(ctx, e.OrgID, ch.id, jobID, ch.kind)
+		if err != nil {
+			return false, err
+		}
+		if !routed {
+			return true, nil
+		}
 		st, known, _, err := t.alertState(ctx, ch.id, jobID)
 		if err != nil {
 			return false, err
@@ -316,7 +325,7 @@ func (t dialectTx) failedRepeat(ctx context.Context, orgID, chID, jobID int64, k
 		WHERE org_id = ? AND channel_id = ? AND enabled = 1 AND event_type = ? AND (job_id = 0 OR job_id = ?)`),
 		orgID, chID, jobs.EventRunFailed, jobID)
 	if err != nil {
-		return 0, false, fmt.Errorf("release held alert: rules: %w", err)
+		return 0, false, fmt.Errorf("run.failed rules: %w", err)
 	}
 	defer rows.Close()
 	var (
@@ -326,7 +335,7 @@ func (t dialectTx) failedRepeat(ctx context.Context, orgID, chID, jobID int64, k
 	for rows.Next() {
 		var n sql.NullInt64
 		if err := rows.Scan(&n); err != nil {
-			return 0, false, fmt.Errorf("release held alert: rules: %w", err)
+			return 0, false, fmt.Errorf("run.failed rules: %w", err)
 		}
 		r := notify.EffectiveRepeat(kind, repeatOf(n))
 		if !routed || r < repeat {
@@ -335,7 +344,7 @@ func (t dialectTx) failedRepeat(ctx context.Context, orgID, chID, jobID int64, k
 		routed = true
 	}
 	if err := rows.Err(); err != nil {
-		return 0, false, fmt.Errorf("release held alert: rules: %w", err)
+		return 0, false, fmt.Errorf("run.failed rules: %w", err)
 	}
 	return repeat, routed, nil
 }
