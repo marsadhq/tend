@@ -357,11 +357,12 @@ streak's failures went). What each channel was told about each job
 (`notify.AlertState`: when it was last sent a failure, when the alert that
 told it of the streak went, from which its reminder marks are counted, and a
 held failure) is kept in `failure_alerts` (migration 0017) in the same
-transaction, and goes with its job and its channel. A failure that comes
-within the interval of the channel's last alert after a recovery (a flap) is
-held rather than sent: `ReleaseHeldAlerts`, which the delivery worker's queue
-calls before each claim, queues it once the interval has ended and the job is
-still failing; a success drops it, and pruning keeps its event. On Postgres the
+transaction, and goes with its job and its channel. A failure that starts a
+new streak within the hold of the channel's last alert (a flap; the interval,
+but at most an hour) is held rather than sent: `ReleaseHeldAlerts`, which
+the delivery worker's queue calls before each claim, queues it once the hold
+has ended and the job is still failing; a success drops it, and pruning keeps
+its event. On Postgres the
 transactions about one job (a run finishing, a held alert's release, the
 job's deletion) take its rows in one order, its runs, then the job, then its
 `failure_alerts` rows, so they wait for each other instead of deadlocking;

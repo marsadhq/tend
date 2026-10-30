@@ -136,7 +136,7 @@ func TestPacingAStreakResetsOnSuccess(t *testing.T) {
 
 // TestPacingAFlappingJob: a job that fails and succeeds by turns every 5
 // minutes for 3 hours sends one failure and one recovery an hour, not 36 of
-// each: a failure within the interval of the last one sent is held, and the
+// each: a failure within the hold of the last one sent is held, and the
 // recovery of a failure the channel did not hear of is not sent.
 func TestPacingAFlappingJob(t *testing.T) {
 	c := &channelSim{repeat: time.Hour}
@@ -161,7 +161,7 @@ func TestPacingAFlappingJob(t *testing.T) {
 
 // TestPacingAHeldFailureIsSentWhenItsIntervalEnds: a job that recovers and
 // fails again soon after an alert, and then runs rarely, is not left looking
-// healthy: the failure is held until the interval since the last alert ends,
+// healthy: the failure is held until the hold since the last alert ends,
 // then sent by the worker's poll.
 func TestPacingAHeldFailureIsSentWhenItsIntervalEnds(t *testing.T) {
 	c := &channelSim{repeat: time.Hour}
@@ -193,7 +193,7 @@ func TestPacingAHeldFailureIsSentWhenItsIntervalEnds(t *testing.T) {
 }
 
 // TestPacingAHeldFailureThatRecoversIsDropped: a failure held back that
-// recovers before its interval ends is never sent, and neither is its
+// recovers before its hold ends is never sent, and neither is its
 // recovery.
 func TestPacingAHeldFailureThatRecoversIsDropped(t *testing.T) {
 	c := &channelSim{repeat: time.Hour}
@@ -388,5 +388,46 @@ func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
 	want := []time.Time{paceT0, paceT0.Add(118*time.Minute + 30*time.Second), paceT0.Add(3 * time.Hour)}
 	if len(c.failed) != len(want) {
 		t.Fatalf("sent %v, want %v", c.failed, want)
+	}
+}
+
+// TestPacingHoldsAFlapForAtMostAnHour: the hold after a recovery is the
+// rule's interval, but never more than an hour (DefaultRepeat). With repeat
+// 24h, a job that fails again 10 minutes after it recovered is announced an
+// hour after the last alert, not 23h50m later, and a job flapping every 5
+// minutes sends one failure and one recovery an hour; a shorter interval
+// holds for that long.
+func TestPacingHoldsAFlapForAtMostAnHour(t *testing.T) {
+	c := &channelSim{repeat: 24 * time.Hour}
+	c.fail(paceT0)
+	c.succeed(paceT0.Add(5 * time.Minute))
+	c.fail(paceT0.Add(10 * time.Minute)) // held
+	c.tick(paceT0.Add(58 * time.Minute))
+	c.tick(paceT0.Add(59*time.Minute + 30*time.Second))
+	if len(c.failed) != 2 || !c.failed[1].Equal(paceT0.Add(59*time.Minute+30*time.Second)) {
+		t.Fatalf("with repeat 24h, sent %v; want the held failure an hour after the alert", c.failed)
+	}
+
+	f := &channelSim{repeat: 24 * time.Hour}
+	for i := range 36 {
+		at := paceT0.Add(time.Duration(i) * 5 * time.Minute)
+		f.tick(at)
+		if i%2 == 0 {
+			f.fail(at)
+		} else {
+			f.succeed(at)
+		}
+	}
+	if len(f.failed) != 3 || len(f.recover) != 3 {
+		t.Fatalf("3 hours of flapping under repeat 24h sent %d failures and %d recoveries, want 3 and 3", len(f.failed), len(f.recover))
+	}
+
+	h := &channelSim{repeat: 30 * time.Minute}
+	h.fail(paceT0)
+	h.succeed(paceT0.Add(5 * time.Minute))
+	h.fail(paceT0.Add(10 * time.Minute))
+	h.tick(paceT0.Add(29*time.Minute + 30*time.Second))
+	if len(h.failed) != 2 {
+		t.Fatalf("with repeat 30m, the held failure was not sent after 30 minutes: %v", h.failed)
 	}
 }

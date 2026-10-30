@@ -47,7 +47,7 @@ type WorkerStore interface {
 	// attempted more than hold ago; hold <= 0 turns ordering off.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]Delivery, error)
 	// ReleaseHeldAlerts queues the failure alerts held back by the pacing
-	// (see Pacing) whose interval has ended at now. The queue calls it
+	// (see Pacing) whose hold has ended at now. The queue calls it
 	// before each claim, so the worker's poll is what sends them.
 	ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error)
 	// MarkDeliveryDelivered finalizes a delivery as delivered.
