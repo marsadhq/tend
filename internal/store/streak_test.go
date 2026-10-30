@@ -397,3 +397,52 @@ func TestFailingStreakStartsOverAfterASuccessItMissed(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrationBackfillIsFast: the backfill groups the stored runs once, so
+// a long history does not hold the first start of v0.7 (and every other
+// tend command, which waits on the database) for minutes. 20,000 failures
+// after one success take a fraction of a second; a backfill that looks up
+// the last success again for every failed run takes minutes on SQLite.
+func TestMigrationBackfillIsFast(t *testing.T) {
+	ctx := context.Background()
+	for _, b := range backends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			s := b.store
+			db := store.RawDB(s)
+			orgID, jobID := seedJob(t, ctx, s)
+			const n = 20000
+			ts := `'2026-09-01T00:00:00.' || substr('000000000' || i, -9) || 'Z'`
+			series := `WITH RECURSIVE seq(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM seq WHERE i < ` + fmt.Sprint(n) + `) `
+			if b.name == "postgres" {
+				ts = `'2026-09-01T00:00:00.' || lpad(i::text, 9, '0') || 'Z'`
+				series = `WITH seq(i) AS (SELECT generate_series(0, ` + fmt.Sprint(n) + `)) `
+			}
+			if _, err := db.ExecContext(ctx, series+`INSERT INTO job_runs (org_id, job_id, status, attempt, exit_code, created_at, started_at, ended_at)
+				SELECT `+ph(b.name, 1)+`, `+ph(b.name, 2)+`, CASE WHEN i = 0 THEN 'succeeded' ELSE 'failed' END, 1, 1, ts, ts, ts
+				FROM (SELECT i, `+ts+` AS ts FROM seq) AS runs`, orgID, jobID); err != nil {
+				t.Fatalf("insert history: %v", err)
+			}
+			if _, err := db.ExecContext(ctx, `UPDATE jobs SET failed_runs = 0, failing_since = NULL`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version = 15`); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			if err := s.Migrate(ctx); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
+			if took := time.Since(start); took > 10*time.Second {
+				t.Fatalf("the backfill of %d runs took %v, want well under 10s", n+1, took)
+			}
+			var runs int
+			var since string
+			if err := db.QueryRowContext(ctx, `SELECT failed_runs, failing_since FROM jobs WHERE id = `+ph(b.name, 1), jobID).Scan(&runs, &since); err != nil {
+				t.Fatal(err)
+			}
+			if runs != n || since != "2026-09-01T00:00:00.000000001Z" {
+				t.Errorf("backfilled %d failed runs since %s, want %d since the first failure", runs, since, n)
+			}
+		})
+	}
+}
