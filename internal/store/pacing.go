@@ -121,10 +121,10 @@ func (t dialectTx) paced(ctx context.Context, e core.Event, jobID int64, streak 
 // alertState reads what channel chID was told about job jobID's failures;
 // known is false when nothing is kept yet.
 func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify.AlertState, known bool, held int64, err error) {
-	var last, anchor sql.NullString
+	var last sql.NullString
 	var heldID sql.NullInt64
-	err = t.queryRow(ctx, `SELECT last_sent_at, anchor_at, held_event_id FROM failure_alerts
-		WHERE channel_id = ? AND job_id = ?`, chID, jobID).Scan(&last, &anchor, &heldID)
+	err = t.queryRow(ctx, `SELECT last_sent_at, held_event_id FROM failure_alerts
+		WHERE channel_id = ? AND job_id = ?`, chID, jobID).Scan(&last, &heldID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return notify.AlertState{}, false, 0, nil
 	}
@@ -132,9 +132,6 @@ func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify
 		return notify.AlertState{}, false, 0, fmt.Errorf("read failure alert state: %w", err)
 	}
 	if st.LastSentAt, err = parseTime(last); err != nil {
-		return notify.AlertState{}, false, 0, fmt.Errorf("read failure alert state: %w", err)
-	}
-	if st.Anchor, err = parseTime(anchor); err != nil {
 		return notify.AlertState{}, false, 0, fmt.Errorf("read failure alert state: %w", err)
 	}
 	st.Held = heldID.Valid
@@ -145,10 +142,10 @@ func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify
 // held run.failed's event id (NULL: none).
 func (t dialectTx) saveAlertState(ctx context.Context, orgID, chID, jobID int64, st notify.AlertState, held sql.NullInt64) error {
 	if _, err := t.exec(ctx, `INSERT INTO failure_alerts
-		(org_id, channel_id, job_id, last_sent_at, anchor_at, held_event_id) VALUES (?, ?, ?, ?, ?, ?)
+		(org_id, channel_id, job_id, last_sent_at, held_event_id) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT (channel_id, job_id) DO UPDATE SET
-			last_sent_at = excluded.last_sent_at, anchor_at = excluded.anchor_at, held_event_id = excluded.held_event_id`,
-		orgID, chID, jobID, nullTime(st.LastSentAt), nullTime(st.Anchor), held); err != nil {
+			last_sent_at = excluded.last_sent_at, held_event_id = excluded.held_event_id`,
+		orgID, chID, jobID, nullTime(st.LastSentAt), held); err != nil {
 		return fmt.Errorf("keep failure alert state: %w", err)
 	}
 	return nil
