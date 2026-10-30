@@ -203,7 +203,7 @@ notifications:
 
   rules:
     # Send failures, their all-clear, and every heartbeat transition to
-    # Slack. A failing job alerts once, then reminds once an hour while it
+    # Slack. A failing job alerts once, then reminds about hourly while it
     # keeps failing (the default for chat channels; a webhook gets every
     # failure), and its recovery says what it ended. `repeat` sets that
     # interval for this rule's run.failed: a duration from 1m to 168h, or

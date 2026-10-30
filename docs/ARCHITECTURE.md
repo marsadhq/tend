@@ -340,34 +340,34 @@ same channel produce a single delivery.
 (`jobs.Streak`: the runs in a row that did not succeed, and when the first
 of them was recorded) is kept on its row (`failed_runs`, `failing_since`;
 migration 0014, and 0015, which works it out from the stored runs of a job
-failing at the upgrade) and written by the event insert itself
+failing at the upgrade, in one pass) and written by the event insert itself
 (`dialectTx.recordEvent`, `streak.go`): each `run.failed` extends it (or
 starts a new one when the job's previous finished run succeeded, so a streak
 that missed a success, recorded by an older Tend after a rollback, does not
 run on) and records it in its `Detail`, the `run.recovered` that ends it
-records the streak it ended, and any success clears it (`FinishRunAndEmit`). The enqueue
-then applies `notify.Pacing` to each matched channel (`pacing.go`), with the
-most frequent interval of the channel's matching rules (`Rule.Repeat`,
-`notify.EffectiveRepeat`: by default an hour for the channels people read
-and every failure for a webhook, whose receiver paces alerts itself):
-`notify.PaceFailure` decides whether a `run.failed` goes out (the first of a
-streak, or the first failure on each interval mark after it), and
-`notify.PaceRecovery` whether a `run.recovered` does (where one of the
-streak's failures went, and wherever the job's failures are not routed). What each channel was told about each job
-(`notify.AlertState`: when it was last sent a failure, when the alert that
-told it of the streak went, from which its reminder marks are counted, and a
-held failure) is kept in `failure_alerts` (migration 0017) in the same
-transaction, and goes with its job and its channel. A failure that starts a
-new streak within the hold of the channel's last alert (a flap; the interval,
-but at most an hour) is held rather than sent: `ReleaseHeldAlerts`, which
-the delivery worker's queue calls before each claim, queues it once the hold
-has ended and the job is still failing; a success drops it, and pruning keeps
-its event. On Postgres the
+records the streak it ended, and any success clears it (`FinishRunAndEmit`).
+The enqueue then applies `notify.Pacing` to each matched channel
+(`pacing.go`), with the most frequent interval of the channel's matching
+rules (`Rule.Repeat`, `notify.EffectiveRepeat`: by default an hour for the
+channels people read and every failure for a webhook, whose receiver paces
+alerts itself). `notify.PaceFailure` decides whether a `run.failed` goes out:
+the first of a streak, or a reminder, the first failure at least the
+interval (less a minute of slack) after the channel's last alert.
+`notify.PaceRecovery` decides whether a `run.recovered` does: where one of
+the streak's failures went, and wherever the job's failures are not routed.
+What each channel was told about each job (`notify.AlertState`: when it was
+last sent a failure, and a held failure) is kept in `failure_alerts`
+(migration 0017) in the same transaction, and goes with its job and its
+channel. A failure that starts a new streak within the hold of the channel's
+last alert (a flap; the interval, but at most an hour) is held rather than
+sent: `ReleaseHeldAlerts`, which the delivery worker's queue calls before
+each claim, queues it once the hold has ended and the job is still failing;
+a success drops it, and pruning keeps its event. On Postgres the
 transactions about one job (a run finishing, a held alert's release, the
 job's deletion) take its rows in one order, its runs, then the job, then its
 `failure_alerts` rows, so they wait for each other instead of deadlocking;
-SQLite runs one write transaction at a time. Events are recorded as
-before, and the webhook bodies of the deliveries that go out are unchanged.
+SQLite runs one write transaction at a time. Events are recorded as before,
+and the webhook bodies of the deliveries that go out are unchanged.
 
 **Only alertable events enqueue.** Only the `alertable` set (`run.failed`,
 `run.recovered`, `heartbeat.missed`, `heartbeat.recovered`, `job.removed`,

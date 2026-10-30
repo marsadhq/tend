@@ -94,12 +94,13 @@ func TestPacingTheIncident(t *testing.T) {
 }
 
 // TestPacingAJobAsFrequentAsTheInterval: a job that runs exactly as often as
-// the interval, whose runs end a little earlier or later each time, reminds
-// on every failure rather than every other one.
+// the interval, whose runs end a little earlier or later each time (by less
+// than the minute of slack from one run to the next), reminds on every
+// failure rather than every other one.
 func TestPacingAJobAsFrequentAsTheInterval(t *testing.T) {
 	c := &channelSim{repeat: time.Hour}
 	for i := range 10 {
-		jitter := time.Duration([]int{0, -40, 30, -55, 10, -20, 50, -5, 25, -45}[i]) * time.Second
+		jitter := time.Duration([]int{0, -25, 20, -28, 10, -20, 25, -5, 15, -28}[i]) * time.Second
 		c.fail(paceT0.Add(time.Duration(i)*time.Hour + jitter))
 	}
 	if len(c.failed) != 10 {
@@ -241,8 +242,14 @@ func TestPacingEveryFailure(t *testing.T) {
 // failure at once.
 func TestPacingAChannelThatJoinsMidStreak(t *testing.T) {
 	send, next := PaceFailure(AlertState{}, false, paceT0.Add(2*time.Hour), paceT0, time.Hour)
-	if !send || !next.nextReminder(time.Hour).Equal(paceT0.Add(3*time.Hour)) || !next.Told(paceT0) {
+	if !send || !next.LastSentAt.Equal(paceT0.Add(2*time.Hour)) || !next.Told(paceT0) {
 		t.Fatalf("PaceFailure for a new channel = %v, %+v", send, next)
+	}
+	if send, _ := PaceFailure(next, true, paceT0.Add(2*time.Hour+58*time.Minute), paceT0, time.Hour); send {
+		t.Error("a reminder 58 minutes after the alert was sent")
+	}
+	if send, _ := PaceFailure(next, true, paceT0.Add(2*time.Hour+59*time.Minute), paceT0, time.Hour); !send {
+		t.Error("a reminder 59 minutes after the alert was not sent")
 	}
 }
 
@@ -328,30 +335,40 @@ func TestPacingAShorterIntervalAppliesAtOnce(t *testing.T) {
 	}
 }
 
-// TestPacingRemindersDoNotDrift: a reminder sent just before its mark (within
-// the minute's slack) does not pull the next mark earlier: over a day of a
-// job that runs hourly, each run ending 40 seconds earlier than the last,
-// the reminders stay on the marks of the first alert.
+// TestPacingRemindersDoNotDrift: reminders are counted from the last alert,
+// so they keep pace with the runs. A job that runs hourly, every other run
+// ending 40 seconds early, reminds on all 24 failures of a day; one whose runs
+// end up to 40 seconds early or late at random reminds with gaps never under
+// the interval less the minute of slack, and never as long as the interval
+// plus the job's period.
 func TestPacingRemindersDoNotDrift(t *testing.T) {
-	var st AlertState
-	known := false
+	c := &channelSim{repeat: time.Hour}
 	for i := range 24 {
-		at := paceT0.Add(time.Duration(i)*time.Hour - time.Duration(i%2)*40*time.Second)
-		send, next := PaceFailure(st, known, at, paceT0, time.Hour)
-		if !send {
-			t.Fatalf("hourly failure %d at %v not sent", i, at)
+		c.fail(paceT0.Add(time.Duration(i)*time.Hour - time.Duration(i%2)*40*time.Second))
+	}
+	if len(c.failed) != 24 {
+		t.Fatalf("sent %d of 24 hourly failures", len(c.failed))
+	}
+
+	r := &channelSim{repeat: time.Hour}
+	for i := range 48 {
+		jitter := time.Duration((i*7919+13)%81-40) * time.Second // -40s..+40s
+		r.fail(paceT0.Add(time.Duration(i)*time.Hour + jitter))
+	}
+	for i := 1; i < len(r.failed); i++ {
+		if gap := r.failed[i].Sub(r.failed[i-1]); gap < time.Hour-time.Minute || gap >= 2*time.Hour {
+			t.Errorf("reminders %d and %d are %v apart", i-1, i, gap)
 		}
-		if want := paceT0.Add(time.Duration(i+1) * time.Hour); !next.nextReminder(time.Hour).Equal(want) {
-			t.Fatalf("after failure %d the mark is %v, want %v", i, next.nextReminder(time.Hour), want)
-		}
-		st, known = next, true
+	}
+	if len(r.failed) < 40 {
+		t.Errorf("48 hourly failures sent %d alerts", len(r.failed))
 	}
 }
 
-// TestPacingRemindsAtMostOncePerInterval: a reminder is never sent less than
-// an interval (less its minute of slack) after the last alert. A reminder
-// that went out late moves the next one to the mark after; it is not
-// followed by another a moment later at the mark it came close to.
+// TestPacingRemindsAtMostOncePerInterval: a reminder is the first failure at
+// least the interval, less its minute of slack, after the last alert: never
+// sooner, and never as late as the interval plus the job's period. A
+// reminder that went out late is not followed by another a moment later.
 func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -359,7 +376,7 @@ func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
 		want   []time.Duration // sent, after the first failure
 	}{
 		{"a job every 50 minutes", 50 * time.Minute, []time.Duration{0, 100, 200, 300, 400, 500, 600}},
-		{"a job every 35 minutes", 35 * time.Minute, []time.Duration{0, 70, 210, 315, 420, 490}},
+		{"a job every 35 minutes", 35 * time.Minute, []time.Duration{0, 70, 140, 210, 280, 350, 420, 490, 560}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &channelSim{repeat: time.Hour}
@@ -373,8 +390,11 @@ func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
 				if want := paceT0.Add(w * time.Minute); !c.failed[i].Equal(want) {
 					t.Errorf("alert %d at %v, want %v", i, c.failed[i], want)
 				}
-				if i > 0 && c.failed[i].Sub(c.failed[i-1]) < time.Hour-time.Minute {
-					t.Errorf("alerts %d and %d are %v apart", i-1, i, c.failed[i].Sub(c.failed[i-1]))
+				if i == 0 {
+					continue
+				}
+				if gap := c.failed[i].Sub(c.failed[i-1]); gap < time.Hour-time.Minute || gap >= time.Hour+tc.period {
+					t.Errorf("alerts %d and %d are %v apart", i-1, i, gap)
 				}
 			}
 		})
@@ -382,8 +402,8 @@ func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
 
 	c := &channelSim{repeat: time.Hour}
 	c.fail(paceT0)
-	c.fail(paceT0.Add(118*time.Minute + 30*time.Second)) // late for the 1h mark: a reminder
-	c.fail(paceT0.Add(2 * time.Hour))                    // 90 seconds later, at the 2h mark
+	c.fail(paceT0.Add(118*time.Minute + 30*time.Second)) // a late run: a reminder
+	c.fail(paceT0.Add(2 * time.Hour))                    // a retry 90 seconds later: not one
 	c.fail(paceT0.Add(3 * time.Hour))
 	want := []time.Time{paceT0, paceT0.Add(118*time.Minute + 30*time.Second), paceT0.Add(3 * time.Hour)}
 	if len(c.failed) != len(want) {
