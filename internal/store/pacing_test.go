@@ -294,10 +294,9 @@ func TestPacingSendsTheFirstFailureAndHourlyReminders(t *testing.T) {
 }
 
 // TestPacingResetsOnSuccess: once a job has succeeded, its next failure is a
-// new streak and is sent at once, however soon after its last alert, if the
-// recovery was the channel's last word on it... unless it is within the
-// interval of the last failure alert (see TestPacingAFlappingJob). Here it
-// fails again two hours later: sent at once, reminders an hour after that.
+// new streak, sent at once unless it comes within the hold of the last
+// failure alert (see TestPacingAFlappingJob). Here it fails again two hours
+// later: sent at once, reminders an hour after that.
 func TestPacingResetsOnSuccess(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, s store.Store) {
 		p := newPacing(t, s)
@@ -366,7 +365,7 @@ func TestPacingAFlappingJob(t *testing.T) {
 // TestPacingReleasesAHeldFailure: a job that recovers and fails again soon
 // after its alert, and then runs only rarely (a daily job run by hand), is
 // not left looking healthy: its failure is held and sent by the worker's
-// poll once the interval since the alert ends, its reminders count from
+// poll once the hold since the alert ends, its reminders count from
 // then, and its recovery is sent. A held failure whose job recovers first is
 // never sent, nor is that recovery.
 func TestPacingReleasesAHeldFailure(t *testing.T) {
@@ -617,16 +616,15 @@ func TestPacingFollowsARuleChange(t *testing.T) {
 		}
 
 		// A failure held under a long interval is released an hour after the
-		// alert once the rule says an hour.
+		// alert: the hold is never longer than an hour.
 		p.succeed(streakT0.Add(65 * time.Minute))
-		slack := p.channel("ops-slack", kitnotify.Slack, dur(4*time.Hour), jobs.EventRunFailed, jobs.EventRunRecovered)
+		p.channel("ops-slack", kitnotify.Slack, dur(4*time.Hour), jobs.EventRunFailed, jobs.EventRunRecovered)
 		p.fail(streakT0.Add(3 * time.Hour))
 		p.succeed(streakT0.Add(3*time.Hour + 5*time.Minute))
-		p.fail(streakT0.Add(3*time.Hour + 10*time.Minute)) // held on both: telegram until 4h, slack until 7h
+		p.fail(streakT0.Add(3*time.Hour + 10*time.Minute)) // held on both until 4h
 		p.sent()
-		p.rule(slack, jobs.EventRunFailed, 0, dur(time.Hour))
 		if n := p.release(streakT0.Add(3*time.Hour + 59*time.Minute + 30*time.Second)); n != 2 {
-			t.Fatalf("released %d at 4h, want both: telegram's mark, and slack's an hour after its alert under the shortened rule", n)
+			t.Fatalf("released %d at 4h, want both, an hour after their alert (slack's 4h rule included)", n)
 		}
 	})
 }
@@ -657,4 +655,21 @@ func TestPacingDropsAHeldFailureWhoseJobSucceeded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPacingHoldsAFlapForAtMostAnHour: with a daily reminder, a job that
+// fails again soon after it recovered is announced an hour after the last
+// alert by the worker's poll.
+func TestPacingHoldsAFlapForAtMostAnHour(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, s store.Store) {
+		p := newPacing(t, s)
+		p.channel("ops-email", kitnotify.SMTP, dur(24*time.Hour), jobs.EventRunFailed, jobs.EventRunRecovered)
+		p.fail(streakT0)
+		p.succeed(streakT0.Add(5 * time.Minute))
+		p.fail(streakT0.Add(10 * time.Minute))
+		p.sent()
+		if n := p.release(streakT0.Add(time.Hour)); n != 1 {
+			t.Fatalf("released %d an hour after the alert, want the held failure", n)
+		}
+	})
 }

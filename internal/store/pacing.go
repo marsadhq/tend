@@ -171,8 +171,8 @@ type heldCandidate struct {
 	kind                             kitnotify.ChannelType
 }
 
-// releaseHeld queues, for both backends, the held failures whose interval
-// has ended at now (notify.ReleaseDue, under the channel's rules as they are
+// releaseHeld queues, for both backends, the held failures whose hold has
+// ended at now (notify.ReleaseDue, under the channel's rules as they are
 // now): the job is still failing and the channel still routes its
 // run.failed. Each is its own transaction, which takes the job's row lock
 // before it writes the job's alert state. A held failure whose job recovered
@@ -340,14 +340,14 @@ func (t dialectTx) failedRepeat(ctx context.Context, orgID, chID, jobID int64, k
 	return repeat, routed, nil
 }
 
-// ReleaseHeldAlerts queues the held failure alerts whose interval has ended
-// at now (see releaseHeld). The delivery worker calls it before each claim.
+// ReleaseHeldAlerts queues the held failure alerts whose hold has ended at
+// now (see releaseHeld). The delivery worker calls it before each claim.
 func (s *SQLiteStore) ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error) {
 	return releaseHeld(ctx, s.db, dialectSQLite, now)
 }
 
-// ReleaseHeldAlerts queues the held failure alerts whose interval has ended
-// at now (see releaseHeld). The delivery worker calls it before each claim.
+// ReleaseHeldAlerts queues the held failure alerts whose hold has ended at
+// now (see releaseHeld). The delivery worker calls it before each claim.
 func (s *PostgresStore) ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error) {
 	return releaseHeld(ctx, s.db, dialectPostgres, now)
 }

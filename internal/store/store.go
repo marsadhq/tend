@@ -171,10 +171,10 @@ type Store interface {
 	// claim/lease semantics.
 	ClaimDueDeliveries(ctx context.Context, now time.Time, lease, hold time.Duration, limit int) ([]notify.Delivery, error)
 	// ReleaseHeldAlerts queues the failure alerts held back for a job that
-	// failed again soon after a channel's last alert about it, once that
-	// channel's interval has ended at now and the job is still failing
-	// (notify.Pacing); it returns how many it queued. The delivery worker
-	// calls it before each claim.
+	// failed again soon after a channel's last alert about it, once the hold
+	// has ended at now and the job is still failing (notify.Pacing); it
+	// returns how many it queued. The delivery worker calls it before each
+	// claim.
 	ReleaseHeldAlerts(ctx context.Context, now time.Time) (int, error)
 	MarkDeliveryDelivered(ctx context.Context, id int64) error
 	RescheduleDelivery(ctx context.Context, id int64, nextAttemptAt time.Time) error

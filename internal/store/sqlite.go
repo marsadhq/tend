@@ -1404,7 +1404,7 @@ func (s *SQLiteStore) FailDeliveryAndEmit(ctx context.Context, id int64, ev core
 // PruneEvents hard-deletes events created strictly before the cutoff, except
 // events still referenced by a pending delivery (the notify worker joins the
 // event when it claims the row; pruning it would orphan the queue entry) and
-// held failure alerts, which are queued when their interval ends. Returns
+// held failure alerts, which are queued when their hold ends. Returns
 // rows deleted.
 func (s *SQLiteStore) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM events

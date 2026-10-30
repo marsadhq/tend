@@ -410,7 +410,7 @@ func TestWorkerRejectedFailureReportIsNotReported(t *testing.T) {
 }
 
 // TestWorkerReleasesHeldAlertsBeforeEachClaim: the worker's poll is what
-// sends a held failure alert once its interval ends (see Pacing), so every
+// sends a held failure alert once its hold ends (see Pacing), so every
 // claim first asks the store to queue the ones that are due, at the
 // worker's time.
 func TestWorkerReleasesHeldAlertsBeforeEachClaim(t *testing.T) {

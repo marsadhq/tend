@@ -18,11 +18,13 @@ import (
 // channel and job.
 //
 //   - The first failure is sent unless the channel was sent one of the job's
-//     failures less than an interval ago (the job recovered and failed again
-//     soon after): then it is held, and sent when that interval ends if the
-//     job is still failing (ReleaseDue), so a flapping job sends at most one
-//     failure and one recovery per interval and a failing one is never left
-//     unannounced for longer than that.
+//     failures less than its hold ago (the job recovered and failed again
+//     soon after): then it is held, and sent when the hold ends if the job is
+//     still failing (ReleaseDue). The hold is the interval, but at most an
+//     hour (flapHold), so a long interval (a daily reminder) does not keep a
+//     new outage quiet for a day; a flapping job sends at most one failure
+//     and one recovery per hold, and a failing one is never left unannounced
+//     for longer than it.
 //   - The reminders fall on the interval marks after the alert that told the
 //     channel of the streak (its anchor): each is the first failure at or
 //     after its mark, or up to a minute (a tenth of a shorter interval)
@@ -134,6 +136,14 @@ func (s AlertState) nextReminder(repeat time.Duration) time.Time {
 	return anchor.Add(max(k, 1) * repeat)
 }
 
+// flapHold is how long after a channel's last failure alert a failure that
+// starts a new streak is held: the interval, but at most DefaultRepeat. The
+// interval spaces reminders about one outage; a new outage is news, and an
+// hour is as long as a flap is held back on a channel with the default.
+func flapHold(repeat time.Duration) time.Duration {
+	return min(repeat, DefaultRepeat)
+}
+
 // slack is how much earlier than a reminder mark a failure still counts as
 // reaching it: a minute, or a tenth of an interval shorter than 10 minutes.
 func slack(repeat time.Duration) time.Duration {
@@ -165,7 +175,7 @@ func PaceFailure(st AlertState, known bool, at, since time.Time, repeat time.Dur
 			return false, st
 		}
 		return true, AlertState{LastSentAt: at, Anchor: st.Anchor}
-	case known && !reached(at, st.LastSentAt.Add(repeat), repeat):
+	case known && !reached(at, st.LastSentAt.Add(flapHold(repeat)), flapHold(repeat)):
 		// A new streak soon after the last alert: held.
 		st.Held = true
 		return false, st
@@ -186,9 +196,10 @@ func PaceRecovery(st AlertState, known bool, since time.Time) bool {
 }
 
 // ReleaseDue reports whether a held failure (st.Held) is to be sent at now:
-// the interval since the channel's last failure alert has ended.
+// the hold since the channel's last failure alert (flapHold) has ended.
 func ReleaseDue(st AlertState, now time.Time, repeat time.Duration) bool {
-	return st.Held && (repeat <= 0 || reached(now, st.LastSentAt.Add(repeat), repeat))
+	hold := flapHold(repeat)
+	return st.Held && (repeat <= 0 || reached(now, st.LastSentAt.Add(hold), hold))
 }
 
 // Released is the state a channel is left in when its held failure is sent
