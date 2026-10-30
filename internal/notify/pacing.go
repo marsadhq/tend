@@ -24,10 +24,14 @@ import (
 //     failure and one recovery per interval and a failing one is never left
 //     unannounced for longer than that.
 //   - The reminders fall on the interval marks after the alert that told the
-//     channel of the streak: each is the first failure at or after its mark,
-//     or up to a minute (a tenth of a shorter interval) before it, so a job
-//     that runs exactly as often as the interval reminds on every failure
-//     although its runs end a little earlier or later each time.
+//     channel of the streak (its anchor): each is the first failure at or
+//     after its mark, or up to a minute (a tenth of a shorter interval)
+//     before it, so a job that runs exactly as often as the interval reminds
+//     on every failure although its runs end a little earlier or later each
+//     time. Two are never less than an interval (less that slack) apart: a
+//     reminder that went out late moves the next one to the mark after. The
+//     marks are counted from the anchor with the rule's interval as it is
+//     now, so a changed interval applies from the next failure.
 //   - An interval of 0 sends every failure, as Tend always did.
 
 // DefaultRepeat is the reminder interval of a rule that sets none, on a
@@ -102,12 +106,12 @@ type AlertState struct {
 	// LastSentAt is when the channel was last sent one of the job's
 	// failures (zero: never).
 	LastSentAt time.Time
-	// NextAt is the reminder mark: the next failure is sent once it is
-	// reached (give or take slack), or an interval after LastSentAt if the
-	// interval has been shortened to make that sooner.
-	NextAt time.Time
+	// Anchor is when the alert that told the channel of the current streak
+	// (or the last one it was told of) was sent: its reminder marks are an
+	// interval apart from it.
+	Anchor time.Time
 	// Held says a failure of the current streak, which the channel has not
-	// heard of, waits for NextAt (ReleaseDue).
+	// heard of, waits for its interval to end (ReleaseDue).
 	Held bool
 }
 
@@ -117,15 +121,17 @@ func (s AlertState) Told(since time.Time) bool {
 	return !s.LastSentAt.IsZero() && !s.LastSentAt.Before(since)
 }
 
-// mark is the reminder mark st waits for under repeat: the one it keeps,
-// unless that is further from the last alert than an interval (and its
-// slack) allows, because the rule's interval was shortened since the mark
-// was set; then an interval after the last alert.
-func (s AlertState) mark(repeat time.Duration) time.Time {
-	if repeat > 0 && !s.LastSentAt.IsZero() && s.NextAt.Sub(s.LastSentAt) > repeat+slack(repeat) {
-		return s.LastSentAt.Add(repeat)
+// nextReminder is the mark the next reminder waits for under repeat: the
+// first mark after the anchor, an interval apart, that is at least an
+// interval (less slack) after the last alert.
+func (s AlertState) nextReminder(repeat time.Duration) time.Time {
+	anchor := s.Anchor
+	if anchor.IsZero() || anchor.After(s.LastSentAt) {
+		anchor = s.LastSentAt
 	}
-	return s.NextAt
+	earliest := s.LastSentAt.Add(repeat - slack(repeat))
+	k := (earliest.Sub(anchor) + repeat - 1) / repeat
+	return anchor.Add(max(k, 1) * repeat)
 }
 
 // slack is how much earlier than a reminder mark a failure still counts as
@@ -145,21 +151,28 @@ func reached(at, mark time.Time, repeat time.Duration) bool {
 // state that leaves.
 func PaceFailure(st AlertState, known bool, at, since time.Time, repeat time.Duration) (send bool, next AlertState) {
 	told := known && st.Told(since)
-	if repeat <= 0 {
-		return true, AlertState{LastSentAt: at, NextAt: at}
-	}
-	mark := st.mark(repeat)
-	if known && !reached(at, mark, repeat) {
-		st.Held = !told
+	switch {
+	case repeat <= 0:
+		next = AlertState{LastSentAt: at, Anchor: at}
+		if told {
+			next.Anchor = st.Anchor
+		}
+		return true, next
+	case told:
+		// A reminder, on its mark.
+		if !reached(at, st.nextReminder(repeat), repeat) {
+			st.Held = false
+			return false, st
+		}
+		return true, AlertState{LastSentAt: at, Anchor: st.Anchor}
+	case known && !reached(at, st.LastSentAt.Add(repeat), repeat):
+		// A new streak soon after the last alert: held.
+		st.Held = true
 		return false, st
+	default:
+		// The first alert of the streak for this channel.
+		return true, AlertState{LastSentAt: at, Anchor: at}
 	}
-	next = AlertState{LastSentAt: at, NextAt: at.Add(repeat)}
-	if told && !mark.IsZero() {
-		// The first mark on the streak's grid that this failure did not reach.
-		k := at.Sub(mark.Add(-slack(repeat)))/repeat + 1
-		next.NextAt = mark.Add(k * repeat)
-	}
-	return true, next
 }
 
 // PaceRecovery reports whether the run.recovered that ends a streak begun at
@@ -175,11 +188,11 @@ func PaceRecovery(st AlertState, known bool, since time.Time) bool {
 // ReleaseDue reports whether a held failure (st.Held) is to be sent at now:
 // the interval since the channel's last failure alert has ended.
 func ReleaseDue(st AlertState, now time.Time, repeat time.Duration) bool {
-	return st.Held && (repeat <= 0 || reached(now, st.mark(repeat), repeat))
+	return st.Held && (repeat <= 0 || reached(now, st.LastSentAt.Add(repeat), repeat))
 }
 
 // Released is the state a channel is left in when its held failure is sent
 // at now: told of the streak, its reminders an interval apart from now.
-func Released(now time.Time, repeat time.Duration) AlertState {
-	return AlertState{LastSentAt: now, NextAt: now.Add(repeat)}
+func Released(now time.Time) AlertState {
+	return AlertState{LastSentAt: now, Anchor: now}
 }

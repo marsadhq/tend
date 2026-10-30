@@ -112,10 +112,10 @@ func (t dialectTx) paced(ctx context.Context, e core.Event, jobID int64, streak 
 // alertState reads what channel chID was told about job jobID's failures;
 // known is false when nothing is kept yet.
 func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify.AlertState, known bool, held int64, err error) {
-	var last, next sql.NullString
+	var last, anchor sql.NullString
 	var heldID sql.NullInt64
-	err = t.queryRow(ctx, `SELECT last_sent_at, next_at, held_event_id FROM failure_alerts
-		WHERE channel_id = ? AND job_id = ?`, chID, jobID).Scan(&last, &next, &heldID)
+	err = t.queryRow(ctx, `SELECT last_sent_at, anchor_at, held_event_id FROM failure_alerts
+		WHERE channel_id = ? AND job_id = ?`, chID, jobID).Scan(&last, &anchor, &heldID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return notify.AlertState{}, false, 0, nil
 	}
@@ -125,7 +125,7 @@ func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify
 	if st.LastSentAt, err = parseTime(last); err != nil {
 		return notify.AlertState{}, false, 0, fmt.Errorf("read failure alert state: %w", err)
 	}
-	if st.NextAt, err = parseTime(next); err != nil {
+	if st.Anchor, err = parseTime(anchor); err != nil {
 		return notify.AlertState{}, false, 0, fmt.Errorf("read failure alert state: %w", err)
 	}
 	st.Held = heldID.Valid
@@ -136,10 +136,10 @@ func (t dialectTx) alertState(ctx context.Context, chID, jobID int64) (st notify
 // held run.failed's event id (NULL: none).
 func (t dialectTx) saveAlertState(ctx context.Context, orgID, chID, jobID int64, st notify.AlertState, held sql.NullInt64) error {
 	if _, err := t.exec(ctx, `INSERT INTO failure_alerts
-		(org_id, channel_id, job_id, last_sent_at, next_at, held_event_id) VALUES (?, ?, ?, ?, ?, ?)
+		(org_id, channel_id, job_id, last_sent_at, anchor_at, held_event_id) VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (channel_id, job_id) DO UPDATE SET
-			last_sent_at = excluded.last_sent_at, next_at = excluded.next_at, held_event_id = excluded.held_event_id`,
-		orgID, chID, jobID, nullTime(st.LastSentAt), nullTime(st.NextAt), held); err != nil {
+			last_sent_at = excluded.last_sent_at, anchor_at = excluded.anchor_at, held_event_id = excluded.held_event_id`,
+		orgID, chID, jobID, nullTime(st.LastSentAt), nullTime(st.Anchor), held); err != nil {
 		return fmt.Errorf("keep failure alert state: %w", err)
 	}
 	return nil
@@ -185,7 +185,7 @@ func releaseHeld(ctx context.Context, db *sql.DB, d dialect, now time.Time) (int
 	rows, err := db.QueryContext(ctx, `SELECT fa.org_id, fa.channel_id, fa.job_id, fa.held_event_id, c.kind
 		FROM failure_alerts fa JOIN notification_channels c ON c.id = fa.channel_id AND c.org_id = fa.org_id
 		WHERE fa.held_event_id IS NOT NULL
-		ORDER BY fa.next_at, fa.channel_id, fa.job_id`)
+		ORDER BY fa.last_sent_at, fa.channel_id, fa.job_id`)
 	if err != nil {
 		return 0, fmt.Errorf("release held alerts: %w", err)
 	}
@@ -296,7 +296,7 @@ func releaseOne(ctx context.Context, db *sql.DB, d dialect, c heldCandidate, now
 	if err != nil {
 		return false, fmt.Errorf("release held alert: event: %w", err)
 	}
-	if err := t.saveAlertState(ctx, c.orgID, c.channelID, c.jobID, notify.Released(now, repeat), sql.NullInt64{}); err != nil {
+	if err := t.saveAlertState(ctx, c.orgID, c.channelID, c.jobID, notify.Released(now), sql.NullInt64{}); err != nil {
 		return false, err
 	}
 	if err := t.insertDelivery(ctx, c.orgID, c.eventID, c.channelID); err != nil {

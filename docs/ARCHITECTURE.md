@@ -354,7 +354,8 @@ and every failure for a webhook, whose receiver paces alerts itself):
 streak, or the first failure on each interval mark after it), and
 `notify.PaceRecovery` whether a `run.recovered` does (only where one of the
 streak's failures went). What each channel was told about each job
-(`notify.AlertState`: when it was last sent a failure, the next mark, and a
+(`notify.AlertState`: when it was last sent a failure, when the alert that
+told it of the streak went, from which its reminder marks are counted, and a
 held failure) is kept in `failure_alerts` (migration 0017) in the same
 transaction, and goes with its job and its channel. A failure that comes
 within the interval of the channel's last alert after a recovery (a flap) is
