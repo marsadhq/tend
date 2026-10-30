@@ -48,7 +48,7 @@ func (c *channelSim) succeed(at time.Time) {
 func (c *channelSim) tick(now time.Time) {
 	if c.known && ReleaseDue(c.st, now, c.repeat) {
 		c.failed = append(c.failed, now)
-		c.st = Released(now, c.repeat)
+		c.st = Released(now)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestPacingEveryFailure(t *testing.T) {
 // failure at once.
 func TestPacingAChannelThatJoinsMidStreak(t *testing.T) {
 	send, next := PaceFailure(AlertState{}, false, paceT0.Add(2*time.Hour), paceT0, time.Hour)
-	if !send || !next.NextAt.Equal(paceT0.Add(3*time.Hour)) || !next.Told(paceT0) {
+	if !send || !next.nextReminder(time.Hour).Equal(paceT0.Add(3*time.Hour)) || !next.Told(paceT0) {
 		t.Fatalf("PaceFailure for a new channel = %v, %+v", send, next)
 	}
 }
@@ -341,9 +341,52 @@ func TestPacingRemindersDoNotDrift(t *testing.T) {
 		if !send {
 			t.Fatalf("hourly failure %d at %v not sent", i, at)
 		}
-		if want := paceT0.Add(time.Duration(i+1) * time.Hour); !next.NextAt.Equal(want) {
-			t.Fatalf("after failure %d the mark is %v, want %v", i, next.NextAt, want)
+		if want := paceT0.Add(time.Duration(i+1) * time.Hour); !next.nextReminder(time.Hour).Equal(want) {
+			t.Fatalf("after failure %d the mark is %v, want %v", i, next.nextReminder(time.Hour), want)
 		}
 		st, known = next, true
+	}
+}
+
+// TestPacingRemindsAtMostOncePerInterval: a reminder is never sent less than
+// an interval (less its minute of slack) after the last alert. A reminder
+// that went out late moves the next one to the mark after; it is not
+// followed by another a moment later at the mark it came close to.
+func TestPacingRemindsAtMostOncePerInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		period time.Duration
+		want   []time.Duration // sent, after the first failure
+	}{
+		{"a job every 50 minutes", 50 * time.Minute, []time.Duration{0, 100, 200, 300, 400, 500, 600}},
+		{"a job every 35 minutes", 35 * time.Minute, []time.Duration{0, 70, 210, 315, 420, 490}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &channelSim{repeat: time.Hour}
+			for at := time.Duration(0); at <= 10*time.Hour; at += tc.period {
+				c.fail(paceT0.Add(at))
+			}
+			if len(c.failed) != len(tc.want) {
+				t.Fatalf("sent %d (%v), want %d", len(c.failed), c.failed, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if want := paceT0.Add(w * time.Minute); !c.failed[i].Equal(want) {
+					t.Errorf("alert %d at %v, want %v", i, c.failed[i], want)
+				}
+				if i > 0 && c.failed[i].Sub(c.failed[i-1]) < time.Hour-time.Minute {
+					t.Errorf("alerts %d and %d are %v apart", i-1, i, c.failed[i].Sub(c.failed[i-1]))
+				}
+			}
+		})
+	}
+
+	c := &channelSim{repeat: time.Hour}
+	c.fail(paceT0)
+	c.fail(paceT0.Add(118*time.Minute + 30*time.Second)) // late for the 1h mark: a reminder
+	c.fail(paceT0.Add(2 * time.Hour))                    // 90 seconds later, at the 2h mark
+	c.fail(paceT0.Add(3 * time.Hour))
+	want := []time.Time{paceT0, paceT0.Add(118*time.Minute + 30*time.Second), paceT0.Add(3 * time.Hour)}
+	if len(c.failed) != len(want) {
+		t.Fatalf("sent %v, want %v", c.failed, want)
 	}
 }
