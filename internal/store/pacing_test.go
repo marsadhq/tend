@@ -673,3 +673,45 @@ func TestPacingHoldsAFlapForAtMostAnHour(t *testing.T) {
 		}
 	})
 }
+
+// TestPacingRecoveryWhereFailuresNoLongerGo: a channel that no longer routes
+// a job's run.failed (its rule deleted or disabled) but still routes
+// run.recovered hears every recovery, as one that never routed failures
+// does, whatever it was told before.
+func TestPacingRecoveryWhereFailuresNoLongerGo(t *testing.T) {
+	for _, how := range []string{"deleted", "disabled"} {
+		t.Run(how, func(t *testing.T) {
+			forEachBackend(t, func(t *testing.T, s store.Store) {
+				p := newPacing(t, s)
+				p.channel("ops-telegram", kitnotify.Telegram, nil, jobs.EventRunFailed, jobs.EventRunRecovered)
+				p.fail(streakT0)
+				p.succeed(streakT0.Add(5 * time.Minute))
+				p.sent()
+				rules, err := s.ListRules(p.ctx, p.org)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, r := range rules {
+					if r.EventType != jobs.EventRunFailed {
+						continue
+					}
+					if how == "deleted" {
+						err = s.DeleteRule(p.ctx, p.org, r.ID)
+					} else {
+						r.Enabled = false
+						_, err = s.CreateRule(p.ctx, r)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				p.fail(streakT0.Add(2 * time.Hour))
+				p.succeed(streakT0.Add(2*time.Hour + 5*time.Minute))
+				evs := p.sent()["ops-telegram"]
+				if len(evs) != 1 || evs[0].Type != jobs.EventRunRecovered {
+					t.Fatalf("sent %v, want the recovery alone", types(evs))
+				}
+			})
+		})
+	}
+}
