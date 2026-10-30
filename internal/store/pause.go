@@ -6,10 +6,11 @@ package store
 // is nil outside tests.
 var pauseAt func(point string)
 
-// Points pauseAt is called at.
+// Points pauseAt is called at: in FinishRunAndEmit once the run is
+// finished (its row locked), and in releaseOne once the job's row is locked.
 const (
-	pauseFinishRunLocked  = "finish: run row locked"  // FinishRunAndEmit, after the run is finished
-	pauseReleaseJobLocked = "release: job row locked" // releaseOne, after the job's row is locked
+	pauseFinishRunLocked  = "finish: run row locked"
+	pauseReleaseJobLocked = "release: job row locked"
 )
 
 func pause(point string) {

@@ -96,7 +96,8 @@ type ruleSpec struct {
 	Channel string   `yaml:"channel"`
 	Events  []string `yaml:"events"`
 	Job     string   `yaml:"job"`
-	Repeat  string   `yaml:"repeat"` // "every", 0 or a Go duration; "" for the default
+	// Repeat is "every", 0 or a Go duration; "" for the default.
+	Repeat string `yaml:"repeat"`
 }
 
 type hbSpec struct {
