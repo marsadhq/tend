@@ -163,9 +163,9 @@ dialects force it:
 - **Explicit transactional deletes.** Cascading deletes are done in an explicit
   transaction, not via FK cascade, so behavior is identical on both backends.
   `DeleteJob` removes a job's `job_runs` and its job-scoped
-  `notification_rules`, then the job row, in one transaction (preserving
-  all-jobs rules where `job_id = 0`); it returns `ErrNotFound` (rolling back)
-  when the job is absent.
+  `notification_rules`, then the job row, then its `failure_alerts` rows, in
+  one transaction (preserving all-jobs rules where `job_id = 0`); it returns
+  `ErrNotFound` (rolling back) when the job is absent.
 - **Atomic finish + emit.** `FinishRunAndEmit` writes the terminal run state and
   the terminal lifecycle event in a single transaction (see §4).
 - **Atomic emit + enqueue.** Every event insert, on both backends, goes
@@ -360,9 +360,11 @@ transaction, and goes with its job and its channel. A failure that comes
 within the interval of the channel's last alert after a recovery (a flap) is
 held rather than sent: `ReleaseHeldAlerts`, which the delivery worker's queue
 calls before each claim, queues it once the interval has ended and the job is
-still failing; a success drops it, and pruning keeps its event. The job's row
-lock, taken first, orders the transactions about one job's alerts on
-Postgres; SQLite runs one write transaction at a time. Events are recorded as
+still failing; a success drops it, and pruning keeps its event. On Postgres the
+transactions about one job (a run finishing, a held alert's release, the
+job's deletion) take its rows in one order, its runs, then the job, then its
+`failure_alerts` rows, so they wait for each other instead of deadlocking;
+SQLite runs one write transaction at a time. Events are recorded as
 before, and the webhook bodies of the deliveries that go out are unchanged.
 
 **Only alertable events enqueue.** Only the `alertable` set (`run.failed`,
